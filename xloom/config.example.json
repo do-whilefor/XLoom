@@ -1,0 +1,54 @@
+{
+  "model": "glm-main",
+  "models": {
+    "glm-main": {
+      "provider": "glm",
+      "api": "anthropic-messages",
+      "id": "glm-5.3-flash",
+      "apiKey": "<填写你的 API Key>",
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+      "thinking": "high",
+      "maxOutputTokens": 16384
+    },
+    "glm-standard": {
+      "provider": "glm",
+      "id": "glm-5.3-flash",
+      "apiKey": "<填写 GLM API Key>"
+    },
+    "kimi-main": {
+      "provider": "kimi",
+      "id": "kimi-k3",
+      "apiKey": "<填写 Kimi API Key>",
+      "contextWindow": "<填写已确认的上下文容量>",
+      "thinking": "high"
+    },
+    "deepseek-main": {
+      "provider": "deepseek",
+      "id": "deepseek-v4-flash",
+      "apiKey": "<填写 DeepSeek API Key>",
+      "thinking": "high"
+    },
+    "claude-main": {
+      "provider": "anthropic",
+      "id": "claude-sonnet-4-6",
+      "apiKey": "<填写 Anthropic API Key>",
+      "thinking": "high"
+    },
+    "codex-main": {
+      "provider": "openai",
+      "id": "gpt-5.4",
+      "apiKey": "<填写 OpenAI API Key>",
+      "thinking": "high"
+    }
+  },
+  "limits": {
+    "maxRunsPerCycle": 40,
+    "maxToolCallsPerRun": 50
+  },
+  "kali": {
+    "host": "192.168.1.100",
+    "port": 22,
+    "username": "kali",
+    "password": "<填写 Kali SSH 密码；不使用时删除 kali 段>"
+  }
+}

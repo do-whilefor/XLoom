@@ -1,0 +1,30 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local runtime data and credentials
+.xloom/
+.env
+.env.*
+auth.json
+credentials.json
+/logs/
+/xloom/logs/
+
+# Downloaded Pi executable bundle; reference source is kept separately
+/Pi源码/pi-linux-x64/
+
+# Existing backup archives and generated npm packages
+/xloom-before-*.tar.gz
+*.tgz
+
+# Local editor / OS temporary files
+.DS_Store
+*.swp
+*.swo
+*~

@@ -1,0 +1,26 @@
+import { createBashTool as createPiBashTool } from '../vendor/pi/coding-agent/core/tools/bash.js';
+
+/** Recognize only standalone, unambiguous placeholders, never parse arbitrary shell code.
+ * Redirections, substitutions, arguments and compound scripts retain their Pi semantics.
+ */
+export function isBashNoop(command: string): boolean {
+  const source = command.trim().replace(/;\s*$/, '').trim();
+  if (!source) return true;
+  if (/^(?:(?:builtin|command)\s+)?(?:(?:\/usr\/bin\/|\/bin\/)?true|:)$/.test(source)) return true;
+  if (/^(?:echo(?:\s+(?:''|""))?|printf\s+(?:''|""))$/.test(source)) return true;
+  const shell = /^(?:\/bin\/|\/usr\/bin\/)?(?:bash|sh)\s+-(?:c|lc)\s+(?:'([^']*)'|"([^"$`\\]*)"|(true|:))$/.exec(source);
+  return !!shell && /^(?:true|:)\s*;?$/.test((shell[1] ?? shell[2] ?? shell[3]).trim());
+}
+
+export function createBashTool(...args: Parameters<typeof createPiBashTool>): ReturnType<typeof createPiBashTool> {
+  const tool = createPiBashTool(...args);
+  return { ...tool, description: tool.description + '\n仅执行有实际用途的本机命令；true、空命令等占位会在启动 shell 前拒绝。收尾直接输出最终 xloom-update 文本。',
+    execute: (async (id, params, signal, onUpdate) => {
+      signal?.throwIfAborted();
+      if (isBashNoop(params.command)) {
+        throw Object.assign(new Error('未执行：这是无实际观察的 bash 占位命令，未启动本机 shell，也没有生成 Evidence。已有足够材料时，请直接在最终文本输出完整 xloom-update JSON 代码块；工具调用不能提交黑板。若仍缺观察，请选择符合用户范围且有实际用途的操作。'),
+          { details: { backend: 'local', status: 'not_executed', outcome: 'not_started', reasonCode: 'bash_noop' } });
+      }
+      return tool.execute(id, params, signal, onUpdate);
+    }) as typeof tool.execute };
+}
