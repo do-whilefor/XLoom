@@ -1,6 +1,6 @@
 # XLoom · M6
 
-XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告：一个 TUI、独立连续的 Probe / Proof、共享 Blackboard、串行调度，支持整个调查的恢复和按角色压缩上下文，并加入 Chrome / Kali 的固定六工具。沿用 **Pi v0.85.1**（`d981de1229ef899957bbe968bc8dcda02a21f477`），增加 **GLM / Kimi / DeepSeek / Anthropic / OpenAI** 配置及 **Chat Completions / Messages / Responses** 三种协议。模型配置见 [能力与思考映射](docs/models.md)。
+XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告：一个 TUI、独立连续的 Probe / Proof、共享 Blackboard、串行调度，支持整个调查的恢复和按角色压缩上下文，并加入 Chrome / Kali 的固定六工具。沿用 **Pi v0.85.1**（`d981de1229ef899957bbe968bc8dcda02a21f477`），增加 **GLM / Kimi / DeepSeek / Anthropic / OpenAI** 配置及 **Chat Completions / Messages / Responses** 三种协议。模型配置见下文。
 
 
 ## 首次安装
@@ -21,8 +21,6 @@ xloom
 AttackPath 表达少量状态连接。相关、支持或反驳解释均不等于可达连接；只有 `enables` 被当前版本的有效 Proof 检查覆盖后才显示已验证。部分连接成立保留缺口，不能当完整路径，也不会让内部候选自动升级。事实纠正和路径变化会同步更新候选、连接及成功条件。
 
 每次知识变化和周期结束后自动生成会话内 `results/report.md`，包含范围、确认/未确认事项、路径、聚合、任务、证据相对链接和已记录用量。`/status` 显示当前结果与报告位置；无需新命令。报告不是新事实，恢复会从事件重建。写入失败时显示旧 revision 已过期，成功提交的黑板仍然有效。
-
-详细条件见 [结果与报告](docs/results.md)。
 
 ## 运行与继续
 
@@ -90,13 +88,13 @@ Enter 提交，Shift+Enter 换行（取决于终端协议）；Esc 暂停整个�
 }
 ```
 
-配置缺失时生成权限 0600 的模板并停止。未选中的模型可保留模板占位，只有切换为活动项时才需要填写有效 Key 和必需容量；不会因为另外四家的占位而影响当前 GLM 启动。GLM 示例的 `thinking` 支持 low/high/max；省略时不发送思考控制，保留模型默认行为。其他模型按精确能力表验证：支持关闭的模型可选 off，不会把不支持档位静默改成另一档。未知 ID 必须填写已知 `contextWindow` 与 `maxOutputTokens`，并省略尚未映射的思考设置；不自动宣称支持图像。已知模型可缩小输出限制，超出已知能力时明确报错。详见 [能力与思考映射](docs/models.md) 和 [五家配置模板](config.example.json)。达到预算暂停，用户显式继续才开启新周期。退出后修改配置再启动，可用 `-c` 继续原调查；当前进程与 `/resume` 不热加载。三种协议使用 Pi 的转换生成下一请求，原历史来源和 Evidence 不改写。没有 TUI 模型切换、CLI/环境变量模型覆盖、备用模型或透明重试；密钥不写入会话元数据、软件日志和安装包。
+配置缺失时生成权限 0600 的模板并停止。未选中的模型可保留模板占位，只有切换为活动项时才需要填写有效 Key 和必需容量；不会因为另外四家的占位而影响当前 GLM 启动。GLM 示例的 `thinking` 支持 low/high/max；省略时不发送思考控制，保留模型默认行为。其他模型按精确能力表验证：支持关闭的模型可选 off，不会把不支持档位静默改成另一档。未知 ID 必须填写已知 `contextWindow` 与 `maxOutputTokens`，并省略尚未映射的思考设置；不自动宣称支持图像。已知模型可缩小输出限制，超出已知能力时明确报错。配置示例见 [五家配置模板](config.example.json)。达到预算暂停，用户显式继续才开启新周期。退出后修改配置再启动，可用 `-c` 继续原调查；当前进程与 `/resume` 不热加载。三种协议使用 Pi 的转换生成下一请求，原历史来源和 Evidence 不改写。没有 TUI 模型切换、CLI/环境变量模型覆盖、备用模型或透明重试；密钥不写入会话元数据、软件日志和安装包。
 
 ## Chrome / Kali 接入
 
 安装时准备固定依赖：Chrome DevTools MCP 1.8.0、MCP SDK 1.30.0、ssh2 1.17.0。运行时首次实际工具调用才连接；启动、help/status、恢复、Compact 不主动连接。`/status` 只显示已知状态。
 
-Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable。先在现有 Chrome 的 `chrome://inspect/#remote-debugging` 开启远程调试，并允许浏览器自身的连接授权。XLoom 经 stdio MCP 的 `--autoConnect` 使用当前 Profile，不另开 Profile。`chrome` 只有 `command` 参数，固定操作为 help/pages/select/open/snapshot/click/fill/network/request/eval/screenshot；详细示例见 [接入说明](docs/backends.md)。
+Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable。先在现有 Chrome 的 `chrome://inspect/#remote-debugging` 开启远程调试，并允许浏览器自身的连接授权。XLoom 经 stdio MCP 的 `--autoConnect` 使用当前 Profile，不另开 Profile。`chrome` 只有 `command` 参数，固定操作为 help/pages/select/open/snapshot/click/fill/network/request/eval/screenshot。
 
 在已有 `~/.xloom/config.json` 中合并可选 `kali` 段（保留模型配置）：
 
@@ -156,7 +154,7 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 npm ci
 npm run check
 npm test
-npm run check:pi
+npm run check:pi        # 需要本地 docs/pi-files.json 来源清单
 npm run build
 npm run test:live       # 当前真实模型：聚合、部分/完整路径、两角色 Compact、恢复及报告
 npm run test:backends   # 用户现有 Chrome + 配置的真实 SSH；需要先准备环境
@@ -170,8 +168,3 @@ npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
 ```
 
 应用不依赖 Python；它仅用于开发阶段 PTY 验收。测试与脚本化响应均为开发文件，不加载到产品运行时。前期真实验收脚本保留为 `test:live:phase1/2/3/4`、`test:pty:phase1/2/3`。
-
-- [结果与报告](docs/results.md)
-- [模型能力与思考映射](docs/models.md)
-- [Chrome / Kali 接入](docs/backends.md)
-- [Pi 源码来源](docs/pi-source.md)
