@@ -1,32 +1,79 @@
-# Dependencies and generated output
+# Publish only project source, build configuration and regression tests.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/config.example.json
+!/package-lock.json
+!/package.json
+!/tsconfig.build.json
+!/tsconfig.json
+!/src/
+!/tests/
+!/scripts/
+!/evals/
+
+# Only build and test dependencies belong in scripts/.
+/scripts/*
+!/scripts/cairny-b0-observer.ts
+!/scripts/cairny-b1-live.ts
+!/scripts/cairny-b1-observer.ts
+!/scripts/cairny-b2-index-audit.ts
+!/scripts/cairny-b2-live.ts
+!/scripts/cairny-b2-observer.ts
+!/scripts/cairny-b3-extra-live.ts
+!/scripts/cairny-b3-live.ts
+!/scripts/cairny-b3-noop-audit.ts
+!/scripts/cairny-b3-observer.ts
+!/scripts/cairny-b3-quality-live.ts
+!/scripts/cairny-b4-live.ts
+!/scripts/cairny-b5-analysis.ts
+!/scripts/cairny-b5-experiment.ts
+!/scripts/cairny-targeted-live.ts
+!/scripts/copy-assets.mjs
+!/scripts/phase3-fixture.ts
+!/scripts/phase7-fixture.ts
+
+# Only executable test fixtures and their inputs belong in evals/.
+/evals/**
+!/evals/**/
+!/evals/cairny-b0/fixture.ts
+!/evals/cairny-b0/protocol.json
+!/evals/cairny-b0/scenarios.json
+!/evals/cairny-b1/chrome-local-fixture.ts
+!/evals/cairny-b1/external-adapter.test.ts
+!/evals/cairny-b1/external-adapter.ts
+!/evals/cairny-b1/fixture.test.ts
+!/evals/cairny-b1/fixture.ts
+!/evals/cairny-b1/joint-fixture.ts
+!/evals/cairny-b1/protocol.json
+!/evals/cairny-b1/runtime.ts
+!/evals/cairny-b1/scenarios.json
+!/evals/cairny-b2/protocol.json
+!/evals/cairny-b4/fixture.ts
+!/evals/cairny-b4/scenarios.json
+!/evals/cairny-b5/assessment.ts
+!/evals/cairny-b5/chrome-local-fixture.ts
+
+# Local documentation, dependencies, generated output and credentials.
+/docs/
 node_modules/
 dist/
 coverage/
+logs/
+.xloom/
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-*.tgz
-*.tgz.sha256
-
-# Local runtime data and credentials
-logs/
 *.log
 *.tap
-/test-results/
-/playwright-report/
-.xloom/
+*.tgz
+*.tgz.sha256
 .env
 .env.*
-!.env.example
 auth.json
 credentials.json
-
-# Local test results, acceptance reports and development records
-/docs/
-/evals/*/live-results.md
-
-# Local editor / OS temporary files
 .DS_Store
 *.swp
 *.swo
