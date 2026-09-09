@@ -5,12 +5,22 @@ XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告�
 
 ## 首次安装
 
-在源码目录中构建并安装：
+需要 Linux、Node.js 22.19+（22.x）、npm 10 和本机 Bash。
+
+从 GitHub 下载 ZIP 并解压，或运行以下命令获取项目：
+
+```bash
+git clone https://github.com/do-whilefor/XLoom.git
+cd XLoom
+```
+
+在项目目录中构建并安装：
 
 ```bash
 npm ci
 npm pack
 npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
+export PATH="$HOME/.local/bin:$PATH"
 xloom
 ```
 
@@ -26,7 +36,7 @@ AttackPath 表达少量状态连接。相关、支持或反驳解释均不等于
 
 ## 运行与继续
 
-需要 Linux、Node.js 22.19+（22.x）、npm 10 和本机 Bash。每次普通启动新建调查，工具使用启动目录；工作文件不会回滚。
+每次普通启动新建调查，工具使用启动目录；工作文件不会回滚。
 
 ```bash
 xloom                    # 始终新建
@@ -147,16 +157,3 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 查询版本等普通事实任务可以依据真实输出完成；Goal 中明确排除的“无需验证安全影响”不再触发漏洞确认门槛。同一 Goal 中其余明确要求的安全验证仍需 Proof。
 
 没有第三 Agent、Hook、并行调度、模型菜单、`/new`、tree/fork/branch 或向量库。任意本机 shell 的自然语言语义不能靠固定来源字段完全证明；安全结论仍需实际实验和证据解释。工具输出与模型协议保留原角色、Session、Run、call ID，切换后的迟到事件不进入另一会话。
-
-## 构建、安装与测试
-
-```bash
-npm ci
-npm run check
-npm test
-npm run build
-npm pack
-npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
-```
-
-`npm test` 运行自动化回归测试，测试使用受控目标和预设模型响应。`tests/` 保留产品功能的回归测试；`evals/` 仅保留这些测试直接使用的 HTTP 夹具和场景输入。历史评测流程、统计和验收判定工具不在公开测试范围内。这些测试文件不加载到产品运行时。测试生成的日志和结果仅保存在本地。
