@@ -5,9 +5,11 @@ XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告�
 
 ## 首次安装
 
-从本地交付包安装：
+在源码目录中构建并安装：
 
 ```bash
+npm ci
+npm pack
 npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
 xloom
 ```
@@ -106,8 +108,6 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 
 原始输出按调用保存；网络检索和截图不能单独冒充新的 Proof 实验。超时、断线或取消保留部分资料并暂停整个周期，结果可能未知。切换/退出关闭自有连接，用户 Chrome 和远程文件保留；恢复不会重放动作或复活旧句柄。
 
-源码目录可运行 `npm run test:chrome` 单独检查浏览器，`npm run test:chrome:live` 验证模型自动驱动 Chrome 的双角色调查。`npm run test:kali` 会访问已配置的真实 SSH；`npm run test:joint` 会使用当前模型、Chrome 与 Kali 上的短命合成服务，须有对应调查范围授权后再执行。临时服务仅含合成数据，结束时关闭，不安装远端程序。
-
 ## 保存与恢复边界
 
 ```text
@@ -148,23 +148,15 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 
 没有第三 Agent、Hook、并行调度、模型菜单、`/new`、tree/fork/branch 或向量库。任意本机 shell 的自然语言语义不能靠固定来源字段完全证明；安全结论仍需实际实验和证据解释。工具输出与模型协议保留原角色、Session、Run、call ID，切换后的迟到事件不进入另一会话。
 
-## 构建、安装与验收
+## 构建、安装与测试
 
 ```bash
 npm ci
 npm run check
 npm test
-npm run check:pi        # 需要本地 docs/pi-files.json 来源清单
 npm run build
-npm run test:live       # 当前真实模型：聚合、部分/完整路径、两角色 Compact、恢复及报告
-npm run test:backends   # 用户现有 Chrome + 配置的真实 SSH；需要先准备环境
-npm run test:chrome     # 仅用户现有 Chrome；无模型或 Kali 请求
-npm run test:chrome:live # 真实模型 + Chrome 自动 Probe/Proof 与恢复
-npm run test:kali       # 真实密码 SSH、执行语义、取消/断线及恢复
-npm run test:joint      # 真实模型 + Chrome Probe + Kali Proof 联合调查
-npm run test:pty        # 脚本化模型 + 真实 HTTP SSE、本机工具和 PTY
 npm pack
 npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
 ```
 
-应用不依赖 Python；它仅用于开发阶段 PTY 验收。测试与脚本化响应均为开发文件，不加载到产品运行时。前期真实验收脚本保留为 `test:live:phase1/2/3/4`、`test:pty:phase1/2/3`。
+`npm test` 运行自动化回归测试，测试使用受控目标和预设模型响应。`tests/` 是测试代码，`evals/` 中保留测试依赖的夹具和输入；它们不加载到产品运行时。测试生成的日志和结果仅保存在本地。
