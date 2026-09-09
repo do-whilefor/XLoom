@@ -19,8 +19,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
-    "dev": "tsx src/cli.ts",
     "prepack": "npm run build"
   },
   "dependencies": {
@@ -45,8 +43,6 @@
     "@types/cross-spawn": "6.0.6",
     "@types/node": "22.19.11",
     "@types/ssh2": "1.15.6",
-    "@xterm/headless": "5.5.0",
-    "tsx": "4.21.0",
     "typescript": "5.9.3"
   }
 }
