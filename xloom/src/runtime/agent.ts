@@ -19,6 +19,9 @@ import { AssistantMessageEventStream } from '../vendor/pi/ai/utils/event-stream.
 import { combineUsageTotals, responseUsage, type RecordedResponse, type UsageTotals } from './usage.js';
 export { combineUsageTotals, type UsageTotals, type UsageField } from './usage.js';
 
+export interface CapsuleRefreshOptions { workingBytes?: number; indexBytes?: number; maxCapsuleBytes?: number }
+export type CapsuleRefresh = (options?: CapsuleRefreshOptions) => Pick<CapsuleMessage, 'content' | 'revision' | 'fingerprint' | 'manifest'>;
+
 export type RunState = 'idle' | 'running' | 'cancelling';
 export type RuntimeEvent = AgentEvent & { agent: AgentRole; agentSessionId: string; runId?: string; responseRef?: string };
 export interface RuntimeOptions {
@@ -57,7 +60,7 @@ export class ProbeAgent {
   private readonly systemPrompt: string;
   private readonly inputIds = new WeakMap<object, string>();
   private readonly persisted = new WeakSet<object>();
-  private caseRun?: { capsule: CapsuleMessage; tools: AgentTool<any>[]; delivered: (ids: string[], revision?: number) => void; refresh?: () => { content: string; revision: number }; toolAttempts: number; stop?: (reason: string) => void; responseRef?: string };
+  private caseRun?: { capsule: CapsuleMessage; tools: AgentTool<any>[]; delivered: (ids: string[], revision?: number) => void; refresh?: CapsuleRefresh; toolAttempts: number; stop?: (reason: string) => void; responseRef?: string };
   private consumedIds: string[] = [];
   private readonly knownInputIds = new Set<string>();
   private inputRequestId?: string;
@@ -127,7 +130,7 @@ export class ProbeAgent {
     this.session.setTitle(this.redact(text)); this.options.onState?.(); return originalId;
   }
 
-  runIntent(capsule: CapsuleMessage, tools: AgentTool<any>[], delivered: (ids: string[], revision?: number) => void, refresh?: () => { content: string; revision: number }, stop?: (reason: string) => void): Promise<void> {
+  runIntent(capsule: CapsuleMessage, tools: AgentTool<any>[], delivered: (ids: string[], revision?: number) => void, refresh?: CapsuleRefresh, stop?: (reason: string) => void): Promise<void> {
     if (this.closed || this.storageFailed || this.state !== 'idle') return Promise.reject(new Error(`${this.role} 尚未完成收尾、保存失败或已关闭`));
     this.caseRun = { capsule, tools, delivered, refresh, toolAttempts: 0, stop };
     this.consumedIds = this.messages.flatMap((m) => this.inputIds.has(m) ? [this.inputIds.get(m)!] : []);
@@ -265,6 +268,15 @@ export class ProbeAgent {
   private recordStream(source: StreamFn): StreamFn {
     return async (model, context, options) => {
       const responseRef = randomUUID();
+      options?.signal?.throwIfAborted();
+      const budget = requestBudget(context, this.options.config, options?.maxTokens);
+      if (!budget.fits) throw new Error(`实际请求超过上下文容量（估算 ${budget.input}，可用 ${budget.availableInput}），未发送模型请求`);
+      this.persistence.appendCustomEntry('xloom.context-manifest', {
+        responseRef, role: this.role, agentSessionId: this.sessionId,
+        runId: this.caseRun?.capsule.runId, purpose: this.compactActive ? 'compact' : 'normal',
+        revision: this.caseRun?.capsule.revision, budget,
+        ...(this.compactActive ? {} : { fingerprint: this.caseRun?.capsule.fingerprint, projection: this.caseRun?.capsule.manifest }),
+      });
       const output = new AssistantMessageEventStream();
       let partial: RecordedResponse | undefined;
       let terminal = false;
@@ -304,27 +316,90 @@ export class ProbeAgent {
     };
   }
   private budget() { return requestBudget({ systemPrompt: this.systemPrompt, tools: this.caseRun?.tools ?? this.tools, messages: projectForModel(this.messages, this.model) }, this.options.config); }
-  private async beforeRequest(signal: AbortSignal) {
-    signal.throwIfAborted();
-    if (this.caseRun?.refresh) {
-      const fresh = this.caseRun.refresh();
-      if (fresh.revision !== this.caseRun.capsule.revision) {
-        const capsule = { ...this.caseRun.capsule, ...fresh };
-        this.persistence.appendCustomEntry('xloom.capsule', capsule);
-        for (let i = this.messages.length - 1; i >= 0; i--) if (isCapsule(this.messages[i])) this.messages.splice(i, 1);
-        this.messages.push(capsule); this.caseRun.capsule = capsule;
+  private projectionBudget(capsule: CapsuleMessage, includeHistory = true) {
+    const messages = includeHistory ? this.messages.map(message => isCapsule(message) ? capsule : message) : [capsule];
+    return requestBudget({ systemPrompt: this.systemPrompt, tools: this.caseRun?.tools ?? this.tools,
+      messages: projectForModel(messages, this.model) }, this.options.config);
+  }
+  private selectProjection() {
+    const current = this.caseRun;
+    if (!current?.refresh) return;
+    // Check the actual serialized request for every candidate. Optional data is
+    // reduced before invoking Compact; mandatory contents are never truncated.
+    const full = { ...current.capsule, ...current.refresh() };
+    let selected = full;
+    const fullBudget = this.projectionBudget(full);
+    if (!fullBudget.fits) {
+      const minimum = { ...current.capsule, ...current.refresh({ workingBytes: 0, indexBytes: 0 }) };
+      const minimumBudget = this.projectionBudget(minimum);
+      selected = minimum;
+      if (minimumBudget.fits && full.manifest) {
+        const capacity = minimumBudget.availableInput - minimumBudget.input;
+        const optionalTokens = Math.max(1, fullBudget.input - minimumBudget.input);
+        const ratio = Math.min(1, capacity / optionalTokens) * 0.9;
+        const partial = { ...current.capsule, ...current.refresh({
+          workingBytes: Math.floor(full.manifest.bytes.working * ratio),
+          indexBytes: Math.floor(full.manifest.bytes.index * ratio),
+        }) };
+        if (this.projectionBudget(partial).fits) selected = partial;
       }
     }
+    // Revision describes the board, while content/fingerprint describes this
+    // request's available work set, rules, and index snapshot.
+    if (selected.revision !== current.capsule.revision || selected.content !== current.capsule.content || selected.fingerprint !== current.capsule.fingerprint) {
+      assertToolBoundary(projectForModel(this.messages, this.model));
+      this.persistence.appendCustomEntry('xloom.capsule', selected);
+      const position = this.messages.findLastIndex(isCapsule);
+      if (position >= 0) this.messages.splice(position, 1, selected);
+      else this.messages.push(selected);
+      current.capsule = selected;
+    } else current.capsule = selected;
+  }
+  private capacityError() {
+    const budget = this.contextBudget!, manifest = this.caseRun?.capsule.manifest;
+    const detail = manifest ? `；Capsule UTF-8 字节 ${JSON.stringify(manifest.bytes)}；主要来源 ${[...manifest.sources].sort((a, b) => b.bytes - a.bytes).slice(0, 6).map(s => `${s.field}=${s.bytes}`).join(', ')}；必要对象 ${manifest.requiredIds.slice(0, 24).join(', ')}（共 ${manifest.requiredIds.length} 个，完整清单已保存）` : '';
+    return new Error(`必要输入仍超过上下文容量，已保存并暂停；估算输入 ${budget.input}，可用 ${budget.availableInput}（系统 ${budget.system}、工具 ${budget.tools}、历史/Capsule ${budget.history}）${detail}。不会反复压缩或删去约束。`);
+  }
+  private async beforeRequest(signal: AbortSignal) {
+    signal.throwIfAborted();
+    this.consumeBoundaryInputs();
+    this.selectProjection();
     this.contextBudget = this.budget();
     const manual = !!this.compactRequest;
-    if (manual || !this.contextBudget.fits) await this.performCompact(signal, !manual);
+    // History compaction cannot fix overflowing system/tools/mandatory state.
+    if (!this.contextBudget.fits && this.caseRun && !this.projectionBudget(this.caseRun.capsule, false).fits) {
+      this.persistence.appendCustomEntry('xloom.context-paused', { runId: this.caseRun.capsule.runId,
+        budget: this.contextBudget, manifest: this.caseRun.capsule.manifest, reason: 'irreducible-input' });
+      throw this.capacityError();
+    }
+    if (manual || !this.contextBudget.fits) {
+      await this.performCompact(signal, !manual);
+      signal.throwIfAborted();
+      this.consumeBoundaryInputs();
+      this.selectProjection();
+    }
     this.contextBudget = this.budget();
-    if (!this.contextBudget.fits) throw new Error(`必要输入仍超过上下文容量，已保存并暂停；估算输入 ${this.contextBudget.input}，可用 ${this.contextBudget.availableInput}（系统 ${this.contextBudget.system}、工具 ${this.contextBudget.tools}、历史/Capsule ${this.contextBudget.history}）。不会反复压缩或删去约束。`);
+    if (!this.contextBudget.fits) {
+      this.persistence.appendCustomEntry('xloom.context-paused', { runId: this.caseRun?.capsule.runId,
+        budget: this.contextBudget, manifest: this.caseRun?.capsule.manifest, reason: 'input-after-compaction' });
+      throw this.capacityError();
+    }
     signal.throwIfAborted();
     if (this.caseRun) this.inputRequestId = this.persistence.appendCustomEntry('xloom.input-prepared', {
       revision: this.caseRun.capsule.revision, runId: this.caseRun.capsule.runId, messageIds: this.consumedIds, budget: this.contextBudget,
+      fingerprint: this.caseRun.capsule.fingerprint, manifest: this.caseRun.capsule.manifest,
     });
     this.options.onState?.();
+  }
+  private consumeBoundaryInputs() {
+    if (!this.queued.length) return;
+    assertToolBoundary(projectForModel(this.messages, this.model));
+    // Input arriving while awaiting Compact must precede the next normal
+    // request, with the same native persistence and delivered-ID lifecycle.
+    for (const message of this.queued.splice(0)) {
+      this.receive({ type: 'message_start', message }, this.caseRun);
+      this.receive({ type: 'message_end', message }, this.caseRun);
+    }
   }
   get compactPending() { return !!this.compactRequest || this.compactActive; }
   async requestCompact(focus = '') {

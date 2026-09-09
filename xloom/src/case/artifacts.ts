@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, constants, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, constants, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createReadTool, createWriteTool, createEditTool } from '../vendor/pi/coding-agent/core/tools/index.js';
 import { createBashTool } from '../tools/bash.js';
+import { executeHttp, isHttpCommand, HttpExecutionError } from '../tools/http.js';
 import { createLocalBashOperations } from '../vendor/pi/coding-agent/core/tools/bash.js';
 import { detectSupportedImageMimeTypeFromFile } from '../vendor/pi/coding-agent/utils/mime.js';
 import type { AgentTool, AgentToolResult } from '../vendor/pi/agent/types.js';
@@ -11,6 +13,8 @@ import { BlackboardStore } from './store.js';
 import type { Evidence, RunRecord, ToolName } from './types.js';
 import { toolCallRef } from './types.js';
 import { recordedExternalTools, type RecordingOptions } from '../tools/recorded-external.js';
+import { toolScopeDenial } from './tool-scope.js';
+import { assertContextIndexRead, checkEvidenceMaterials } from './context-index.js';
 
 const actualPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 const safeSegment = (id: string) => /^[a-zA-Z0-9_-]{1,160}$/.test(id) ? id : createHash('sha256').update(id).digest('hex');
@@ -49,24 +53,43 @@ export function recordedTools(options: RecordingOptions & { cwd: string }): Agen
       const save = (file: string, content: string | Buffer) => {
         writeFileSync(join(dir, file), content, { flag: 'wx', mode: 0o600 }); paths.push(`${artifactPath}/${file}`);
       };
-      const targetPath = typeof args.path === 'string' ? actualPath(resolve(cwd, args.path.replace(/^~(?=\/)/, process.env.HOME ?? '~'))) : undefined;
+      // Read the current rule for every call, before resolving or touching its
+      // target. Only the program-owned attempt/result audit is written here.
+      const denial = toolScopeDenial(store.current(), run.agent, name);
+      if (denial) {
+        try {
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          store.toolStarted(run.id, callId, name, artifactPath, responseRef);
+          save('execution.json', JSON.stringify({ runId: run.id, agent: run.agent, agentSessionId: run.agentSessionId,
+            toolCallId: callId, ...origin, tool: name, args, attemptedAt: new Date().toISOString(), actionStatus: 'not_executed' }, null, 2));
+          save('result.json', JSON.stringify({ content: [{ type: 'text', text: denial.text }], details: denial.details,
+            isError: true, status: 'not_executed', endedAt: new Date().toISOString() }, null, 2));
+          save('result.txt', denial.text);
+        } catch (error) { options.stop(`工具范围拒绝记录保存失败：${String(error)}`); throw error; }
+        options.notice?.(denial.text);
+        throw Object.assign(new Error(denial.text), { details: { ...denial.details, artifactPaths: paths } });
+      }
+      const requestedPath = typeof args.path === 'string' ? resolve(cwd, args.path.replace(/^~(?=\/)/, process.env.HOME ?? '~')) : undefined;
+      const targetPath = requestedPath === undefined ? undefined : actualPath(requestedPath);
       const sessionsRoot = actualPath(resolve(store.sessionDir, '..'));
-      const internal = (path: string) => path === sessionsRoot || path.startsWith(sessionsRoot + sep);
+      const promptsRoot = actualPath(fileURLToPath(new URL('../prompts/', import.meta.url)));
+      const internal = (path: string) => [sessionsRoot, promptsRoot].some((root) => path === root || path.startsWith(root + sep));
       const generated = Object.values(store.current().evidence).flatMap((e) => [...(e.generatedPath ? [e.generatedPath] : []), ...(e.derivedPaths ?? [])]);
       const command = String(args.command ?? '');
-      const derived = name === 'read' ? !!targetPath && (internal(targetPath) || generated.includes(targetPath)) : name === 'bash' &&
-        (command.includes(sessionsRoot) || /(?:blackboard\/(?:view\.md|events\.jsonl)|agents\/(?:probe|proof)\.jsonl)/.test(command) || generated.some((p) => command.includes(p) || command.includes(basename(p))));
+      const derived = name === 'read' ? !!targetPath && (internal(targetPath) || !!requestedPath && internal(requestedPath) || generated.includes(targetPath)) : name === 'bash' &&
+        (command.includes(sessionsRoot) || command.includes(promptsRoot) || /(?:blackboard\/(?:view\.md|events\.jsonl)|agents\/(?:probe|proof)\.jsonl)/.test(command) || materialFiles(command, cwd).some(internal) || generated.some((p) => command.includes(p) || command.includes(basename(p))));
       // Mutation receipts are not content validation. Prose reports produced by the model stay derived on read-back.
       const generatedConclusion = name === 'write' && typeof args.content === 'string' &&
         (/\.(?:md|markdown|rst)$/i.test(targetPath ?? '') || /(?:结论|漏洞确认|审计报告|已确认漏洞|conclusion|finding|vulnerability confirmed)/i.test(args.content));
       let failure: unknown; let result: AgentToolResult<any>;
+      let http: Evidence['http'];
       let recordError: unknown;
       const pendingReads: Promise<Buffer>[] = [];
       try {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         store.toolStarted(run.id, callId, name, artifactPath, responseRef);
         save('execution.json', JSON.stringify({ runId: run.id, agent: run.agent, agentSessionId: run.agentSessionId, toolCallId: callId, ...origin, tool: name, args, startedAt: new Date().toISOString() }, null, 2));
-        if ((name === 'write' || name === 'edit') && targetPath && internal(targetPath)) throw new Error('会话与证据文件由程序维护，不允许通过模型工具修改');
+        if ((name === 'write' || name === 'edit') && targetPath && (internal(targetPath) || !!requestedPath && internal(requestedPath))) throw new Error('会话与证据文件由程序维护，不允许通过模型工具修改');
         const raw = (file: string, data: Buffer) => {
           try {
             if (!paths.includes(`${artifactPath}/${file}`)) { save(file, data); }
@@ -77,6 +100,9 @@ export function recordedTools(options: RecordingOptions & { cwd: string }): Agen
           access: (path) => access(path, constants.R_OK), detectImageMimeType: detectSupportedImageMimeTypeFromFile,
           readFile: (path) => {
             signal?.throwIfAborted();
+            assertContextIndexRead(path);
+            assertContextIndexRead(actualPath(path));
+            for (const evidence of Object.values(store.current().evidence)) if (evidence.artifactPaths.some(p => actualPath(resolve(store.sessionDir, p)) === actualPath(path))) checkEvidenceMaterials(evidence, store.sessionDir);
             const pending = readFile(path).then((bytes) => { raw('raw-read.bin', bytes); return bytes; });
             pendingReads.push(pending); return pending;
           },
@@ -84,7 +110,20 @@ export function recordedTools(options: RecordingOptions & { cwd: string }): Agen
           exec: (command, directory, settings) => localBash.exec(command, directory, { ...settings,
             onData: (data) => { raw('raw-output.txt', data); settings.onData(data); } }),
         } }) : base;
-        result = await (tool as AgentTool<any>).execute(callId, args, signal, (partial) => {
+        if (name === 'bash' && isHttpCommand(command)) {
+          try {
+            const observed = await executeHttp(command, signal);
+            save('http-request.bin', observed.requestBody); save('http-response.bin', observed.responseBody);
+            http = { ...observed.exchange, requestArtifact: `${artifactPath}/http-request.bin`, responseArtifact: `${artifactPath}/http-response.bin` };
+            result = { content: [{ type: 'text', text: observed.text }], details: { exitCode: 0, http: observed.exchange } };
+          } catch (error) {
+            if (error instanceof HttpExecutionError) {
+              save('http-request.bin', error.requestBody); save('http-response.bin', error.responseBody);
+              http = { ...error.partialExchange, requestArtifact: `${artifactPath}/http-request.bin`, responseArtifact: `${artifactPath}/http-response.bin` };
+            }
+            throw error;
+          }
+        } else result = await (tool as AgentTool<any>).execute(callId, args, signal, (partial) => {
           try {
             if (!paths.includes(`${artifactPath}/partial.jsonl`)) save('partial.jsonl', JSON.stringify(partial) + '\n');
             else appendFileSync(join(dir, 'partial.jsonl'), JSON.stringify(partial) + '\n');
@@ -124,11 +163,23 @@ export function recordedTools(options: RecordingOptions & { cwd: string }): Agen
         save('result.txt', text);
         const evidence = store.recordEvidence({ runId: run.id, agent: run.agent, toolCallId: callId, ...origin, tool: name as ToolName, backend: 'local',
           status, kind: derived ? 'derived' : ['write', 'edit'].includes(name) ? 'mutation' : 'observation', artifactPaths: paths,
-          summary: `${name} ${targetPath ?? command.slice(0, 160)} — ${status}`,
+          artifactSha256: Object.fromEntries(paths.map(path => [path, createHash('sha256').update(readFileSync(join(store.sessionDir, path))).digest('hex')])),
+          summary: http ? `HTTP ${http.method} ${http.url} — ${http.status ?? 'unknown'} / ${status}` : `${name} ${targetPath ?? command.slice(0, 160)} — ${status}`,
           ...(targetPath ? { targetPath } : {}), ...(generatedConclusion && targetPath ? { generatedPath: targetPath } : {}),
           ...(derived && name === 'bash' ? { derivedPaths: materialFiles(command, cwd) } : {}),
+          ...(http ? { http, outcomeKnown: http.outcome === 'completed' } : {}),
           ...(typeof details.exitCode === 'number' ? { exitCode: details.exitCode, outcomeKnown: status !== 'interrupted' } : {}) });
-        const receipt = `Agent: ${run.agent} · Session: ${run.agentSessionId} · Run: ${run.id}\nEvidence: ${evidence.id}\nTool: ${name}\nStatus: ${status}\nKind: ${evidence.kind}\nAbsolute path: ${join(dir, 'result.txt')}`;
+        let policyFeedback = '';
+        if (http?.method === 'GET' && http.credentialFingerprint !== createHash('sha256').update('[]').digest('hex')) {
+          const current = store.current(), intent = current.intents[run.intentId];
+          const assertion = intent?.kind === 'verify' && intent.verifiesHypothesisId ? current.hypotheses[intent.verifiesHypothesisId]?.httpAssertion : undefined;
+          const url = new URL(http.url);
+          if (assertion && url.origin === assertion.origin && url.pathname === assertion.conditionsPath) {
+            const command = 'xloom-http ' + JSON.stringify({ url: assertion.origin + assertion.conditionsPath, method: 'GET' });
+            policyFeedback = `\nHTTP policy 提示：本次条件观察使用了凭据，不能作为 observations.policy。请实际执行 ${command}，不传 headers（或 headers:{}），取得无凭据条件 Evidence 后再最终提交。`;
+          }
+        }
+        const receipt = `Agent: ${run.agent} · Session: ${run.agentSessionId} · Run: ${run.id}\nEvidence: ${evidence.id}\nTool: ${name}\nStatus: ${status}\nKind: ${evidence.kind}\nAbsolute path: ${join(dir, 'result.txt')}${policyFeedback}`;
         // The compact model receipt needs one directly readable path. Retain
         // the shorter relative path in the TUI notice so narrow screens can
         // display the whole artifact reference without splitting its call ID.

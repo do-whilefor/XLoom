@@ -1,11 +1,18 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { refreshValidity, emptyBoard, parseGoal, toolCallRef, hasToolSource, type AgentRole, type BoardEvent, type BoardState, type EventPayloads, type Evidence, type IdPrefix, type Intent, type XLoomUpdate } from './types.js';
+import { refreshValidity, emptyBoard, parseGoal, toolCallRef, hasToolSource, type AgentRole, type BoardEvent, type BoardState, type EventPayloads, type Evidence, type IdPrefix, type Intent, type XLoomUpdateDraft } from './types.js';
 import { normalizeUpdate } from './update.js';
+import { prepareHttpObservation } from './observations.js';
+import { validVerification } from './types.js';
 import { renderBoard } from './view.js';
 import { readReportUsage, renderReport } from './report.js';
 import { basename } from 'node:path';
 import { redactStructured } from '../log.js';
+import { applyToolScopeInput } from './tool-scope.js';
+import { checkEvidenceMaterials } from './context-index.js';
+import { knowledgeProjection } from './knowledge.js';
+import { structuralKey } from './structure.js';
+import { candidateReason, recommendationReason, recommendationSourceReason, recommendationSourceRun, selectIntent, SchedulingChangedError } from './scheduler.js';
 
 export class ViewWriteError extends Error {
   constructor(readonly revision: number, cause: unknown) { super(`事件 r${revision} 已保存，但 view.md 生成失败：${String(cause)}`, { cause }); }
@@ -29,10 +36,12 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
     }
     case 'case_created': {
       if (board.revision) throw new Error('不能重复创建 Case');
+      if (event.source !== 'user') throw new Error('原始 Goal 必须来自用户输入事件');
       const p = event.payload;
       board.goal = p.goal; board.originalGoal = p.goal; board.goalMessageId = p.messageId;
       board.goalRevision = event.revision; board.knowledgeRevision = event.revision;
-      board.intents[p.intent.id] = p.intent; count(p.intent.id); break;
+      board.intents[p.intent.id] = p.intent; count(p.intent.id);
+      applyToolScopeInput(board, p.goal.request, p.messageId, event.revision); break;
     }
     case 'agent_created': {
       const { agent, agentSessionId } = event.payload;
@@ -41,14 +50,19 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
       board.agentCursors[agent] = { lastSeenRevision: 0, deliveredHintIds: [], deliveredMessageIds: [] }; break;
     }
     case 'hint_added': {
+      if (event.source !== 'user') throw new Error('Hint 必须来自用户输入事件');
       const h = event.payload.hint;
-      board.hints[h.id] = h; count(h.id); board.knowledgeRevision = event.revision; delete board.assessment; break;
+      board.hints[h.id] = h; count(h.id); board.knowledgeRevision = event.revision; delete board.assessment; delete board.nextIntentId;
+      applyToolScopeInput(board, h.content, h.messageId, event.revision); break;
     }
     case 'goal_changed':
+      if (event.source !== 'user') throw new Error('Goal 变更必须来自用户输入事件');
       board.changes.push({ revision: event.revision, kind: 'scope_changed', objectIds: [], summary: '用户已修改目标/范围，以当前 Goal 为准' });
       board.goal = event.payload.goal; board.goalRevision = event.revision;
+      delete board.nextIntentId;
       board.goalChanges.push({ ...event.payload, revision: event.revision });
-      board.knowledgeRevision = event.revision; delete board.assessment; board.outcome = 'in_progress'; break;
+      board.knowledgeRevision = event.revision; delete board.assessment; board.outcome = 'in_progress';
+      applyToolScopeInput(board, event.payload.goal.request, event.payload.messageId, event.revision); break;
     case 'run_started': {
       const r = event.payload.run;
       const intent = board.intents[r.intentId];
@@ -56,7 +70,7 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
       if (intent.verifiesHypothesisId && board.hypotheses[intent.verifiesHypothesisId]?.duplicateOf) throw new Error('重复候选的验证任务已阻塞，不能静默改目标');
       if ((board.agentSessions[r.agent] && board.agentSessions[r.agent] !== r.agentSessionId) || (r.agent === 'proof' && !board.agentSessions.proof)) throw new Error('Run 与实际角色 Session 不匹配');
       if (Object.values(board.runs).some((r) => r.status === 'running')) throw new Error('已有活动 Run');
-      board.runs[r.id] = r; count(r.id); board.intents[r.intentId].state = 'running'; break;
+      board.runs[r.id] = r; count(r.id); board.intents[r.intentId].state = 'running'; delete board.nextIntentId; break;
     }
     case 'tool_started': {
       const p = event.payload; const run = board.runs[p.runId];
@@ -68,6 +82,7 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
     }
     case 'evidence_recorded': {
       const e = event.payload.evidence; const run = board.runs[e.runId];
+      if (e.http && e.http.version !== 1) throw new Error(`Evidence ${e.id} 的 HTTP 记录版本不支持，暂停恢复/提交`);
       if (e.agent !== run?.agent || !hasToolSource(run, e) || board.evidence[e.id] || run.evidenceIds.some((id) => toolCallRef(board.evidence[id]) === toolCallRef(e))) throw new Error('证据来源不存在或重复');
       board.evidence[e.id] = e; run.evidenceIds.push(e.id); count(e.id); break;
     }
@@ -84,8 +99,13 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
     }
     case 'agent_committed': {
       const p = event.payload; const run = board.runs[p.runId];
+      const createdIntentIds = p.intents.filter((i) => !Object.hasOwn(board.intents, i.id)).map((i) => i.id);
+      for (const h of p.hypotheses) if (h.verification?.checked && h.verification.checked.version !== 1)
+        throw new Error(`Hypothesis ${h.id} 的 checked 观察绑定版本不支持，暂停恢复/提交`);
       if (!run || run.status !== 'running' || event.source !== run.agent) throw new Error('重复提交、来源不符或未知 Run');
-      const knowledgeChanged = p.facts.length || p.hypotheses.some((h) => JSON.stringify(board.hypotheses[h.id]) !== JSON.stringify(h)) || (p.attackPaths ?? []).some((path) => board.attackPaths[path.id]?.revision !== path.revision);
+      const priorKnowledge = knowledgeProjection(board);
+      const priorObjects = new Map([...Object.values(board.hypotheses), ...Object.values(board.attackPaths)]
+        .map((object) => [object.id, structuralKey(object)]));
       const replaced = new Set(p.facts.flatMap((f) => f.supersedes ? [f.supersedes] : []));
       for (const f of p.facts) { board.facts[f.id] = f; count(f.id); }
       for (const h of p.hypotheses) { board.hypotheses[h.id] = h; count(h.id); }
@@ -95,12 +115,17 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
       board.intents[run.intentId].reason = p.reason;
       run.status = 'completed'; run.endedAt = event.timestamp;
       board.lastSummary = p.summary;
-      if (knowledgeChanged) board.changes.push({ revision: event.revision,
-        kind: replaced.size ? 'superseded' : p.hypotheses.some((h) => ['rejected', 'disputed'].includes(h.status)) ? 'refuted' : 'changed',
-        objectIds: [...new Set([...p.facts.map((f) => f.id), ...replaced, ...p.hypotheses.map((h) => h.id), ...p.intents.map((i) => i.id), ...(p.attackPaths ?? []).map((path) => path.id)])], summary: p.summary });
-      if (run.purpose !== 'review' && knowledgeChanged) board.knowledgeRevision = event.revision;
       if (p.goalAssessment && p.goalRevision === board.goalRevision) board.assessment = { goalRevision: p.goalRevision, value: p.goalAssessment };
       refreshValidity(board);
+      const knowledgeChanged = priorKnowledge !== knowledgeProjection(board);
+      const affectedIds = [...Object.values(board.hypotheses), ...Object.values(board.attackPaths)]
+        .filter((object) => priorObjects.get(object.id) !== structuralKey(object)).map((object) => object.id);
+      if (knowledgeChanged) board.changes.push({ revision: event.revision,
+        kind: replaced.size ? 'superseded' : p.hypotheses.some((h) => ['rejected', 'disputed'].includes(h.status)) ? 'refuted' : 'changed',
+        objectIds: [...new Set([...p.facts.map((f) => f.id), ...replaced, ...p.hypotheses.map((h) => h.id), ...p.intents.map((i) => i.id), ...(p.attackPaths ?? []).map((path) => path.id), ...affectedIds])], summary: p.summary });
+      if (run.purpose !== 'review' && knowledgeChanged) board.knowledgeRevision = event.revision;
+      delete board.nextIntentId;
+      if (p.nextIntentId && !recommendationReason(board, run, p.nextIntentId, p.next_move, createdIntentIds)) board.nextIntentId = p.nextIntentId;
       break;
     }
     case 'run_failed': case 'run_interrupted': {
@@ -114,7 +139,8 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
     }
     case 'review_scheduled':
       board.intents[event.payload.intent.id] = event.payload.intent; count(event.payload.intent.id);
-      board.reviewIntentIds.push(event.payload.intent.id); board.reviewCursor = event.payload.knowledgeRevision; break;
+      board.reviewIntentIds.push(event.payload.intent.id);
+      board.reviewCursor = Math.max(board.reviewCursor, event.payload.knowledgeRevision, board.knowledgeRevision); break;
     case 'intent_reopened': {
       const i = board.intents[event.payload.intentId];
       if (!i || i.state !== 'blocked') throw new Error('只能显式恢复受阻任务');
@@ -129,6 +155,17 @@ export function applyEvent(board: BoardState, event: BoardEvent): void {
       board.execution = p.execution; board.outcome = p.outcome; board.reason = p.reason; break;
     }
     default: throw new Error(`未知黑板事件：${(event as { type: string }).type}`);
+  }
+  if (board.toolScope?.error) {
+    board.execution = 'paused'; board.reason = board.toolScope.error.reason;
+    if (board.outcome === 'satisfied') board.outcome = 'in_progress';
+  }
+  if (board.nextIntentId) {
+    const source = recommendationSourceRun(board);
+    // Restoring accepted Pi history can move a role's cursor backwards. Once
+    // that disproves the source's input delivery, later cursor events must not
+    // revive the old Commit; only a new Commit may establish a recommendation.
+    if (candidateReason(board, board.nextIntentId) || (source && recommendationSourceReason(board, source))) delete board.nextIntentId;
   }
   board.revision = event.revision;
 }
@@ -149,6 +186,11 @@ export class BlackboardStore {
       const text = readFileSync(this.eventsPath, 'utf8');
       if (text && !text.endsWith('\n')) throw new Error('黑板包含未完成的事件尾行；请保留文件排查，不自动忽略');
       for (const line of text.split('\n').filter(Boolean)) applyEvent(this.board, JSON.parse(line));
+      refreshValidity(this.board);
+      for (const h of Object.values(this.board.hypotheses)) if (h.verification?.checked && validVerification(this.board, h)) {
+        const checked = prepareHttpObservation(this.sessionDir, this.board, h);
+        if (JSON.stringify(checked) !== JSON.stringify(h.verification?.checked)) throw new Error('保存的观察绑定与原始材料不一致，暂停恢复');
+      }
     }
   }
   current(): BoardState { return structuredClone(this.board); }
@@ -214,10 +256,17 @@ export class BlackboardStore {
     if (this.board.agentSessions[agent] === agentSessionId) return;
     this.append('agent_created', { agent, agentSessionId });
   }
-  startRun(intent: Intent, agent: AgentRole = 'probe', agentSessionId = this.board.agentSessions[agent] ?? 'legacy-unbound-probe') {
+  startRun(intent: Intent, agent: AgentRole = 'probe', agentSessionId = this.board.agentSessions[agent] ?? 'legacy-unbound-probe',
+    selection?: { revision: number; reason: string }) {
+    if (selection && selection.revision !== this.board.revision) throw new SchedulingChangedError('选择后黑板/输入已改变，需要按最新状态重新调度');
+    if (this.board.execution === 'paused' || this.board.toolScope?.error) throw new Error('Case 已暂停，不能开始 Run');
+    const invalid = candidateReason(this.board, intent.id);
+    if (invalid) throw new Error(`不能开始 Run：${invalid}`);
+    const chosen = selectIntent(this.board);
     const run = { id: this.id('R'), intentId: intent.id, agent, agentSessionId, inputRevision: this.board.revision,
       goalRevision: this.board.goalRevision, purpose: this.board.reviewIntentIds.includes(intent.id) ? 'review' as const : 'task' as const,
-      startedAt: new Date().toISOString(), status: 'running' as const, toolCallIds: [], evidenceIds: [] };
+      startedAt: new Date().toISOString(), status: 'running' as const, toolCallIds: [], evidenceIds: [],
+      reason: selection?.reason ?? (chosen.intent?.id === intent.id ? chosen.reason : `程序调度：显式派发 ${intent.id}，已复核当前合法候选`) };
     this.append('run_started', { run }); return structuredClone(run);
   }
   toolStarted(runId: string, toolCallId: string, tool: Evidence['tool'], artifactPath: string, responseRef?: string) { this.append('tool_started', { runId, toolCallId, tool, artifactPath, ...(responseRef ? { responseRef } : {}) }); }
@@ -230,15 +279,22 @@ export class BlackboardStore {
     const pending = messageIds.filter((id) => !cursor?.deliveredMessageIds.includes(id));
     if (pending.length || inputRevision > (cursor?.lastSeenRevision ?? 0)) this.append('inputs_delivered', { messageIds: pending, inputRevision, agent });
   }
-  commit(runId: string, update: XLoomUpdate) {
+  commit(runId: string, update: XLoomUpdateDraft) {
     const run = this.board.runs[runId]; if (!run) throw new Error('未知 Run');
-    const commit = normalizeUpdate(update, this.current(), run);
+    for (const evidence of Object.values(this.board.evidence)) if (evidence.artifactSha256) checkEvidenceMaterials(evidence, this.sessionDir);
+    const commit = normalizeUpdate(update, this.current(), run, (board, hypothesis) => prepareHttpObservation(this.sessionDir, board, hypothesis));
     this.append('agent_committed', commit, run.agent); return commit;
   }
   endRun(runId: string, reason: string, interrupted: boolean) { this.append(interrupted ? 'run_interrupted' : 'run_failed', { runId, reason }); }
   execution(execution: BoardState['execution'], outcome: BoardState['outcome'], reason: string) { this.append('execution_changed', { execution, outcome, reason }); }
   reopen(intentId: string, reason: string) { this.append('intent_reopened', { intentId, reason }, 'user'); }
   scheduleReview() {
+    if (this.board.execution === 'paused' || this.board.toolScope?.error || Object.values(this.board.runs).some((run) => run.status === 'running'))
+      throw new SchedulingChangedError('当前已暂停或存在活动 Run，不能调度收尾评估');
+    const chosen = selectIntent(this.board).intent;
+    if (chosen && !this.board.reviewIntentIds.includes(chosen.id)) throw new SchedulingChangedError('仍有 B3 可派发任务，不能新建收尾评估');
+    if (chosen) return structuredClone(chosen); // Reuse the B3 choice without changing its priority.
+    if (this.board.knowledgeRevision <= this.board.reviewCursor) throw new SchedulingChangedError('没有未消费的知识变化，不能重复调度收尾评估');
     const intent: Intent = { id: this.id('I'), kind: 'explore', objective: '收尾评估：依据现有事实、用户成功条件和新 Hint 判断可执行的下一步或明确结束原因；不要重复已有任务，技术支持不等于影响确认，条件不足则明确受阻。', basisIds: [], prerequisites: [], state: 'open', createdRevision: this.board.revision + 1 };
     this.append('review_scheduled', { intent, knowledgeRevision: this.board.knowledgeRevision }); return intent;
   }

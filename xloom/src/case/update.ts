@@ -1,15 +1,25 @@
 import { Type, type TProperties, type TSchema } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
-import { activeFacts, backendForTool, hasToolSource, coversMainPath, refreshValidity, validVerification, type AttackPath, type AttackPathEdge, type BoardState, type Commit, type Fact, type Hypothesis, type IdPrefix, type Intent, type RunRecord, type XLoomUpdate } from './types.js';
+import { recommendationReason } from './scheduler.js';
+import { activeFacts, backendForTool, hasToolSource, coversMainPath, refreshValidity, validVerification, type CheckedObservation, type AttackPath, type AttackPathEdge, type BoardState, type Commit, type Fact, type Hypothesis, type IdPrefix, type Intent, type RunRecord, type XLoomUpdate, type XLoomUpdateDraft } from './types.js';
+import { equalStringSets, pathContent, stringSet, structuralKey } from './structure.js';
 
 const str = Type.String({ minLength: 1, pattern: '\\S' });
 const strings = Type.Array(str);
 const object = <T extends TProperties>(fields: T) => Type.Object(fields, { additionalProperties: false });
 const enumOf = <T extends string>(...values: T[]) => Type.Union(values.map((v) => Type.Literal(v)));
+const httpAssertion = object({ kind: Type.Literal('http-owner-read'), origin: str, resourcePath: str, conditionsPath: str, identityPath: str,
+  object: str, actor: str, owner: str, valuePointer: Type.String({ maxLength: 256 }), backend: Type.Optional(enumOf('local', 'kali')) });
+const observations = object({ policy: str, actorIdentity: str, ownerIdentity: Type.Optional(str), invalidIdentity: str,
+  allowed: Type.Optional(str), denied: Type.Optional(str), test: Type.Optional(str),
+  transfers: Type.Optional(Type.Array(object({ edgeId: str, from: str, to: str, outputPointer: str, inputPointer: Type.Optional(str),
+    delegation: Type.Optional(object({ identity: str, invalidIdentity: str })) }), { maxItems: 8 })) });
 const verification = object({ verdict: enumOf('supported', 'rejected', 'disputed'), factIds: Type.Array(str, { minItems: 1 }),
   controls: str, backendResult: str, impact: str, limitations: Type.String(),
+  observations: Type.Optional(observations),
   pathCheck: Type.Optional(object({ pathId: str, edgeIds: Type.Array(str, { minItems: 1, uniqueItems: true }), complete: Type.Boolean(), continuity: str })) });
-const hypFields = { claim: str, status: enumOf('lead', 'technical_hit', 'impact_verified', 'rejected', 'disputed'), factIds: strings, alternatives: strings, gaps: strings };
+const hypFields = { claim: str, status: enumOf('lead', 'technical_hit', 'impact_verified', 'rejected', 'disputed'), factIds: strings, alternatives: strings, gaps: strings,
+  httpAssertion: Type.Optional(httpAssertion) };
 const intentFields = { kind: enumOf('explore', 'verify'), objective: str, basisIds: strings, prerequisites: strings,
   parentId: Type.Optional(str), verifiesHypothesisId: Type.Optional(str), state: enumOf('open', 'blocked') };
 const partial = (fields: TProperties): Record<string, TSchema> => Object.fromEntries(Object.entries(fields).map(([key, schema]) => [key, Type.Optional(schema)]));
@@ -23,11 +33,21 @@ const schema = object({
   hypotheses: Type.Array(Type.Union([object({ ref: str, ...hypFields, duplicateOf: Type.Optional(str) }), object({ id: str, ...partial(hypFields), duplicateOf: Type.Optional(Type.Union([str, Type.Null()])), verification: Type.Optional(verification) })])),
   intents: Type.Array(Type.Union([object({ ref: str, ...intentFields }), object({ id: str, ...patchIntentFields })])),
   attackPaths: Type.Array(Type.Union([object({ ref: str, ...pathFields }), object({ id: str, ...partial(pathFields) })])), intentState: enumOf('open', 'done', 'blocked', 'cancelled'),
-  next_move: enumOf('continue', 'widen', 'verify', 'stop'), reason: str,
+  next_move: enumOf('continue', 'widen', 'verify', 'stop'), reason: str, nextIntentId: Type.Optional(str),
   goalAssessment: Type.Optional(object({ criteria: Type.Array(object({ criterion: Type.Integer({ minimum: 1 }),
     status: enumOf('satisfied', 'unknown', 'rejected'), basisIds: strings, reason: str })) })),
 });
 const checker = TypeCompiler.Compile(schema);
+
+/** The only draft defaults. Do not coerce explicit values or touch nested patches. */
+export function normalizeUpdateDraft(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const normalized = { ...value } as Record<string, unknown>;
+  for (const key of ['facts', 'hypotheses', 'intents', 'attackPaths'] as const) {
+    if (!Object.hasOwn(value, key)) normalized[key] = [];
+  }
+  return normalized;
+}
 
 export function parseUpdate(text: string): XLoomUpdate {
   const starts = [...text.matchAll(/^\s*```xloom-update\s*$/gm)];
@@ -38,11 +58,12 @@ export function parseUpdate(text: string): XLoomUpdate {
   return validateUpdateShape(value);
 }
 export function validateUpdateShape(value: unknown): XLoomUpdate {
-  if (!checker.Check(value)) {
-    const errors = [...checker.Errors(value)].slice(0, 5).map((e) => `${e.path || '/'} ${e.message}`).join('; ');
+  const normalized = normalizeUpdateDraft(value);
+  if (!checker.Check(normalized)) {
+    const errors = [...checker.Errors(normalized)].slice(0, 5).map((e) => `${e.path || '/'} ${e.message}`).join('; ');
     throw new Error(`XLoomUpdate 字段或状态非法：${errors}`);
   }
-  return value as unknown as XLoomUpdate;
+  return normalized as unknown as XLoomUpdate;
 }
 export function hideUpdateBlock(text: string, streaming = true): string {
   let visible = text.replace(/^[ \t]*```xloom-update\b[^\n]*\n[\s\S]*?(?:\n[ \t]*```[ \t]*(?=\n|$)|$)/gim, '');
@@ -56,7 +77,8 @@ export function hideUpdateBlock(text: string, streaming = true): string {
   return visible.trimEnd();
 }
 
-export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRecord): Commit {
+export function normalizeUpdate(raw: XLoomUpdateDraft, board: BoardState, run: RunRecord,
+  prepareObservation?: (staged: BoardState, hypothesis: Hypothesis) => CheckedObservation): Commit {
   const update = validateUpdateShape(raw);
   if (run.status !== 'running' || board.runs[run.id]?.status !== 'running') throw new Error('该 Run 已经结束，不能重复提交');
   const actual = board.runs[run.id];
@@ -101,6 +123,7 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
     const { ref: _ref, ...fields } = draft as typeof draft & { ref?: string };
     const h = { ...board.hypotheses[id], ...fields, id } as Hypothesis;
     h.factIds = unique(h.factIds);
+    h.gaps = stringSet(h.gaps); h.alternatives = stringSet(h.alternatives);
     for (const id of h.factIds) if (!effective.has(id) && ('ref' in draft || draft.factIds !== undefined)) throw new Error(`假设引用了不存在或已被纠正的 Fact：${id}`);
     if (h.status === 'technical_hit' && !h.factIds.length) throw new Error('technical_hit 必须有实际 Fact 支撑');
     if (draft.duplicateOf === null) delete h.duplicateOf;
@@ -110,11 +133,17 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
     if ('ref' in draft && (h.status === 'impact_verified' || v)) throw new Error('新建 Hypothesis 只能建立候选，不能直接确认');
     if (run.agent === 'probe' && (v || draft.status === 'impact_verified')) throw new Error('Probe 不能提交 verification 或 impact_verified');
     if (draft.status === 'impact_verified' && !v) throw new Error('影响确认必须提交本次 Proof verification');
+    if (draft.status === 'rejected' && !v) throw new Error('反证必须提交本次 Proof verification 及可核对的观察契约；前提不足请保留 gaps/blocked');
     // A previous verification cannot silently certify a changed claim or chain.
     const old = board.hypotheses[id];
-    if (v && old.claim !== h.claim) throw new Error('验证中不能改写待验证断言；先保存候选再安排明确的新验证');
-    if (old && !v && (old.claim !== h.claim || old.factIds.some((fid) => !h.factIds.includes(fid)) ||
-      (old.verification && (JSON.stringify(old.gaps) !== JSON.stringify(h.gaps) || JSON.stringify(old.alternatives) !== JSON.stringify(h.alternatives) || old.status !== h.status)))) {
+    const assertionChanged = structuralKey(old?.httpAssertion) !== structuralKey(h.httpAssertion);
+    // Keep the original binding representation for existing checked legacy logs.
+    if (old?.httpAssertion && !assertionChanged) h.httpAssertion = old.httpAssertion;
+    if (v && (old.claim !== h.claim || assertionChanged)) throw new Error('验证中不能改写待验证断言或HTTP契约；先保存候选再安排明确的新验证');
+    if (h.httpAssertion && (h.httpAssertion.actor === h.httpAssertion.owner ||
+      !h.httpAssertion.resourcePath.startsWith('/') || !h.httpAssertion.conditionsPath.startsWith('/') || !h.httpAssertion.identityPath.startsWith('/'))) throw new Error('HTTP契约需要不同actor/owner及绝对路径');
+    if (old && !v && (old.claim !== h.claim || assertionChanged || old.factIds.some((fid) => !h.factIds.includes(fid)) ||
+      (old.verification && (!equalStringSets(old.gaps, h.gaps) || !equalStringSets(old.alternatives, h.alternatives) || old.status !== h.status)))) {
       if (!['rejected', 'disputed'].includes(h.status)) h.status = 'disputed';
       h.needsReview = true;
     }
@@ -139,10 +168,12 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
         if (update.intentState !== 'done') throw new Error('影响确认需要当前 verify 同批完成');
         for (const fid of h.factIds) if (allFacts[fid].evidenceIds.some((eid) => board.evidence[eid].status !== 'observed' || board.evidence[eid].kind !== 'observation')) throw new Error('影响证据链包含未完成或非观察材料');
       }
-      const { pathCheck, ...verificationFields } = v;
+      const { pathCheck, observations, ...verificationFields } = v;
       h.verification = { ...verificationFields, factIds, runId: run.id,
+        ...(observations ? { observations: { ...observations, ...(observations.transfers ? { transfers: observations.transfers.map((t) => ({ ...t, edgeId: resolveRef(t.edgeId) })) } : {}) } } : {}),
         ...(pathCheck ? { pathCheck: { ...pathCheck, pathId: resolveRef(pathCheck.pathId), edgeIds: unique(pathCheck.edgeIds), pathRevision: 0 } } : {}) };
       h.needsReview = false;
+      delete h.reviewReason;
     }
     return h;
   });
@@ -184,8 +215,7 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
       }
     }
     path.edges.sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }));
-    const content = (p: AttackPath) => JSON.stringify({ summary: p.summary, nodeIds: p.nodeIds, edges: p.edges.map(({ confirmed: _c, ...e }) => e), gaps: p.gaps, verifiesHypothesisId: p.verifiesHypothesisId });
-    if (!old || content(path) !== content(old)) path.revision = board.revision + 1;
+    if (!old || structuralKey(pathContent(path)) !== structuralKey(pathContent(old))) path.revision = board.revision + 1;
     attackPaths.push(path);
   }
   const allPaths = { ...structuredClone(board.attackPaths), ...Object.fromEntries(attackPaths.map((p) => [p.id, p])) };
@@ -202,7 +232,11 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
       if (c.edgeIds.some((id) => !p.edges.some((e) => e.id === id && e.relation === 'enables'))) throw new Error('pathCheck 只接受本路径 enables 边');
       if (c.complete && (h.status !== 'impact_verified' || h.verification.verdict !== 'supported' || p.gaps.length || !coversMainPath(p, c))) throw new Error('完整路径确认需要 supported、影响确认、完整唯一主连接覆盖及无关键 gaps');
       if (!c.complete && h.status === 'impact_verified') throw new Error('部分路径支持不能成为影响确认');
-    } else if (h.status === 'impact_verified' && Object.values(allPaths).some((p) => p.verifiesHypothesisId === h.id)) throw new Error('路径断言的影响确认必须提交完整 pathCheck');
+      if (h.verification.verdict === 'rejected' && !coversMainPath(p, c)) throw new Error('路径反驳需要全部主连接的实际前提和输入绑定，失败终点不能替代可执行条件');
+    } else if (Object.values(allPaths).some((p) => p.verifiesHypothesisId === h.id)) {
+      if (h.status === 'impact_verified') throw new Error('路径断言的影响确认必须提交完整 pathCheck');
+      if (h.verification.verdict === 'rejected') throw new Error('路径断言的反驳必须提交覆盖全部主连接的 pathCheck；错误或失效能力终点失败应保留未知');
+    }
   }
   const checkBasis = (ids: string[]) => {
     for (const id of ids) if (!effective.has(id) && !Object.hasOwn(allHypotheses, id)) throw new Error(`basisIds 引用不存在或失效：${id}`);
@@ -216,7 +250,13 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
     if (!('ref' in draft) && ['done', 'cancelled', 'running'].includes(board.intents[id].state)) throw new Error(`不能改写已经结束或正在执行的任务：${id}`);
     const { ref: _ref, ...fields } = draft as typeof draft & { ref?: string };
     const i = { ...board.intents[id], ...fields, id, createdRevision: board.intents[id]?.createdRevision ?? board.revision + 1 } as Intent;
-    i.basisIds = unique(i.basisIds); checkBasis(i.basisIds);
+    i.basisIds = unique(i.basisIds);
+    // Retiring a stored branch preserves its historical Fact references. This
+    // never authorizes execution: explicit/new bases and reopening stay strict.
+    const historicalFacts = !('ref' in draft) && !Object.hasOwn(draft, 'basisIds') &&
+      (draft.state === 'cancelled' || draft.state === 'blocked')
+      ? new Set(board.intents[id].basisIds.filter((fid) => Object.hasOwn(board.facts, fid))) : undefined;
+    checkBasis(i.basisIds.filter((fid) => !historicalFacts?.has(fid)));
     if (i.parentId) i.parentId = resolveRef(i.parentId);
     if (i.verifiesHypothesisId) i.verifiesHypothesisId = resolveRef(i.verifiesHypothesisId);
     if (i.kind === 'verify') {
@@ -264,10 +304,28 @@ export function normalizeUpdate(raw: XLoomUpdate, board: BoardState, run: RunRec
   const staged: BoardState = { ...structuredClone(board), facts: allFacts, hypotheses: allHypotheses, intents: allIntents, attackPaths: allPaths };
   staged.runs[run.id].status = 'completed';
   if (assessment && run.goalRevision === board.goalRevision) staged.assessment = { goalRevision: run.goalRevision, value: assessment };
+  for (const h of Object.values(staged.hypotheses)) if (h.verification?.runId === run.id && (h.status === 'impact_verified' || h.verification.pathCheck || h.verification.verdict === 'rejected')) {
+    if (!prepareObservation) throw new Error('确认缺少程序原始观察绑定准备层');
+    h.verification.checked = prepareObservation(staged, h);
+  }
   refreshValidity(staged);
-  for (const h of hypotheses) if (h.verification?.runId === run.id && !validVerification(staged, h)) throw new Error('本批 verification 受纠正或路径依赖失效影响，不能提交无效的新验证');
+  for (const h of hypotheses) if (h.verification?.runId === run.id && !validVerification(staged, h)) {
+    // This cause comes from this submission's program-side binding, not model
+    // prose or response bytes. An unavailable premise is not a Fact correction.
+    const checked = h.verification.checked;
+    if (checked?.result === 'unavailable' && checked.reason)
+      throw new Error(`本批 verification 观察绑定不可用：${checked.reason}；不能提交无效的新验证`);
+    throw new Error('本批 verification 受纠正或路径依赖失效影响，不能提交无效的新验证');
+  }
   const changedHypotheses = Object.values(staged.hypotheses).filter((h) => seenHyp.has(h.id) || JSON.stringify(h) !== JSON.stringify(board.hypotheses[h.id]));
+  let nextIntentId: string | undefined, reason = update.reason;
+  if (update.nextIntentId !== undefined) {
+    const id = resolveRef(update.nextIntentId);
+    const ignored = recommendationReason(staged, actual, id, update.next_move, intents.filter((i) => !Object.hasOwn(board.intents, i.id)).map((i) => i.id));
+    if (ignored) reason += `\n程序调度说明：忽略 nextIntentId=${update.nextIntentId}：${ignored}`;
+    else nextIntentId = id;
+  }
   return { runId: run.id, summary: update.summary, facts, hypotheses: changedHypotheses, intents, attackPaths, refs,
-    intentState: update.intentState, next_move: update.next_move, reason: update.reason,
+    intentState: update.intentState, next_move: update.next_move, reason, ...(nextIntentId ? { nextIntentId } : {}),
     ...(assessment ? { goalAssessment: assessment } : {}), goalRevision: run.goalRevision };
 }

@@ -1,6 +1,7 @@
 import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { BlackboardStore } from '../case/store.js';
+import { checkEvidenceMaterials } from '../case/context-index.js';
 import type { AgentRole, RoleCursor } from '../case/types.js';
 import { configSecrets, publicModelInfo, type ActiveConfig } from '../config.js';
 import { redactor } from '../log.js';
@@ -91,6 +92,7 @@ export function resumeSession(home: string, id: string, config: ActiveConfig) {
       const target = resolve(dir, path);
       if (!target.startsWith(dir + sep) || !existsSync(target) || !statSync(target).isFile()) throw new Error(`Evidence ${e.id} 必要材料缺失或引用无效：${target}`);
     }
+    for (const evidence of Object.values(board.evidence)) checkEvidenceMaterials(evidence, dir);
     // All essential validation completes before any repairable local projection is written.
     for (const role of ['probe', 'proof'] as const) if (entries[role]) SessionManager.open(join(dir, metadata.agents[role]!)).buildSessionContext();
     session.timeline.push(...timeline);

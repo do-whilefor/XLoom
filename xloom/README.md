@@ -22,7 +22,9 @@ AttackPath 表达少量状态连接。相关、支持或反驳解释均不等于
 
 每次知识变化和周期结束后自动生成会话内 `results/report.md`，包含范围、确认/未确认事项、路径、聚合、任务、证据相对链接和已记录用量。`/status` 显示当前结果与报告位置；无需新命令。报告不是新事实，恢复会从事件重建。写入失败时显示旧 revision 已过期，成功提交的黑板仍然有效。
 
-详细条件见 [结果与报告](docs/results.md)。当前代码交付及实际验证范围见 [七阶段总审计](docs/acceptance.md) 和 [提示词与 token 优化](docs/token-optimization.md)，此前记录见 [第七阶段结果](docs/phase-7-result.md) 和 [Chrome/Kali 联合验收](docs/chrome-kali-acceptance.md)。本轮真实外部操作按用户范围仅由 GLM 经密码 SSH 查询 Kali 工具版本；其他后端记录注明历史适用性。另四家提供商缺少有效密钥，真实闭环记为 BLOCKED；仍有确认质量缺陷及新版双角色实测缺项，不宣称全阶段通过。
+详细条件见 [结果与报告](docs/results.md)。历史验收范围见 [七阶段总审计](docs/acceptance.md)、[提示词与 token 优化](docs/token-optimization.md)、[第七阶段结果](docs/phase-7-result.md) 和 [Chrome/Kali 联合验收](docs/chrome-kali-acceptance.md)。其中 Kali 版本查询只属于当时授权及被测版本。
+
+最新复核与修复见 [2026-09-09 B0–B5 继续开发结果](docs/cairny-optimization/B0-B5-continuation-result.md) 和 [当前逐项矩阵](docs/cairny-optimization/B0-B5-continuation-current-matrix.md)。[前轮复核结果](docs/cairny-optimization/B0-B5-review-result.md)、[前轮矩阵](docs/cairny-optimization/B0-B5-review-current-matrix.md)、[B5 结果](docs/cairny-optimization/B5-result.md) 和 [交付复核说明](docs/cairny-optimization/B5-delivery.md) 保留各自版本结论。沿用 Pi 0.85.1；本轮不连接 Kali。其他供应商、后端及历史必需缺项分别保留状态，构建或局部测试通过不代表全部验收通过。npm 包包含运行程序和说明；原始本地证据、测试夹具和评测答案保留在仓库测试目录，不在 npm 包内。
 
 ## 运行与继续
 
@@ -44,6 +46,8 @@ xloom --version
 ## 输入与五个命令
 
 首条输入是 Goal，可用独立行 `起点：`、`范围：`、`成功条件：` 表达要求。后续文本是 Hint，各角色分别在安全边界接收。`修改目标：新目标` 会更新当前 Goal，同时保留原文和变更历史。“继续”不改写 Goal，也不作为新知识触发空收尾循环。
+
+角色工具限制可写成独立行 `Probe 仅 chrome/read` 和 `Proof 仅 kali/read`，或 `工具范围：Probe=chrome,read; Proof=kali,read`。每次调用前检查最新用户限制；后续用户列表替换对应角色，`[]` 明确禁止全部，非法列表暂停等待修正。状态与恢复保留限制和消息来源。此语法只约束六工具的选择，不能替代具体目标授权或通用 shell 沙箱。
 
 | 命令 | 行为 |
 | --- | --- |
@@ -106,7 +110,7 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 
 原始输出按调用保存；网络检索和截图不能单独冒充新的 Proof 实验。超时、断线或取消保留部分资料并暂停整个周期，结果可能未知。切换/退出关闭自有连接，用户 Chrome 和远程文件保留；恢复不会重放动作或复活旧句柄。
 
-当前真实验收：本机 Chrome 152 的页面交互、网络请求/响应体、eval、截图、测试 Cookie 保留及取消恢复已通过，见 [Chrome 补充验收](docs/chrome-followup-result.md)。源码目录可运行 `npm run test:chrome` 单独检查浏览器，`npm run test:chrome:live` 验证当前模型自动驱动 Chrome 的双角色调查。真实 Kali 的远端身份、独立 exec/流、退出、取消及恢复已通过，见 [Kali 验收](docs/live-kali-acceptance.md)。`npm run test:kali` 单独检查已配置的真实 SSH；`npm run test:joint` 使用当前模型、Chrome 与 Kali 上短命合成服务完成联合调查，结果见 [联合验收](docs/chrome-kali-acceptance.md)。临时服务仅含合成数据，结束时关闭，不安装远端程序。
+历史后端验收归档：[Chrome 补充验收](docs/chrome-followup-result.md)、[Kali 验收](docs/live-kali-acceptance.md) 和 [联合验收](docs/chrome-kali-acceptance.md) 记录各自当时版本与授权范围，不能直接作为当前 B5 的通过结论。本轮不连接 Kali，当前结果见 [B5 结果](docs/cairny-optimization/B5-result.md)。源码目录可运行 `npm run test:chrome` 单独检查浏览器，`npm run test:chrome:live` 验证模型自动驱动 Chrome 的双角色调查。`npm run test:kali` 会访问已配置的真实 SSH；`npm run test:joint` 会使用当前模型、Chrome 与 Kali 上的短命合成服务，须有对应调查范围授权后再执行。临时服务仅含合成数据，结束时关闭，不安装远端程序。
 
 历史 Chrome 单端模型验收曾因非法 Update 未通过，详见原记录；本轮增加了单点确认示例和同批单条补丁约束。联合调查会单独核对真实后端、工具范围、独立验证、报告及恢复，不以接口连通代替完整闭环。模型仍可能违反协议；失败记录保留，不自动修复或重放。
 

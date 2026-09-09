@@ -3,54 +3,19 @@ import { redactor } from '../log.js';
 import type { ProbeAgent } from '../runtime/agent.js';
 import { combineUsageTotals } from '../runtime/usage.js';
 import { recordedTools } from './artifacts.js';
-import { buildCapsule } from './capsule.js';
+import { renderCapsule } from './capsule.js';
 import { BlackboardStore, ViewWriteError } from './store.js';
-import { activeFacts, validConfirmation, pathState, type AgentRole, type BoardState, type Intent } from './types.js';
+import { validConfirmation, pathState, type AgentRole, type BoardState, type Intent } from './types.js';
 import { parseUpdate } from './update.js';
+import { candidateReason, legalCandidates, selectIntent, SchedulingChangedError } from './scheduler.js';
+import { hasSupportedGoalCompletion } from './goal-assessment.js';
+export { requiresProof, hasSupportedGoalCompletion } from './goal-assessment.js';
 
 export function selectExplore(board: BoardState): Intent | undefined {
-  return Object.values(board.intents).filter((i) => i.kind === 'explore' && i.state === 'open')
-    .sort((a, b) => a.createdRevision - b.createdRevision || a.id.localeCompare(b.id, 'en', { numeric: true }))[0];
+  return legalCandidates(board).find((i) => i.kind === 'explore');
 }
 export function selectNextIntent(board: BoardState): Intent | undefined {
-  const open = Object.values(board.intents).filter((i) => i.state === 'open' && !board.hypotheses[i.verifiesHypothesisId ?? '']?.duplicateOf)
-    .sort((a, b) => a.createdRevision - b.createdRevision || a.id.localeCompare(b.id, 'en', { numeric: true }));
-  return open.find((i) => i.kind === 'verify') ?? open.find((i) => i.kind === 'explore');
-}
-export function requiresProof(board: BoardState): boolean {
-  // Explicit exclusions are scope, not success conditions. Keep all affirmative
-  // clauses (including requirements elsewhere in the same Goal) for the existing
-  // conservative check. This is not a general natural-language permission parser.
-  const affirmative = [board.goal.request, ...board.goal.successCriteria].join('\n')
-    .split(/([。！？；;\n，,])/)
-    .filter(clause => /(?:但|而|仍|\bhowever\b|\bbut\b|\balso\b)/i.test(clause) ||
-      !/^\s*(?:(?:不要|无需|无须|不必|不需要|不要求|禁止|不)(?:再|额外|独立|进一步)?(?:进行|创建|做|推断|确认|证明|验证|利用|评估|扫描)|(?:do not|don't|no need to)\s+(?:verify|confirm|prove|assess|exploit)\b|(?:无需|无须|不必|不需要|不要求)(?:额外|独立)?安全影响验证\s*$)/i.test(clause))
-    .join('');
-  return /(?:确认|证明|验证|利用|可利用|影响|危害).{0,24}(?:漏洞|安全|越权|注入|执行代码)|(?:漏洞|安全|越权|注入).{0,24}(?:确认|证明|验证|影响|危害)|(?:confirm|prove|verify|exploit).{0,35}(?:vulnerab|security|impact)|(?:vulnerab|security).{0,35}(?:confirm|impact|exploit)/is
-    .test(affirmative);
-}
-export function hasSupportedGoalCompletion(board: BoardState): boolean {
-  if (!board.assessment || board.assessment.goalRevision !== board.goalRevision || Object.values(board.hints).some((h) => !h.delivered)) return false;
-  if (requiresProof(board) && !board.assessment.value.criteria.some((c) => c.status === 'satisfied' && c.basisIds.some((id) => board.hypotheses[id] && validConfirmation(board, board.hypotheses[id])))) return false;
-  const active = new Set(activeFacts(board).map((f) => f.id));
-  const validFact = (id: string) => active.has(id) && board.facts[id].evidenceIds.every((eid) => {
-    const e = board.evidence[eid]; return e && e.kind !== 'derived' && (e.status === 'observed' || (e.kind === 'observation' && e.status === 'error' && e.outcomeKnown === true));
-  });
-  return board.goal.successCriteria.every((_c, index) => {
-    const c = board.assessment!.value.criteria.find((c) => c.criterion === index + 1);
-    // Action receipts can support a multi-step ordinary task alongside a real
-    // observation of its result. A receipt by itself still cannot satisfy it.
-    if (!c?.basisIds.some((id) => (board.facts[id] ? [id] : board.hypotheses[id]?.factIds ?? []).some((fid) =>
-      validFact(fid) && board.facts[fid].evidenceIds.some((eid) => board.evidence[eid].kind === 'observation')))) return false;
-    const safetyCriterion = requiresProof({ ...board, goal: { ...board.goal, request: _c, successCriteria: [_c] } });
-    if (safetyCriterion && !c?.basisIds.some((id) => board.hypotheses[id] && validConfirmation(board, board.hypotheses[id]))) return false;
-    return c?.status === 'satisfied' && c.basisIds.length > 0 && c.basisIds.every((id) => {
-      if (board.facts[id]) return validFact(id);
-      const h = board.hypotheses[id];
-      return h && !h.duplicateOf && (h.status !== 'impact_verified' || validConfirmation(board, h)) && !h.needsReview && !['rejected', 'disputed'].includes(h.status) && h.factIds.length > 0 && h.factIds.every(validFact) &&
-        !Object.values(board.intents).some((i) => i.kind === 'verify' && i.verifiesHypothesisId === id && ['open', 'blocked'].includes(i.state));
-    });
-  });
+  return selectIntent(board).intent;
 }
 
 export class CaseLoop {
@@ -96,6 +61,11 @@ export class CaseLoop {
         const change = /^(?:修改目标|更改目标|change goal)\s*[:：]\s*([\s\S]+)$/i.exec(text.trim());
         if (change) this.store.changeGoal(change[1], messageId);
       }
+      if (this.board.toolScope?.error) {
+        const error = this.board.toolScope.error;
+        this.notice(this.board.toolScope.inputs.findLast((input) => input.messageId === error.messageId)?.lines.join('\n') ?? '');
+        this.cancel(error.reason); return;
+      }
       if (this.active || this.activeAgent.state !== 'idle') { this.changed(); return; }
       this.stopReason = '';
       this.store.rebuildView();
@@ -118,23 +88,30 @@ export class CaseLoop {
     const limits = [...new Set([...findings.map((h) => h.verification!.limitations), ...Object.values(b.attackPaths).flatMap((p) => p.gaps), ...Object.values(b.hypotheses).filter((h) => !h.duplicateOf).flatMap((h) => h.gaps)])].filter(Boolean);
     return `当前有效问题 ${findings.length}；未决候选 ${Object.values(b.hypotheses).filter((h) => !h.duplicateOf && !validConfirmation(b, h) && h.status !== 'rejected').length}\n${Object.values(b.attackPaths).map((p) => `${p.id}：${pathState(b, p)}`).join('；') || '无候选路径'}\n关键限制：${limits.slice(0, 4).join('；') || '以已记录的验证范围为限'}\n${this.store.reportStatus.error ?? `报告：${this.store.reportPath}（r${this.store.reportStatus.revision ?? '未知'}）`}`;
   }
+  private canAdvance(board = this.board) {
+    return !this.stopReason && !this.closed && board.execution === 'running' && !board.toolScope?.error;
+  }
   private async advance() {
     let runs = 0;
     try {
       while (!this.stopReason && !this.closed) {
         const board = this.board;
+        if (!this.canAdvance(board)) break;
         if (hasSupportedGoalCompletion(board)) { this.finish('satisfied', '用户成功条件已有实际观察支持'); break; }
-        let intent = selectNextIntent(board);
+        const selection = selectIntent(board);
+        let intent = selection.intent, selectionReason = selection.reason;
         if (!intent) {
           const waiting = Object.values(board.intents).filter((i) => ['open', 'blocked'].includes(i.state));
           if (board.knowledgeRevision > board.reviewCursor) {
             intent = this.store.scheduleReview();
+            selectionReason = `程序调度：既有收尾评估 ${intent.id}；知识版本 ${board.knowledgeRevision} 超过 reviewCursor ${board.reviewCursor}`;
           } else {
-            this.finish(waiting.length ? 'blocked' : 'exhausted', waiting.length ? '现有任务受阻，需要补充输入或执行条件' : '现有证据下没有可执行后继；不代表证明系统无漏洞'); break;
+            const blockers = waiting.map((item) => `${item.id}：${item.state === 'open' ? candidateReason(board, item.id) : item.reason || item.objective}`).join('；');
+            this.finish(waiting.length ? 'blocked' : 'exhausted', waiting.length ? `现有任务受阻，需要补充输入或执行条件；${blockers}` : '现有证据下没有可执行后继；不代表证明系统无漏洞'); break;
           }
         }
         if (runs >= this.config.limits.maxRunsPerCycle) { this.cancel(`达到本周期 Run 上限 ${this.config.limits.maxRunsPerCycle}`); break; }
-        if (this.stopReason || this.closed) break;
+        if (!this.canAdvance()) break;
         const role: AgentRole = intent.kind === 'verify' ? 'proof' : 'probe';
         const agent = role === 'probe' ? this.probe : this.proof ??= this.probe.createRole('proof');
         this.store.registerAgent('probe', this.probe.sessionId);
@@ -142,45 +119,54 @@ export class CaseLoop {
         this.currentRole = role;
         this.session.activity(role);
         const snapshot = this.board;
+        if (!this.canAdvance(snapshot)) break;
+        if (hasSupportedGoalCompletion(snapshot)) { this.finish('satisfied', '用户成功条件已有实际观察支持'); break; }
+        const latestSelection = selectIntent(snapshot);
+        if (latestSelection.intent?.id !== intent.id) continue;
+        if (!snapshot.reviewIntentIds.includes(intent.id)) selectionReason = latestSelection.reason;
         if (role === 'probe' && !agent.hasInput(snapshot.goalMessageId)) agent.recordInput(snapshot.originalGoal.request, snapshot.goalMessageId);
         // Native input once per role, preserving the original source identity in its transcript.
         for (const hint of Object.values(snapshot.hints)) if (!snapshot.agentCursors[role]?.deliveredMessageIds.includes(hint.messageId)) agent.ensurePendingInput(hint.content, hint.messageId);
-        const capsule = buildCapsule(snapshot, intent, role, this.session.dir);
-        const run = this.store.startRun(intent, role, agent.sessionId); runs++;
+        const capsule = renderCapsule(snapshot, intent, role, { sessionDir: this.session.dir });
+        let run;
+        try { run = this.store.startRun(intent, role, agent.sessionId, { revision: snapshot.revision, reason: selectionReason }); }
+        catch (error) { if (error instanceof SchedulingChangedError) continue; throw error; }
+        runs++;
         this.currentIntentId = intent.id; this.stage = '执行任务';
         this.notice(`${role === 'proof' ? 'Proof' : 'Probe'} · 任务 ${intent.id} · ${run.id}${run.purpose === 'review' ? ' · 收尾评估' : ''}\n${intent.objective}`);
         this.changed();
-        if (this.stopReason || this.closed) {
-          this.store.endRun(run.id, this.stopReason || '会话退出', true); break;
+        if (!this.canAdvance()) {
+          this.store.endRun(run.id, this.stopReason || this.board.reason || '会话退出', true); break;
         }
         const tools = recordedTools({ cwd: this.session.metadata.cwd, store: this.store, run, backends: this.probe.backends,
           responseRef: () => agent.responseRef,
           supportsImages: agent.model.input.includes('image'),
           maxToolCalls: this.config.limits.maxToolCallsPerRun, stop: (reason) => this.cancel(reason), notice: this.notice });
-        await agent.runIntent({ role: 'custom', customType: 'xloom.capsule', display: false, runId: run.id, revision: run.inputRevision, content: capsule, timestamp: Date.now() }, tools,
+        await agent.runIntent({ role: 'custom', customType: 'xloom.capsule', display: false, runId: run.id, revision: run.inputRevision, ...capsule, timestamp: Date.now() }, tools,
           (ids, inputRevision = run.inputRevision) => {
             const previous = this.board.revision;
             this.store.delivered(ids, inputRevision, role);
             if (this.board.revision !== previous) {
               const cursor = this.board.agentCursors[role]; if (cursor) this.session.saveCursor(role, cursor);
             }
-          }, () => { const current = this.board; return { content: buildCapsule(current, current.intents[intent.id], role, this.session.dir), revision: current.revision }; }, (reason) => this.cancel(reason));
-        if (this.stopReason || this.closed || agent.lastResult?.aborted) {
-          this.store.endRun(run.id, this.stopReason || '执行中断，已发生动作的结果可能未知', true); break;
+          }, (options) => { const current = this.board; return { ...renderCapsule(current, current.intents[intent.id], role, { sessionDir: this.session.dir, ...options }), revision: current.revision }; }, (reason) => this.cancel(reason));
+        if (!this.canAdvance() || agent.lastResult?.aborted) {
+          this.store.endRun(run.id, this.stopReason || (!this.canAdvance() && this.board.reason) || '执行中断，已发生动作的结果可能未知', true); break;
         }
         if (agent.lastError || !agent.lastResult || ['error', 'aborted', 'length'].includes(agent.lastResult.stopReason))
           throw new Error(agent.lastError ?? '模型没有完整最终回复或达到输出上限');
         this.stage = '解析与提交'; this.changed();
         this.notice(`任务 ${intent.id}：正在解析与提交`);
-        if (this.stopReason || this.closed) { this.store.endRun(run.id, this.stopReason || '会话退出', true); break; }
+        if (!this.canAdvance()) { this.store.endRun(run.id, this.stopReason || this.board.reason || '会话退出', true); break; }
         const commit = this.store.commit(run.id, parseUpdate(agent.lastResult.finalText));
         this.session.activity(role);
         const objects = [...commit.facts, ...commit.hypotheses, ...commit.intents, ...(commit.attackPaths ?? [])].map((o) => o.id).join(', ');
         const verificationSummary = commit.hypotheses.filter((h) => h.verification).map((h) => `${h.id}: ${h.needsReview ? '原确认需要复核' : h.duplicateOf ? `并入 ${h.duplicateOf}，不继承验证` : h.verification!.verdict} / ${h.status} · ${h.verification!.limitations}`).join('\n');
-        this.stage = '提交成功'; this.notice(`任务 ${intent.id}：提交成功 · r${this.board.revision}${objects ? ` · 对象 ${objects}` : ''}\n${commit.summary}${verificationSummary ? `\n${role} 验证：${verificationSummary}` : ''}`); this.changed();
+        const schedulingNote = commit.reason.includes('\n程序调度说明：') ? commit.reason.slice(commit.reason.indexOf('\n程序调度说明：')) : '';
+        this.stage = '提交成功'; this.notice(`任务 ${intent.id}：提交成功 · r${this.board.revision}${objects ? ` · 对象 ${objects}` : ''}\n${commit.summary}${schedulingNote}${verificationSummary ? `\n${role} 验证：${verificationSummary}` : ''}`); this.changed();
         if (this.store.reportStatus.error) this.notice(this.store.reportStatus.error);
         if (commit.attackPaths?.length) this.notice(commit.attackPaths.map((p) => `${p.id}：${pathState(this.board, this.board.attackPaths[p.id])}`).join('；'));
-        if (!this.stopReason && !this.closed && agent.compactPending) { await agent.flushCompact(); this.store.rebuildReport(); this.notice(agent.compactStatus); }
+        if (this.canAdvance() && agent.compactPending) { await agent.flushCompact(); this.store.rebuildReport(); this.notice(agent.compactStatus); }
       }
     } catch (error) { this.pauseForError(error); }
     finally {

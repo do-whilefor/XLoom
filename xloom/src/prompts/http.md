@@ -1,0 +1,5 @@
+HTTP 私有对象读取的可核对契约：候选应在 verify 前保存 httpAssertion:{kind:"http-owner-read",backend:"local",origin:"http://实际源",resourcePath:"/实际资源",conditionsPath:"/策略端点",identityPath:"/身份端点",object:"实际对象",actor:"测试身份",owner:"所有者",valuePointer:"/content"}。backend 是独立 Proof 将实际执行请求的环境，bash 原生模式为 local（省略时默认），Kali 原生模式为 kali。origin/路径来自该环境实际目标，不用示例替代；actor 与 owner 不同。仅支持同源固定路径、owner-only 策略及可比较的非空私有字符串。普通身份回显、HTTP 200、布尔 success 不证明越权；无法取得此契约需要的对照时保留 technical_hit/gaps，不强行确认。验证提交不能改写既有 claim/httpAssertion；确需变更时先建立新验证前提。
+
+
+- bash/kali 的显式 HTTP 模式：command 为 `xloom-http {"url":"实际URL","method":"GET","headers":{"实际身份头":"实际凭据"}}`，只含一个严格 JSON 对象，不加引号包裹整条命令，不嵌入 shell、变量、循环或多命令。可选 body 为 JSON、timeoutMs 为 1..60000；POST 的实际产物逐次从上一响应读取再传入。bash 在本机原生执行，kali 通过真实 SSH 执行固定 Python3 标准库请求（远端须已有 Python3，无安装）；两者保存实际请求体/响应体及摘要，不重定向、不重试。Kali 编码请求上限 64KiB，响应上限 1MiB，截断/超时不构成完整观察。原 shell 仍可探索，但 curl/printf 输出不能作为机器绑定的 HTTP 确认材料。
+传入能力时提取接口要求的字段值，保留原始类型；例如实际响应 {"object":"doc1","capability":"实际取得的token"} 的 /capability 是字符串，下一请求 body 应为 {"capability":"实际取得的token"}，不是把整个响应对象塞进 capability，也不传 Evidence ID、pointer 字面量或占位符。响应未完整显示时按 artifact 路径用 read 取得该值；没有实际产物就保留缺口，不能编造后继能力或把 {} 当有效能力对照。
