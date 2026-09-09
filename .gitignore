@@ -10,13 +10,33 @@ venv/
 *.tgz.sha256
 
 # Local runtime data and credentials
-/logs/
+logs/
+*.log
+*.tap
+/test-results/
+/playwright-report/
 .xloom/
 .env
 .env.*
 !.env.example
 auth.json
 credentials.json
+
+# Local test results, acceptance reports and development records
+/docs/*.json
+!/docs/pi-files.json
+!/docs/pi-files-v0.61.0.json
+/docs/acceptance*.md
+/docs/*-acceptance.md
+/docs/*-result.md
+/docs/development-prompt*.md
+/docs/model-validation.md
+/docs/token-optimization.md
+/docs/cairny-optimization/B[0-9]*.md
+/docs/cairny-optimization/*-result.md
+/docs/cairny-optimization/*-matrix.md
+/docs/cairny-optimization/*-development-notes.md
+/evals/*/live-results.md
 
 # Local editor / OS temporary files
 .DS_Store
