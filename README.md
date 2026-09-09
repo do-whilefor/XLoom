@@ -1,6 +1,6 @@
 # XLoom · M6
 
-XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告：一个 TUI、独立连续的 Probe / Proof、共享 Blackboard、串行调度，支持整个调查的恢复和按角色压缩上下文，并加入 Chrome / Kali 的固定六工具。沿用 **Pi v0.85.1**（`d981de1229ef899957bbe968bc8dcda02a21f477`），增加 **GLM / Kimi / DeepSeek / Anthropic / OpenAI** 配置及 **Chat Completions / Messages / Responses** 三种协议。各家真实验收状态见 [第六阶段结果](docs/phase-6-result.md)。
+XLoom 0.7.0 加入问题聚合、AttackPath、确认失效传播与自动报告：一个 TUI、独立连续的 Probe / Proof、共享 Blackboard、串行调度，支持整个调查的恢复和按角色压缩上下文，并加入 Chrome / Kali 的固定六工具。沿用 **Pi v0.85.1**（`d981de1229ef899957bbe968bc8dcda02a21f477`），增加 **GLM / Kimi / DeepSeek / Anthropic / OpenAI** 配置及 **Chat Completions / Messages / Responses** 三种协议。模型配置见 [能力与思考映射](docs/models.md)。
 
 
 ## 首次安装
@@ -22,9 +22,7 @@ AttackPath 表达少量状态连接。相关、支持或反驳解释均不等于
 
 每次知识变化和周期结束后自动生成会话内 `results/report.md`，包含范围、确认/未确认事项、路径、聚合、任务、证据相对链接和已记录用量。`/status` 显示当前结果与报告位置；无需新命令。报告不是新事实，恢复会从事件重建。写入失败时显示旧 revision 已过期，成功提交的黑板仍然有效。
 
-详细条件见 [结果与报告](docs/results.md)。历史验收范围见 [七阶段总审计](docs/acceptance.md)、[提示词与 token 优化](docs/token-optimization.md)、[第七阶段结果](docs/phase-7-result.md) 和 [Chrome/Kali 联合验收](docs/chrome-kali-acceptance.md)。其中 Kali 版本查询只属于当时授权及被测版本。
-
-最新复核与修复见 [2026-09-09 B0–B5 继续开发结果](docs/cairny-optimization/B0-B5-continuation-result.md) 和 [当前逐项矩阵](docs/cairny-optimization/B0-B5-continuation-current-matrix.md)。[前轮复核结果](docs/cairny-optimization/B0-B5-review-result.md)、[前轮矩阵](docs/cairny-optimization/B0-B5-review-current-matrix.md)、[B5 结果](docs/cairny-optimization/B5-result.md) 和 [交付复核说明](docs/cairny-optimization/B5-delivery.md) 保留各自版本结论。沿用 Pi 0.85.1；本轮不连接 Kali。其他供应商、后端及历史必需缺项分别保留状态，构建或局部测试通过不代表全部验收通过。npm 包包含运行程序和说明；原始本地证据、测试夹具和评测答案保留在仓库测试目录，不在 npm 包内。
+详细条件见 [结果与报告](docs/results.md)。
 
 ## 运行与继续
 
@@ -92,7 +90,7 @@ Enter 提交，Shift+Enter 换行（取决于终端协议）；Esc 暂停整个�
 }
 ```
 
-配置缺失时生成权限 0600 的模板并停止。未选中的模型可保留模板占位，只有切换为活动项时才需要填写有效 Key 和必需容量；不会因为另外四家的占位而影响当前 GLM 启动。GLM 示例的 `thinking` 支持 low/high/max；省略时不发送思考控制，保留模型默认行为。其他模型按精确能力表验证：支持关闭的模型可选 off，不会把不支持档位静默改成另一档。未知 ID 必须填写已知 `contextWindow` 与 `maxOutputTokens`，并省略尚未映射的思考设置；不自动宣称支持图像。已知模型可缩小输出限制，超出已知能力时明确报错。详见 [能力与思考映射](docs/models.md) 和 [五家配置模板](config.example.json)。达到预算暂停，用户显式继续才开启新周期。退出后修改配置再启动，可用 `-c` 继续原调查；当前进程与 `/resume` 不热加载。三种协议使用 Pi 的转换生成下一请求，原历史来源和 Evidence 不改写；跨协议真实验证范围与限制见阶段结果。没有 TUI 模型切换、CLI/环境变量模型覆盖、备用模型或透明重试；密钥不写入会话元数据、软件日志和安装包。
+配置缺失时生成权限 0600 的模板并停止。未选中的模型可保留模板占位，只有切换为活动项时才需要填写有效 Key 和必需容量；不会因为另外四家的占位而影响当前 GLM 启动。GLM 示例的 `thinking` 支持 low/high/max；省略时不发送思考控制，保留模型默认行为。其他模型按精确能力表验证：支持关闭的模型可选 off，不会把不支持档位静默改成另一档。未知 ID 必须填写已知 `contextWindow` 与 `maxOutputTokens`，并省略尚未映射的思考设置；不自动宣称支持图像。已知模型可缩小输出限制，超出已知能力时明确报错。详见 [能力与思考映射](docs/models.md) 和 [五家配置模板](config.example.json)。达到预算暂停，用户显式继续才开启新周期。退出后修改配置再启动，可用 `-c` 继续原调查；当前进程与 `/resume` 不热加载。三种协议使用 Pi 的转换生成下一请求，原历史来源和 Evidence 不改写。没有 TUI 模型切换、CLI/环境变量模型覆盖、备用模型或透明重试；密钥不写入会话元数据、软件日志和安装包。
 
 ## Chrome / Kali 接入
 
@@ -110,9 +108,7 @@ Chrome 需要与 XLoom 同主机、同桌面用户，使用 Chrome 144+ stable�
 
 原始输出按调用保存；网络检索和截图不能单独冒充新的 Proof 实验。超时、断线或取消保留部分资料并暂停整个周期，结果可能未知。切换/退出关闭自有连接，用户 Chrome 和远程文件保留；恢复不会重放动作或复活旧句柄。
 
-历史后端验收归档：[Chrome 补充验收](docs/chrome-followup-result.md)、[Kali 验收](docs/live-kali-acceptance.md) 和 [联合验收](docs/chrome-kali-acceptance.md) 记录各自当时版本与授权范围，不能直接作为当前 B5 的通过结论。本轮不连接 Kali，当前结果见 [B5 结果](docs/cairny-optimization/B5-result.md)。源码目录可运行 `npm run test:chrome` 单独检查浏览器，`npm run test:chrome:live` 验证模型自动驱动 Chrome 的双角色调查。`npm run test:kali` 会访问已配置的真实 SSH；`npm run test:joint` 会使用当前模型、Chrome 与 Kali 上的短命合成服务，须有对应调查范围授权后再执行。临时服务仅含合成数据，结束时关闭，不安装远端程序。
-
-历史 Chrome 单端模型验收曾因非法 Update 未通过，详见原记录；本轮增加了单点确认示例和同批单条补丁约束。联合调查会单独核对真实后端、工具范围、独立验证、报告及恢复，不以接口连通代替完整闭环。模型仍可能违反协议；失败记录保留，不自动修复或重放。
+源码目录可运行 `npm run test:chrome` 单独检查浏览器，`npm run test:chrome:live` 验证模型自动驱动 Chrome 的双角色调查。`npm run test:kali` 会访问已配置的真实 SSH；`npm run test:joint` 会使用当前模型、Chrome 与 Kali 上的短命合成服务，须有对应调查范围授权后再执行。临时服务仅含合成数据，结束时关闭，不安装远端程序。
 
 ## 保存与恢复边界
 
@@ -175,23 +171,7 @@ npm install --global --prefix "$HOME/.local" ./xloom-0.7.0.tgz
 
 应用不依赖 Python；它仅用于开发阶段 PTY 验收。测试与脚本化响应均为开发文件，不加载到产品运行时。前期真实验收脚本保留为 `test:live:phase1/2/3/4`、`test:pty:phase1/2/3`。
 
-- [第七阶段开发 prompt](docs/development-prompt-phase-7.md)
-- [1–7 阶段总审计开发 prompt](docs/development-prompt-acceptance-1-7.md)
-- [第七阶段实现与验收](docs/phase-7-result.md)
-- [七阶段最终验收](docs/acceptance.md)
-- [提示词与 token 优化](docs/token-optimization.md)
 - [结果与报告](docs/results.md)
-- [第六阶段开发 prompt](docs/development-prompt-phase-6.md)
-- [第六阶段实现与验收](docs/phase-6-result.md)
 - [模型能力与思考映射](docs/models.md)
-- [第五阶段开发 prompt](docs/development-prompt-phase-5.md)
-- [第五阶段实现与验收](docs/phase-5-result.md)
 - [Chrome / Kali 接入](docs/backends.md)
-- [第四阶段开发 prompt](docs/development-prompt-phase-4.md)
-- [第一至第四阶段审计与复验](docs/acceptance-1-4.md)
-- [本轮审计开发 prompt](docs/development-prompt-acceptance-1-4.md)
-- [第四阶段实现与验收](docs/phase-4-result.md)
 - [Pi 源码来源](docs/pi-source.md)
-- [第三阶段历史](docs/phase-3-result.md)
-- [第二阶段历史](docs/phase-2-result.md)
-- [Pi 迁移历史](docs/pi-migration-result.md)
