@@ -1,8 +1,0 @@
-node_modules/
-dist/
-*.tgz
-.env*
-config.json
-.xloom/
-coverage/
-logs/

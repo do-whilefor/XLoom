@@ -6,22 +6,17 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+*.tgz
+*.tgz.sha256
 
 # Local runtime data and credentials
+/logs/
 .xloom/
 .env
 .env.*
+!.env.example
 auth.json
 credentials.json
-/logs/
-/xloom/logs/
-
-# Downloaded Pi executable bundle; reference source is kept separately
-/Pi源码/pi-linux-x64/
-
-# Existing backup archives and generated npm packages
-/xloom-before-*.tar.gz
-*.tgz
 
 # Local editor / OS temporary files
 .DS_Store
