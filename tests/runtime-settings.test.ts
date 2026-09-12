@@ -34,6 +34,53 @@ afterEach(async () => {
 });
 
 describe("Pi settings service", () => {
+  it("reads local alias capacity without resolving command-backed credentials or making a network request", async () => {
+    const modelsPath = join(directory, "models.json");
+    await writeFile(modelsPath, JSON.stringify({ providers: { "fixture-alias": { api: "openai-completions", baseUrl: "https://fixture.invalid/v1",
+      apiKey: "!header-must-not-execute-this-credential-command", models: [{ id: "local-model", contextWindow: 1_048_576, maxTokens: 8192 }] } } }));
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Header must not use the network"));
+    let getAuth!: ReturnType<typeof vi.spyOn>;
+    const metadata = new SettingsService(async signal => {
+      const runtime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath,
+        modelsStore: new InMemoryModelsStore(), allowModelNetwork: false, signal });
+      getAuth = vi.spyOn(runtime, "getAuth");
+      return runtime;
+    });
+    expect(await metadata.describeModel({ provider: "fixture-alias", model: "local-model" })).toEqual({ contextWindow: 1_048_576, authLabel: "API Key" });
+    expect(getAuth).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("honors explicit context and environment credentials over a stored subscription", async () => {
+    configure = runtime => {
+      vi.spyOn(runtime, "isUsingSubscription").mockReturnValue(true);
+      vi.spyOn(runtime, "isUsingOAuth").mockReturnValue(true);
+    };
+    vi.stubEnv("HEADER_FIXTURE_KEY", "synthetic-private-key");
+    expect(await service.describeModel({ provider: "anthropic", model: "missing-alias", contextWindow: 200_000, apiKeyEnv: "HEADER_FIXTURE_KEY" }))
+      .toEqual({ contextWindow: 200_000, authLabel: "API Key" });
+    vi.stubEnv("HEADER_FIXTURE_KEY", undefined);
+    expect(await service.describeModel({ provider: "anthropic", model: "missing-alias", apiKeyEnv: "HEADER_FIXTURE_KEY" })).toEqual({ authLabel: "未配置认证" });
+    expect(await service.describeModel({ provider: "anthropic", model: "missing-alias" })).toEqual({ authLabel: "Subscription" });
+  });
+
+  it("describes OAuth without claiming subscription billing and tolerates unknown model capacity", async () => {
+    configure = runtime => {
+      vi.spyOn(runtime, "isUsingSubscription").mockReturnValue(false);
+      vi.spyOn(runtime, "isUsingOAuth").mockReturnValue(true);
+    };
+    expect(await service.describeModel({ provider: "anthropic", model: "missing-alias" })).toEqual({ authLabel: "OAuth" });
+  });
+
+  it("cancels optional metadata reads and does not expose configuration errors", async () => {
+    const controller = new AbortController(); controller.abort();
+    const factory = vi.fn(createRuntime);
+    await expect(new SettingsService(factory).describeModel({ provider: "anthropic", model: "missing" }, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(factory).not.toHaveBeenCalled();
+    const invalid = new SettingsService(async () => { throw new Error("secret-runtime-value"); });
+    await expect(invalid.describeModel({ provider: "anthropic", model: "missing" })).rejects.not.toThrow("secret-runtime-value");
+  });
+
   it("lists local model choices without headers, credentials, or auth resolution", async () => {
     let getAuth!: ReturnType<typeof vi.spyOn>;
     configure = (runtime) => { getAuth = vi.spyOn(runtime, "getAuth"); };

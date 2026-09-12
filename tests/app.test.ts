@@ -13,7 +13,7 @@ import type { LoopEvent, RunRequest } from "../src/types.js";
 const roots: string[] = [];
 const apps: AppController[] = [];
 const usage = { input: 3, output: 2, cost: 0.01 };
-function setup(options: AppOptions = {}) {
+function setup(options: AppOptions = {}, describeModel?: NonNullable<AppOptions["settings"]>["describeModel"]) {
   const root = mkdtempSync(path.join(tmpdir(), "xloom-app-test-")); roots.push(root);
   const configPath = path.join(root, "xloom.json");
   const config = defaultConfig(CHAT_GOAL);
@@ -21,6 +21,7 @@ function setup(options: AppOptions = {}) {
   const runRequests: RunRequest[] = [];
   const chat = { send: vi.fn(async (request: ChatRequest) => { chatRequests.push(request); request.onEvent({ mode: "chat", type: "text", text: "Hello" }); return usage; }), reset: vi.fn() };
   const settings = {
+    ...(describeModel ? { describeModel } : {}),
     listModels: vi.fn(async () => [{ provider: "fixture", model: "model-a", name: "Model A" }, { provider: "fixture", model: "model-b", name: "Model B" }]),
     listProviders: vi.fn(async () => [{ id: "fixture", name: "Fixture", authTypes: ["api_key", "oauth"] }]),
     saveApiKey: vi.fn(async (_provider: string, _key: string, _signal?: AbortSignal) => {}),
@@ -34,6 +35,74 @@ function setup(options: AppOptions = {}) {
 }
 
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+describe("session header metadata", () => {
+  it("caches optional metadata and discards a stale result after a model change", async () => {
+    const requests: { signal?: AbortSignal; resolve: (value: { contextWindow: number; authLabel: string }) => void }[] = [];
+    const describe = vi.fn((_config, signal) => new Promise<{ contextWindow: number; authLabel: string }>(resolve => { requests.push({ signal, resolve }); }));
+    const test = setup({}, describe);
+    expect(test.app.getSessionInfo()).toMatchObject({ workspace: test.root, modelName: test.config.models.chat?.model ?? test.config.models.execute.model });
+    expect(test.app.getSessionInfo().contextWindow).toBeUndefined();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    await test.app.selectModel("fixture", "model-a", "all");
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]!.signal?.aborted).toBe(true);
+    requests[1]!.resolve({ contextWindow: 200_000, authLabel: "OAuth" });
+    await vi.waitFor(() => expect(test.app.getSessionInfo()).toMatchObject({ model: "fixture/model-a", contextWindow: 200_000, authLabel: "OAuth" }));
+    requests[0]!.resolve({ contextWindow: 1_000_000, authLabel: "API Key" });
+    await Promise.resolve();
+    for (let index = 0; index < 10; index++) expect(test.app.getSessionInfo().contextWindow).toBe(200_000);
+    expect(describe).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes authentication metadata after saving credentials and ignores completion after close", async () => {
+    let resolve!: (value: { contextWindow: number; authLabel: string }) => void;
+    let signal: AbortSignal | undefined;
+    const describe = vi.fn((_config, currentSignal) => { signal = currentSignal; return new Promise<{ contextWindow: number; authLabel: string }>(done => { resolve = done; }); });
+    const test = setup({}, describe);
+    await vi.waitFor(() => expect(describe).toHaveBeenCalledTimes(1));
+    resolve({ contextWindow: 128_000, authLabel: "未配置认证" });
+    await vi.waitFor(() => expect(test.app.getSessionInfo().authLabel).toBe("未配置认证"));
+    await test.app.saveApiKey(test.config.models.execute.provider, "synthetic-key");
+    await vi.waitFor(() => expect(describe).toHaveBeenCalledTimes(2));
+    await test.app.close();
+    expect(signal?.aborted).toBe(true);
+    const count = test.events.length;
+    resolve({ contextWindow: 1_000_000, authLabel: "API Key" });
+    await Promise.resolve();
+    expect(test.events).toHaveLength(count);
+  });
+
+  it.each([false, true])("keeps chat operational when optional metadata fails (synchronous=%s)", async synchronous => {
+    const test = setup({}, () => {
+      if (synchronous) throw new Error("unavailable metadata");
+      return Promise.reject(new Error("unavailable metadata"));
+    });
+    await test.app.chat("hello");
+    expect(test.app.getSessionInfo()).toMatchObject({ mode: "chat", status: "idle", usage });
+    expect(test.app.getSessionInfo().contextWindow).toBeUndefined();
+    expect(test.events.some(event => event.type === "notice")).toBe(false);
+  });
+
+  it("tracks the actual agent model through handoffs and returns to the chat model", async () => {
+    const test = setup();
+    await test.app.selectModel("fixture", "model-a", "all");
+    await test.app.selectModel("fixture", "model-b", "execute");
+    const observed: { mode: string; model: string }[] = [];
+    test.runner.run.mockImplementation(async request => {
+      observed.push({ mode: request.mode, model: test.app.getSessionInfo().model });
+      if (request.mode === "execute") {
+        test.app.pause();
+        return { output: { summary: "Synthetic execution cancelled", result: "no_progress" }, usage };
+      }
+      return { output: { summary: "Synthetic plan", steps: [{ goalId: "G0", from: [], description: "Inspect fixture", successSignal: "Saved fixture", evidencePlan: "Synthetic local evidence", priority: 50 }] }, usage };
+    });
+    await test.app.runGoal("header role fixture");
+    expect(observed).toEqual([{ mode: "decide", model: "fixture/model-a" }, { mode: "execute", model: "fixture/model-b" }]);
+    await test.app.chat("hello");
+    expect(test.app.getSessionInfo().model).toBe("fixture/model-a");
+  });
+});
 
 describe("chat / red-team application boundary", () => {
   it("defaults to chat without creating an empty task database", async () => {

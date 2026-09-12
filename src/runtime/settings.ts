@@ -1,13 +1,15 @@
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { CredentialSynchronizationError, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelConfig } from "../types.js";
 
 export type { AuthEvent, AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 
-export type SettingsRuntime = Pick<ModelRuntime, "getError" | "getModels" | "getProviders" | "getProvider" | "login" | "logout">;
+export type SettingsRuntime = Pick<ModelRuntime, "getError" | "getModels" | "getModel" | "getProviders" | "getProvider" | "getProviderAuthStatus" | "isUsingOAuth" | "isUsingSubscription" | "login" | "logout">;
 export type SettingsRuntimeFactory = (signal?: AbortSignal) => Promise<SettingsRuntime>;
 
 export interface ModelChoice { provider: string; model: string; name: string }
 export interface ProviderChoice { id: string; name: string; authTypes: string[] }
+export interface ModelDisplayInfo { contextWindow?: number; authLabel?: string }
 
 const createRuntime: SettingsRuntimeFactory = (signal) => ModelRuntime.create({ allowModelNetwork: false, signal });
 
@@ -46,6 +48,24 @@ export class SettingsService {
         .sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
     } catch {
       throw new Error("Pi model catalog could not be read.");
+    }
+  }
+
+  /** Display metadata only: local catalog and auth availability, never resolved credentials or billing claims. */
+  async describeModel(config: ModelConfig, signal?: AbortSignal): Promise<ModelDisplayInfo> {
+    const runtime = await this.runtime(signal);
+    try {
+      const model = runtime.getModel(config.provider, config.model);
+      const contextWindow = config.contextWindow ?? model?.contextWindow;
+      const status = runtime.getProviderAuthStatus(config.provider);
+      const authLabel = config.apiKeyEnv ? process.env[config.apiKeyEnv] ? "API Key" : "未配置认证"
+        : runtime.isUsingSubscription(config.provider) ? "Subscription"
+        : runtime.isUsingOAuth(config.provider) ? "OAuth"
+        : status.configured ? "API Key" : "未配置认证";
+      return { ...(Number.isSafeInteger(contextWindow) && contextWindow! > 0 ? { contextWindow } : {}), authLabel };
+    } catch {
+      checkCancellation(signal);
+      throw new Error("Pi model display metadata could not be read.");
     }
   }
 

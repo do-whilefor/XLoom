@@ -58,7 +58,7 @@ function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板�
   const close = async (): Promise<void> => {
     if (!terminal.stopped) {
       controls.editor.disableSubmit = false;
-      controls.editor.setText("/quit");
+      controls.editor.setText("/exit");
       terminal.input("\r");
     }
     await session;
@@ -70,12 +70,14 @@ function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板�
 }
 
 describe("TUI layout and input history", () => {
-  it("keeps the project header and status without the removed intro or static help footer", () => {
+  it("shows the pixel X session header and status without the removed intro or static help footer", () => {
     const app = launch();
     app.tui.renderNow(true);
     const screen = plainText(app.terminal.output);
-    expect(screen).toContain("xloom");
-    expect(screen).toContain("界面测试");
+    expect(screen).toContain("Xloom v");
+    expect(screen).toContain("▀█▄ ▄█▀");
+    expect(screen).toContain("test/test");
+    expect(screen).toContain(process.cwd());
     expect(screen).toContain("idle");
     expect(screen).toContain("180 tokens");
     expect(screen).toContain("step 1");
@@ -84,6 +86,20 @@ describe("TUI layout and input history", () => {
     expect(screen).not.toContain("黑板协作");
     expect(screen).not.toContain("输入 /start");
     expect(screen).not.toContain("/help · /start · /board");
+  });
+
+  it.each([4, 5, 6, 8])("keeps input usable after the header shrinks to a %i-row terminal", rows => {
+    const app = launch(undefined, 40, rows);
+    app.editor.setText("short draft");
+    app.tui.renderNow(true);
+    expect(app.editor.getExpandedText()).toBe("short draft");
+    expect(plainText(app.terminal.output)).toContain("short draft");
+    app.terminal.rows = 24;
+    app.terminal.resize();
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toContain("Xloom v");
+    expect(app.editor.getExpandedText()).toBe("short draft");
   });
 
   it("uses Up/Down for previous/next submissions and restores a multiline unsent draft", () => {
@@ -216,7 +232,7 @@ describe("TUI slash candidates and compact transcript", () => {
     expect(plainText(app.terminal.output)).toContain("RAW_FILE_BODY");
     expect(plainText(app.terminal.output)).toContain("RAW_PROTOCOL");
     expect(plainText(app.terminal.output)).toContain("Verbose planning reason");
-    app.submit("/details");
+    app.terminal.input("\x0f");
     app.terminal.output = "";
     app.tui.renderNow(true);
     expect(plainText(app.terminal.output)).not.toMatch(/RAW_FILE_BODY|RAW_PROTOCOL/);
@@ -241,6 +257,31 @@ describe("TUI slash candidates and compact transcript", () => {
     app.tui.renderNow(true);
     expect(plainText(app.terminal.output).match(/当前端点未提供定价/g)).toHaveLength(1);
   });
+
+  it("shows an explicit partial report on pause without exposing an empty reasoning stub", async () => {
+    const app = launch(undefined, 100, 40);
+    app.board.status = "running";
+    app.emit({ type: "handoff", handoff: { role: "execute", mode: "execute", revision: 2, runId: "private", trigger: { kind: "planned", reason: "Continue remaining goal" } } });
+    app.emit({ type: "runtime", runtime: { type: "thinking_start", mode: "execute", blockId: "interrupted", text: "" } });
+    app.emit({ type: "runtime", runtime: { type: "thinking", mode: "execute", blockId: "interrupted", text: "Problem:" } });
+    app.board.status = "paused";
+    app.board.reason = "Run time limit reached; inspect interrupted step state before resuming.";
+    app.emit({ type: "state", snapshot: app.board });
+    app.emit({ type: "result", snapshot: app.board, result: { mode: "execute", final: true,
+      summary: "**任务未完成**\n\n已确认：第一项结果已保存。\n\n未完成：第二项仍待验证。\n\n暂停原因：达到运行时间限制。使用 /start 继续。" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const screen = plainText(app.terminal.output);
+    expect(screen).toContain("任务未完成");
+    expect(screen).toContain("第一项结果已保存");
+    expect(screen).toContain("第二项仍待验证");
+    expect(screen).toContain("使用 /start 继续");
+    expect(screen).not.toMatch(/\*\*|Problem:|Thought for 0s/);
+    expect(screen.indexOf("任务未完成")).toBeLessThan(screen.indexOf("Worked for"));
+    expect(screen).toContain("· paused");
+  });
 });
 
 describe("TUI clipboard", () => {
@@ -255,10 +296,10 @@ describe("TUI clipboard", () => {
     expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
-  it("does not execute a pasted /quit command until Enter", async () => {
-    const app = launch({ readText: vi.fn(async () => "/quit"), writeText: vi.fn(async () => true) });
+  it("does not execute a pasted /exit command until Enter", async () => {
+    const app = launch({ readText: vi.fn(async () => "/exit"), writeText: vi.fn(async () => true) });
     app.terminal.input("\x16");
-    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("/quit"));
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("/exit"));
     expect(app.controller.stop).not.toHaveBeenCalled();
     expect(app.terminal.stopped).toBe(false);
     app.terminal.input("\r");
@@ -269,11 +310,11 @@ describe("TUI clipboard", () => {
   it("keeps all native bracketed-paste chunks as text, including control bytes", () => {
     const app = launch();
     app.terminal.input("\x1b[200~");
-    app.terminal.input("/quit\r\n第二行");
+    app.terminal.input("/exit\r\n第二行");
     app.terminal.input("\x1b");
     app.terminal.input("\x03");
     app.terminal.input("\x1b[201~");
-    expect(app.editor.getExpandedText()).toBe("/quit\n第二行");
+    expect(app.editor.getExpandedText()).toBe("/exit\n第二行");
     expect(app.controller.pause).not.toHaveBeenCalled();
     expect(app.controller.stop).not.toHaveBeenCalled();
     expect(app.controller.hint).not.toHaveBeenCalled();
@@ -352,11 +393,11 @@ describe("TUI clipboard", () => {
     const writeText = vi.fn(async () => true);
     const app = launch({ readText: vi.fn(async () => ""), writeText });
     app.tui.renderNow(true);
-    app.terminal.input("\x1b[<0;2;1M");
-    app.terminal.input("\x1b[<32;7;1M");
-    app.terminal.input("\x1b[<0;7;1m");
+    app.terminal.input("\x1b[<0;12;1M");
+    app.terminal.input("\x1b[<32;17;1M");
+    app.terminal.input("\x1b[<0;17;1m");
     await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
-    expect(writeText.mock.calls[0]?.[0].trim()).toBe("xloom");
+    expect(writeText.mock.calls[0]?.[0].trim()).toBe("Xloom");
     const count = writeText.mock.calls.length;
     app.editor.setText("草稿\n第二行");
     app.terminal.input("\x03");

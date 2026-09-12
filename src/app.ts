@@ -7,15 +7,15 @@ import { LoopController } from "./controller.js";
 import { BlackboardStore } from "./store.js";
 import { ChatSession, type ChatRequest } from "./runtime/chat.js";
 import { PiRunner } from "./runtime/pi-runner.js";
-import { SettingsService } from "./runtime/settings.js";
+import { SettingsService, type ModelDisplayInfo } from "./runtime/settings.js";
 import { projectConfigSchema, usageSchema } from "./schema.js";
 import { currentTaskId, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
-import type { AgentRunner, BoardSnapshot, LoopEvent, ProjectConfig, Usage } from "./types.js";
+import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, ProjectConfig, Usage } from "./types.js";
 
 export interface AppOptions {
   runner?: AgentRunner;
   chat?: { send(request: ChatRequest): Promise<Usage>; reset(): void };
-  settings?: Pick<SettingsService, "listModels" | "listProviders" | "saveApiKey" | "login" | "logout">;
+  settings?: Pick<SettingsService, "listModels" | "listProviders" | "saveApiKey" | "login" | "logout"> & Partial<Pick<SettingsService, "describeModel">>;
 }
 
 /** Chat owns its history. A red-team task owns a separate blackboard, never that history. */
@@ -33,6 +33,10 @@ export class AppController {
   private active?: Promise<void>;
   private cancellation?: AbortController;
   private mode: "chat" | "run" = "chat";
+  private activeRole: AgentRole = "decide";
+  private displayInfo?: { key: string; value: ModelDisplayInfo };
+  private displayRequest?: AbortController;
+  private displayKey?: string;
   private chatUsage: Usage = { input: 0, output: 0, cost: 0 };
   private chatStatus = "idle";
   private closed = false;
@@ -52,6 +56,7 @@ export class AppController {
         this.attach(new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits }, { taskId }));
       }
     } catch (error) { this.lock.close(); throw error; }
+    this.refreshDisplayInfo();
   }
 
   private attach(store: BlackboardStore): void {
@@ -59,7 +64,13 @@ export class AppController {
     this.store?.close();
     this.store = store;
     this.loop = new LoopController(store, this.runner);
-    this.detachLoop = this.loop.subscribe(event => this.emit(event));
+    this.detachLoop = this.loop.subscribe(event => {
+      if (event.type === "handoff" && event.handoff) {
+        this.activeRole = event.handoff.role;
+        this.refreshDisplayInfo();
+      }
+      this.emit(event);
+    });
   }
 
   snapshot(): BoardSnapshot {
@@ -69,9 +80,29 @@ export class AppController {
       completedSteps: 0, noProgressCount: 0, lastMetaStep: 0, lastMetaRevision: -1, elapsedMs: 0,
     };
   }
+  private selectedModel(): ModelConfig { return this.mode === "chat" ? this.config.models.chat ?? this.config.models.execute : this.config.models[this.activeRole]; }
+  private refreshDisplayInfo(force = false): void {
+    if (this.closed || !this.settings.describeModel) return;
+    const selected = this.selectedModel();
+    const key = JSON.stringify(selected);
+    if (!force && key === this.displayKey) return;
+    this.displayKey = key;
+    this.displayInfo = undefined;
+    this.displayRequest?.abort();
+    const request = new AbortController();
+    this.displayRequest = request;
+    void Promise.resolve().then(() => { request.signal.throwIfAborted(); return this.settings.describeModel!(selected, request.signal); }).then(value => {
+      if (this.closed || request.signal.aborted || this.displayRequest !== request) return;
+      this.displayInfo = { key, value };
+      this.emit({ type: "session" });
+    }).catch(() => { /* Header metadata is optional; failures must not prevent chat or task execution. */ });
+  }
   getSessionInfo() {
-    const selected = this.mode === "chat" ? this.config.models.chat ?? this.config.models.execute : this.config.models.decide;
-    return { mode: this.mode, busy: !!this.active, model: `${selected.provider}/${selected.model}`, status: this.mode === "chat" ? this.chatStatus : this.store?.snapshot().status ?? "idle", usage: this.mode === "chat" ? { ...this.chatUsage } : this.store?.snapshot().usage };
+    const selected = this.selectedModel();
+    const display = this.displayInfo?.key === JSON.stringify(selected) ? this.displayInfo.value : undefined;
+    return { mode: this.mode, busy: !!this.active, model: `${selected.provider}/${selected.model}`, modelName: selected.model,
+      workspace: this.workspace, contextWindow: selected.contextWindow ?? display?.contextWindow, authLabel: display?.authLabel,
+      status: this.mode === "chat" ? this.chatStatus : this.store?.snapshot().status ?? "idle", usage: this.mode === "chat" ? { ...this.chatUsage } : this.store?.snapshot().usage };
   }
   subscribe(listener: (event: LoopEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: LoopEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* Isolate rendering from state. */ } } }
@@ -83,6 +114,7 @@ export class AppController {
   private perform(mode: "chat" | "run", operation: (signal: AbortSignal) => Promise<void>, externalSignal?: AbortSignal): Promise<void> {
     this.idle();
     this.mode = mode;
+    this.refreshDisplayInfo();
     const cancellation = new AbortController();
     this.cancellation = cancellation;
     const signal = externalSignal ? AbortSignal.any([cancellation.signal, externalSignal]) : cancellation.signal;
@@ -112,10 +144,11 @@ export class AppController {
       }
     });
   }
-  resetChat(): void { this.idle(); this.chatSession.reset(); this.chatUsage = { input: 0, output: 0, cost: 0 }; this.chatStatus = "idle"; this.mode = "chat"; this.emit({ type: "session" }); }
+  resetChat(): void { this.idle(); this.chatSession.reset(); this.chatUsage = { input: 0, output: 0, cost: 0 }; this.chatStatus = "idle"; this.mode = "chat"; this.refreshDisplayInfo(); this.emit({ type: "session" }); }
 
   runGoal(goal: string): Promise<void> {
     this.idle();
+    this.activeRole = "decide";
     const config = projectConfigSchema.parse({ ...this.config, goal: goal.trim(), scope: goal.trim(), context: "" });
     const taskId = `task-${randomUUID()}`;
     const store = new BlackboardStore(this.workspace, config, { taskId });
@@ -126,6 +159,7 @@ export class AppController {
   }
   start(): Promise<void> {
     this.idle();
+    this.activeRole = "decide";
     if (!this.loop) {
       if (this.config.goal === CHAT_GOAL) throw new Error("尚无红队任务，请输入 /run 目标。");
       this.attach(new BlackboardStore(this.workspace, this.config));
@@ -148,6 +182,7 @@ export class AppController {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
+    this.displayRequest?.abort();
     this.cancellation?.abort();
     this.closing = Promise.resolve().then(async () => {
       try { this.stop(); await this.waitForIdle(); }
@@ -178,6 +213,7 @@ export class AppController {
     }
     this.config = config;
     this.chatSession.reset();
+    this.refreshDisplayInfo(true);
     this.emit({ type: "session" });
   }
   selectModel(provider: string, model: string, role: "all" | "chat" | "decide" | "execute" = "all", signal?: AbortSignal): Promise<void> {
@@ -209,5 +245,5 @@ export class AppController {
       this.useStoredCredential(provider);
     });
   }
-  logout(provider: string, externalSignal?: AbortSignal): Promise<void> { return this.perform(this.mode, async signal => { await this.settings.logout(provider, signal); this.chatSession.reset(); }, externalSignal); }
+  logout(provider: string, externalSignal?: AbortSignal): Promise<void> { return this.perform(this.mode, async signal => { await this.settings.logout(provider, signal); this.chatSession.reset(); this.refreshDisplayInfo(true); }, externalSignal); }
 }

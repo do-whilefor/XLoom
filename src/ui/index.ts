@@ -1,15 +1,17 @@
 import chalk from "chalk";
 import { Editor, getKeybindings, isKeyRelease, isKeyRepeat, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
-import { compact, dispatchCommand, EventFeed, formatRunError, plainText, recordCommandHistory, statusLine, type FeedEntry, type UiController } from "./model.js";
+import { dispatchCommand, EventFeed, formatRunError, plainText, recordCommandHistory, statusLine, type FeedEntry, type UiController } from "./model.js";
 import { createSystemClipboard, type Clipboard } from "./clipboard.js";
 import { SettingsDialogs } from "./settings-dialog.js";
 import { createCommandAutocomplete } from "./autocomplete.js";
 import { FeedView } from "./feed-view.js";
+import { HeaderView } from "./header.js";
 
 export type { UiController } from "./model.js";
 
 export interface TuiOptions {
+  workspace?: string;
   clipboard?: Clipboard;
   now?: () => number;
   onReady?: (controls: { editor: Editor; tui: TuiAltScreen }) => void;
@@ -203,7 +205,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     try {
       if (feed.working && ["/pause", "/stop"].includes(text.trim())) interrupted = text.trim() === "/pause" ? "paused" : "stopped";
       dispatchCommand(text, controller, {
-        start, quit, print, details: toggleDetails,
+        start, quit, print,
         chat: value => perform("chat", () => { print("You", value); return controller.chat!(value); }),
         run: goal => perform("run", () => { print("You → Task", goal); return controller.runGoal!(goal); }),
         settings: (command, argument) => {
@@ -223,7 +225,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   };
   const scroll = new ScrollView(feedView, { follow: "end", primary: true, scrollbar: "auto", scrollbarStyle: muted });
   tui.setLayoutRoot(new VStack([
-    { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
+    { component: new HeaderView(() => controller.getSessionInfo?.() ?? { model: `${snapshot.config.models.decide.provider}/${snapshot.config.models.decide.model}`, contextWindow: snapshot.config.models.decide.contextWindow }, options.workspace ?? process.cwd()), basis: 3, shrink: 1, minSize: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
     { component: new StatusView(width => ` ${statusLine(snapshot, controller.getSessionInfo?.(), feed.uncommittedTokens, Math.max(0, width - 1))}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
@@ -236,7 +238,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
     else if (event.type === "handoff" && event.handoff) { beginWork(); feed.handoff(event.handoff); }
     else if (event.type === "notice" && event.message) feed.notice(event.message);
-    else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome); }
+    else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome, event.result.final); }
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {
       feed.breakStream();
@@ -359,9 +361,9 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   }
 }
 
-export async function startTui(controller: UiController): Promise<void> {
+export async function startTui(controller: UiController, workspace = process.cwd()): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("TUI 需要交互终端。请在 Windows Terminal 中运行，或使用 --headless。");
   }
-  await runTui(controller, new ProcessTerminal());
+  await runTui(controller, new ProcessTerminal(), { workspace });
 }
