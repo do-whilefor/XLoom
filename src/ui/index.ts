@@ -7,6 +7,7 @@ import { SettingsDialogs } from "./settings-dialog.js";
 import { createCommandAutocomplete } from "./autocomplete.js";
 import { FeedView } from "./feed-view.js";
 import { HeaderView } from "./header.js";
+import { PlainActivityTerminal } from "./plain-activity-terminal.js";
 
 export type { UiController } from "./model.js";
 
@@ -58,7 +59,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     void operation.then(() => clipboardTasks.delete(operation), () => clipboardTasks.delete(operation));
     return operation;
   };
-  const tui = new TuiAltScreen(terminal, true, undefined, {
+  const tui = new TuiAltScreen(new PlainActivityTerminal(terminal), true, undefined, {
     mouse: true, wheelScrollLines: 3, copyOnSelect: true,
     copySelection: (text) => trackClipboard(Promise.resolve().then(() => clipboard.writeText(text)).catch(() => false)),
     onRightClickPaste: () => { requestPaste(); },

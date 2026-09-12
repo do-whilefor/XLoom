@@ -196,7 +196,14 @@ describe("ordinary chat and dual-agent task UI", () => {
 
 describe("Claude-style response timeline", () => {
   const emit = (app: ReturnType<typeof launch>, event: LoopEvent): void => { for (const listener of app.listeners) listener(event); };
-  const screen = (app: ReturnType<typeof launch>): string => { app.terminal.output = ""; app.tui.renderNow(true); return plainText(app.terminal.output); };
+  const screen = (app: ReturnType<typeof launch>): string => {
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    // Check actual terminal bytes, not stripped text: native link styling must never reach the screen.
+    // Pi also emits a generic link reset on every row; those harmless closes remain intact.
+    expect(app.terminal.output).not.toMatch(/\x1b\]8;[^;]*;[^\x1b\x07]+/);
+    return plainText(app.terminal.output);
+  };
 
   it("does not show a stopped task's recovery reason when opening ordinary chat", () => {
     const app = launch({ restoredReason: "Stopped by user; state and evidence retained." });
@@ -339,6 +346,28 @@ describe("Claude-style response timeline", () => {
     app.terminal.input(`\x1b[<0;5;${row}M`);
     app.terminal.input(`\x1b[<0;5;${row}m`);
     expect(screen(app)).toContain("SCROLLED_THOUGHT");
+    expect(app.controller.chat).not.toHaveBeenCalled();
+  });
+
+  it.each([4, 8, 20, 31])("keeps summary and wrapped body clicks working without link styling at %i columns", width => {
+    const app = launch();
+    app.terminal.columns = width;
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "narrow", text: "BODY 中文 🧪 wrapped thought" } });
+    emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "narrow", text: "" } });
+    const clickRow = (marker: string): void => {
+      screen(app);
+      const rows = [...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)];
+      const row = rows.find(match => plainText(match[2]!).includes(marker));
+      expect(row, `Rendered row containing ${marker}`).toBeDefined();
+      app.terminal.input(`\x1b[<0;3;${row![1]}M`);
+      app.terminal.input(`\x1b[<0;3;${row![1]}m`);
+    };
+    expect(screen(app)).not.toContain("∴");
+    clickRow("▸");
+    expect(screen(app)).toContain("∴");
+    clickRow("∴");
+    expect(screen(app)).not.toContain("∴");
+    expect(app.clipboard.writeText).not.toHaveBeenCalled();
     expect(app.controller.chat).not.toHaveBeenCalled();
   });
 
