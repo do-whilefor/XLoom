@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.xloom/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+state/blackboard.md
+state/blackboard.md.*.tmp
+xloom.json
