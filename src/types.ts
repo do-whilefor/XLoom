@@ -80,7 +80,10 @@ export interface RunRequest {
 }
 export interface RunResult { output: unknown; usage: Usage }
 export interface AgentRunner { run(request: RunRequest): Promise<RunResult> }
-export interface RuntimeEvent { type: "text" | "tool_start" | "tool_update" | "tool_end" | "notice"; mode: Mode | "chat"; text: string; toolName?: string; toolCallId?: string; isError?: boolean }
+export interface RuntimeEvent {
+  type: "text" | "thinking_start" | "thinking" | "thinking_end" | "tool_start" | "tool_update" | "tool_end" | "notice";
+  mode: Mode | "chat"; text: string; toolName?: string; toolCallId?: string; isError?: boolean; blockId?: string; replayed?: boolean;
+}
 export interface LoopEvent {
   type: "state" | "board" | "runtime" | "notice" | "handoff" | "session" | "result";
   snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff;

@@ -1,4 +1,5 @@
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentOptions } from "@earendil-works/pi-agent-core";
 import { createReadTool, createWriteTool, createEditTool, createPowerShellTool } from "@earendil-works/pi-coding-agent";
@@ -44,6 +45,88 @@ export function runtimeEvent(event: AgentEvent, mode: RuntimeEvent["mode"]): Run
   }
 }
 
+/** Forward only Pi-returned plain thinking, never signatures or provider-redacted payloads. */
+export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event: RuntimeEvent) => void,
+  redact: (value: string) => string, secrets: () => readonly string[], fallbackText = false) {
+  const prefix = randomUUID();
+  let messageIndex = 0;
+  let pendingText = "";
+  let sawText = false;
+  type Thought = { id: string; pending: string; sawDelta: boolean; ended: boolean; replayed: boolean };
+  let thoughts = new Map<number, Thought>();
+  const availableText = (value: string, flush: boolean) => flush ? value.length
+    : Math.max(0, value.length - Math.max(0, ...secrets().map(secret => secret.length - 1)));
+  const emitText = (delta: string, flush = false) => {
+    pendingText = redact(pendingText + delta);
+    const available = availableText(pendingText, flush);
+    if (available) emit({ type: "text", mode, text: pendingText.slice(0, available) });
+    pendingText = pendingText.slice(available);
+  };
+  const begin = (index: number, replayed = false): Thought => {
+    let thought = thoughts.get(index);
+    if (!thought) {
+      emitText("", true);
+      thought = { id: `${prefix}:${messageIndex}:${index}`, pending: "", sawDelta: false, ended: false, replayed };
+      thoughts.set(index, thought);
+      emit({ type: "thinking_start", mode, blockId: thought.id, text: "", ...(replayed ? { replayed: true } : {}) });
+    }
+    return thought;
+  };
+  const delta = (thought: Thought, value: string, flush = false) => {
+    if (thought.ended) return;
+    thought.pending = redact(thought.pending + value);
+    const available = availableText(thought.pending, flush);
+    if (available) emit({ type: "thinking", mode, blockId: thought.id, text: thought.pending.slice(0, available), ...(thought.replayed ? { replayed: true } : {}) });
+    thought.pending = thought.pending.slice(available);
+  };
+  const end = (thought: Thought) => {
+    if (thought.ended) return;
+    delta(thought, "", true);
+    thought.ended = true;
+    emit({ type: "thinking_end", mode, blockId: thought.id, text: "", ...(thought.replayed ? { replayed: true } : {}) });
+  };
+  const finish = () => { for (const thought of thoughts.values()) end(thought); };
+  return {
+    finish,
+    handle(event: AgentEvent): void {
+      if (event.type === "message_start" && event.message.role === "assistant") {
+        finish();
+        messageIndex++;
+        thoughts = new Map();
+        sawText = false;
+      }
+      if (event.type === "message_update") {
+        const update = event.assistantMessageEvent;
+        if (update.type === "thinking_start" || update.type === "thinking_delta" || update.type === "thinking_end") {
+          const content = update.partial.content[update.contentIndex];
+          if (content?.type !== "thinking" || content.redacted) return;
+          const thought = begin(update.contentIndex);
+          if (update.type === "thinking_delta") { thought.sawDelta = true; delta(thought, update.delta); }
+          if (update.type === "thinking_end") {
+            if (!thought.sawDelta) delta(thought, update.content, true);
+            end(thought);
+          }
+          return;
+        }
+      }
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        event.message.content.forEach((content, index) => {
+          if (content.type !== "thinking" || content.redacted || !content.thinking) return;
+          const thought = begin(index, true);
+          if (!thought.sawDelta && !thought.ended) delta(thought, content.thinking, true);
+          end(thought);
+        });
+        finish();
+        if (fallbackText && !sawText) emitText(contentText(event.message));
+      }
+      const outgoing = runtimeEvent(event, mode);
+      if (outgoing?.type === "text") { finish(); sawText = true; emitText(outgoing.text); }
+      else if (outgoing) { finish(); emitText("", true); emit(outgoing); }
+      if (event.type === "message_end") emitText("", true);
+    },
+  };
+}
+
 export interface PiRunnerOptions { resolveModel?: ModelResolver; createAgent?: (options: AgentOptions) => Agent }
 
 /** Each invocation owns a fresh Pi Agent and transcript. Only the blackboard is input. */
@@ -59,6 +142,7 @@ export class PiRunner implements AgentRunner {
     let finalMessage: AssistantMessage | undefined;
     let turns = 0;
     let budgetStop = false;
+    let forward: ReturnType<typeof createRuntimeForwarder> | undefined;
     try {
       request.signal.throwIfAborted();
       if (request.mode === "execute" && !request.step) throw new Error("Execute requires an assigned Step.");
@@ -74,14 +158,7 @@ export class PiRunner implements AgentRunner {
       const prompt = buildRunPrompt(request);
       await writeFile(join(request.runDir, "input.json"), redact(JSON.stringify({ mode: request.mode, ...prompt }, null, 2)), { flag: "wx" });
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
-      let pendingText = "";
-      const emitText = (delta: string, flush = false) => {
-        pendingText = redact(pendingText + delta);
-        const secretTail = Math.max(0, ...secrets().map((secret) => secret.length - 1));
-        const available = flush ? pendingText.length : Math.max(0, pendingText.length - secretTail);
-        if (available) emit({ type: "text", mode: request.mode, text: pendingText.slice(0, available) });
-        pendingText = pendingText.slice(available);
-      };
+      forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
         initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: executeTools(request.workspace) },
@@ -107,14 +184,12 @@ export class PiRunner implements AgentRunner {
           usage.output += event.message.usage.output;
           usage.cost += event.message.usage.cost.total;
         }
+        // Keep UI/block state ordered at callback entry, before transcript I/O.
+        forward!.handle(event);
         // Log completed messages and tool events. Partial transcript copies would grow quadratically.
         if (event.type !== "message_update" && event.type !== "message_start" && event.type !== "agent_end") {
           await appendFile(join(request.runDir, "events.jsonl"), `${redact(JSON.stringify(event))}\n`);
         }
-        const outgoing = runtimeEvent(event, request.mode);
-        if (outgoing?.type === "text") emitText(outgoing.text);
-        else if (outgoing) { emitText("", true); emit(outgoing); }
-        if (event.type === "message_end") emitText("", true);
       });
       const onAbort = () => agent?.abort();
       request.signal.addEventListener("abort", onAbort, { once: true });
@@ -137,6 +212,7 @@ export class PiRunner implements AgentRunner {
       detachAbort?.();
       if (request.signal.aborted) agent?.abort();
       await agent?.waitForIdle();
+      forward?.finish();
       unsubscribe?.();
     }
   }

@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { Editor, getKeybindings, isKeyRelease, isKeyRepeat, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
-import { compact, dispatchCommand, EventFeed, plainText, recordCommandHistory, statusLine, type UiController } from "./model.js";
+import { compact, dispatchCommand, EventFeed, formatRunError, plainText, recordCommandHistory, statusLine, type FeedEntry, type UiController } from "./model.js";
 import { createSystemClipboard, type Clipboard } from "./clipboard.js";
 import { SettingsDialogs } from "./settings-dialog.js";
 import { createCommandAutocomplete } from "./autocomplete.js";
@@ -11,6 +11,7 @@ export type { UiController } from "./model.js";
 
 export interface TuiOptions {
   clipboard?: Clipboard;
+  now?: () => number;
   onReady?: (controls: { editor: Editor; tui: TuiAltScreen }) => void;
 }
 
@@ -47,6 +48,7 @@ export class ResponsiveEditor implements Component, Focusable {
 
 /** Terminal injection is for local tests; production uses Pi's ProcessTerminal. */
 export async function runTui(controller: UiController, terminal: Terminal, options: TuiOptions = {}): Promise<void> {
+  const now = options.now ?? Date.now;
   const clipboard = options.clipboard ?? createSystemClipboard();
   const clipboardTasks = new Set<Promise<unknown>>();
   const trackClipboard = <T>(operation: Promise<T>): Promise<T> => {
@@ -58,9 +60,11 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     mouse: true, wheelScrollLines: 3, copyOnSelect: true,
     copySelection: (text) => trackClipboard(Promise.resolve().then(() => clipboard.writeText(text)).catch(() => false)),
     onRightClickPaste: () => { requestPaste(); },
+    // Pi handles click versus drag and scroll coordinates. Never open external URLs.
+    openUrl: url => { if (!closing && !tui.hasOverlay() && feedView.toggleThinkingLink(url)) tui.requestRender(); },
   });
-  const feed = new EventFeed();
-  const feedView = new FeedView(feed);
+  const feed = new EventFeed(160, 3200, now);
+  const feedView = new FeedView(feed, now);
   const toggleDetails = (): void => {
     tui.flash(feedView.toggleDetails() ? "详情已展开 · Ctrl+O 收起" : "详情已收起 · Ctrl+O 展开");
     tui.requestRender();
@@ -73,6 +77,9 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   let draftGeneration = 0;
   let pastePending: Promise<void> | undefined;
   let terminalPaste: string | undefined;
+  let interrupted: "paused" | "stopped" | undefined;
+  let workTimer: ReturnType<typeof setInterval> | undefined;
+  let workGeneration = 0;
   let resolveExit!: () => void;
   const exitRequested = new Promise<void>((resolve) => { resolveExit = resolve; });
   const print = (label: string, text: string, error = false): void => {
@@ -81,34 +88,69 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     tui.requestRender();
   };
   const dialogs = new SettingsDialogs(controller, tui, clipboard, print);
+  const beginWork = (): void => {
+    if (feed.working) return;
+    workGeneration++;
+    interrupted = undefined;
+    feed.beginWork();
+    workTimer = setInterval(() => tui.requestRender(), 1000);
+    workTimer.unref();
+    tui.requestRender();
+  };
+  const finishWork = (status: Exclude<FeedEntry["workStatus"], "running" | undefined>, generation = workGeneration): void => {
+    if (generation !== workGeneration) return;
+    feed.finishWork(status);
+    if (workTimer) clearInterval(workTimer);
+    workTimer = undefined;
+    tui.requestRender();
+  };
+  const completedStatus = (mode: "chat" | "run"): Exclude<FeedEntry["workStatus"], "running" | undefined> => {
+    if (interrupted) return interrupted;
+    const status = mode === "run" ? controller.snapshot().status : controller.getSessionInfo?.().status;
+    return status === "error" || status === "paused" || status === "stopped" ? status : "done";
+  };
+  const showError = (error: unknown): void => {
+    if (closing) return;
+    if (interrupted) print("xloom", interrupted === "paused" ? "已暂停；已执行的工具操作保留。" : "已停止；已执行的工具操作保留。");
+    else print("xloom", formatRunError(error), true);
+  };
   const quit = (): void => {
     if (closing) return;
     closing = true;
+    interrupted = "stopped";
     dialogs.cancel();
     try { controller.stop(); }
     catch (error) { print("xloom", error instanceof Error ? error.message : String(error), true); }
     finally { resolveExit(); }
   };
-  const perform = (operation: () => Promise<void>): void => {
+  const perform = (mode: "chat" | "run", operation: () => Promise<void>): void => {
     if (active || setting || controller.getSessionInfo?.().busy) throw new Error("当前操作仍在运行；请先 /pause，等待取消完成后再提交。");
-    const pending = operation();
+    beginWork();
+    let pending: Promise<void>;
+    try { pending = operation(); }
+    catch (error) { pending = Promise.reject(error); }
+    let failed = false;
     active = pending.catch((error: unknown) => {
-      print("xloom", error instanceof Error ? error.message : String(error), true);
+      failed = true;
+      showError(error);
     }).finally(() => {
       active = undefined;
       snapshot = controller.snapshot();
-      tui.requestRender();
+      finishWork(interrupted ?? (failed ? "error" : completedStatus(mode)));
     });
   };
   const start = (): void => {
-    if (active || closing || setting) return;
+    if (active || closing || setting || controller.getSessionInfo?.().busy) return;
     exitArmedAt = undefined;
+    beginWork();
+    let failed = false;
     active = Promise.resolve().then(() => closing ? undefined : controller.start()).catch((error: unknown) => {
-      print("xloom", error instanceof Error ? error.message : String(error), true);
+      failed = true;
+      showError(error);
     }).finally(() => {
       active = undefined;
       snapshot = controller.snapshot();
-      tui.requestRender();
+      finishWork(interrupted ?? (failed ? "error" : completedStatus("run")));
     });
   };
 
@@ -158,10 +200,11 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (closing) return;
     exitArmedAt = undefined;
     try {
+      if (feed.working && ["/pause", "/stop"].includes(text.trim())) interrupted = text.trim() === "/pause" ? "paused" : "stopped";
       dispatchCommand(text, controller, {
         start, quit, print, details: toggleDetails,
-        chat: value => perform(() => { print("You", value); return controller.chat!(value); }),
-        run: goal => perform(() => { print("You → Task", goal); return controller.runGoal!(goal); }),
+        chat: value => perform("chat", () => { print("You", value); return controller.chat!(value); }),
+        run: goal => perform("run", () => { print("You → Task", goal); return controller.runGoal!(goal); }),
         settings: (command, argument) => {
           if (active || setting || controller.getSessionInfo?.().busy) throw new Error("当前操作仍在运行，请先取消或 /pause 再修改设置。");
           setting = dialogs.open(command, argument).finally(() => { setting = undefined; tui.requestRender(); });
@@ -182,21 +225,30 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
-    { component: new StatusView(() => ` ${statusLine(snapshot, controller.getSessionInfo?.())}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
+    { component: new StatusView(() => ` ${statusLine(snapshot, controller.getSessionInfo?.(), feed.pricingUnknown)}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
   ]));
   tui.setFocus(input);
 
   const unsubscribe = controller.subscribe((event) => {
     if (event.snapshot) snapshot = event.snapshot;
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
-    else if (event.type === "handoff" && event.handoff) feed.handoff(event.handoff);
+    else if (event.type === "handoff" && event.handoff) { beginWork(); feed.handoff(event.handoff); }
     else if (event.type === "notice" && event.message) feed.notice(event.message);
     else if (event.type === "result" && event.result) feed.result(event.result.mode, event.result.summary, event.result.outcome);
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {
       feed.breakStream();
       // Routine running/revision updates belong in the status bar, not the transcript.
-      if (snapshot.status !== "running") print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`, snapshot.status === "error");
+      if (snapshot.status !== "running" && controller.getSessionInfo?.().mode !== "chat" && !closing) print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`, snapshot.status === "error");
+    }
+    if ((event.type === "result" || event.type === "state") && snapshot.status !== "running" && feed.working && !active && controller.getSessionInfo?.().mode !== "chat") {
+      const status = completedStatus("run");
+      const generation = workGeneration;
+      // /meta can run outside a submitted operation; keep its footer after cancellation output.
+      void Promise.resolve().then(() => controller.waitForIdle?.()).then(() => finishWork(status, generation), error => {
+        if (generation === workGeneration) showError(error);
+        finishWork("error", generation);
+      });
     }
     tui.requestRender();
   });
@@ -222,6 +274,10 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (tui.hasOverlay()) return undefined;
     if (matchesKey(data, "ctrl+o")) {
       toggleDetails();
+      return { consume: true };
+    }
+    if (matchesKey(data, "ctrl+t")) {
+      if (feedView.toggleLatestThinking()) tui.requestRender();
       return { consume: true };
     }
     if (editor.isShowingAutocomplete()) {
@@ -263,6 +319,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {
+      if (feed.working) interrupted = "paused";
       controller.pause();
       return { consume: true };
     }
@@ -271,8 +328,10 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const signalHandler = (): void => { quit(); };
   process.once("SIGTERM", signalHandler);
   process.once("SIGINT", signalHandler);
-  if (!controller.getSessionInfo || controller.getSessionInfo().mode === "run") feed.add("xloom", snapshot.config.goal);
-  if (snapshot.reason && snapshot.status !== "idle") feed.add("恢复状态", snapshot.reason);
+  if (!controller.getSessionInfo || controller.getSessionInfo().mode === "run") {
+    feed.add("xloom", snapshot.config.goal);
+    if (snapshot.reason && snapshot.status !== "idle") feed.add("恢复状态", snapshot.reason);
+  }
   try {
     tui.start();
     options.onReady?.({ editor, tui });
@@ -285,6 +344,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     await Promise.allSettled([...clipboardTasks]);
   } finally {
     closing = true;
+    if (workTimer) clearInterval(workTimer);
     dialogs.cancel();
     unsubscribe();
     removeInput();

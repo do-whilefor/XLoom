@@ -3,7 +3,7 @@ import { Agent, type AgentOptions } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ModelConfig, ProjectConfig, RuntimeEvent, Usage } from "../types.js";
 import { resolveModel, type ModelResolver } from "./models.js";
-import { contentText, executeTools, RuntimeRunError, runtimeEvent } from "./pi-runner.js";
+import { createRuntimeForwarder, executeTools, RuntimeRunError } from "./pi-runner.js";
 
 export interface ChatRequest {
   text: string;
@@ -58,6 +58,7 @@ export class ChatSession {
     let finalMessage: AssistantMessage | undefined;
     let turns = 0;
     let budgetStop = false;
+    let forward: ReturnType<typeof createRuntimeForwarder> | undefined;
     try {
       signal.throwIfAborted();
       if (!request.text.trim()) throw new Error("Chat message is empty.");
@@ -69,15 +70,7 @@ export class ChatSession {
       rememberSecrets();
       signal.throwIfAborted();
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
-      let pendingText = "";
-      let sawText = false;
-      const emitText = (delta: string, flush = false) => {
-        pendingText = redact(pendingText + delta);
-        const tail = Math.max(0, ...rememberSecrets().map(secret => secret.length - 1));
-        const available = flush ? pendingText.length : Math.max(0, pendingText.length - tail);
-        if (available) emit({ type: "text", mode: "chat", text: pendingText.slice(0, available) });
-        pendingText = pendingText.slice(available);
-      };
+      forward = createRuntimeForwarder("chat", emit, redact, rememberSecrets, true);
       if (selected.costKnown === false) emit({ type: "notice", mode: "chat", text: "Endpoint pricing is unknown; cost is an estimate and a monetary budget cannot be enforced accurately." });
       // A model/workspace change cannot accidentally forward a conversation to another endpoint.
       const identity = JSON.stringify([request.workspace, request.model]);
@@ -103,18 +96,13 @@ export class ChatSession {
         return exhausted;
       };
       unsubscribe = agent.subscribe(event => {
-        if (event.type === "message_start" && event.message.role === "assistant") sawText = false;
         if (event.type === "message_end" && event.message.role === "assistant") {
           finalMessage = event.message;
           usage.input += event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
           usage.output += event.message.usage.output;
           usage.cost += event.message.usage.cost.total;
-          if (!sawText) emitText(contentText(event.message));
         }
-        const outgoing = runtimeEvent(event, "chat");
-        if (outgoing?.type === "text") { sawText = true; emitText(outgoing.text); }
-        else if (outgoing) { emitText("", true); emit(outgoing); }
-        if (event.type === "message_end") emitText("", true);
+        forward!.handle(event);
       });
       const onAbort = () => agent?.abort();
       signal.addEventListener("abort", onAbort, { once: true });
@@ -133,6 +121,7 @@ export class ChatSession {
       detachAbort?.();
       if (signal.aborted) agent?.abort();
       await agent?.waitForIdle();
+      forward?.finish();
       unsubscribe?.();
       this.active = undefined;
     }

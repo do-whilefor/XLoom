@@ -1,11 +1,12 @@
 import chalk from "chalk";
-import { Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { hyperlink, Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { compact, EventFeed, fitLines, plainText, type FeedEntry } from "./model.js";
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
 const MAX_DETAIL_CHARS = 6000;
 const MAX_DETAIL_LINES = 40;
+export const THOUGHT_LINK_PREFIX = "xloom-thinking:";
 const theme: MarkdownTheme = {
   heading: text => chalk.bold(text), link: text => chalk.cyan(text), linkUrl: muted,
   code: text => coral(text), codeBlock: text => text, codeBlockBorder: muted,
@@ -49,9 +50,47 @@ function narrowTable(text: string, width: number): boolean {
 export class FeedView implements Component {
   detailsVisible = false;
   private markdown = new WeakMap<FeedEntry, { text: string; component: Markdown }>();
-  constructor(private readonly feed: EventFeed) {}
+  private readonly thoughtIds = new WeakMap<FeedEntry, string>();
+  private readonly thoughtLinks = new Map<string, FeedEntry>();
+  private nextThoughtId = 0;
+  constructor(private readonly feed: EventFeed, private readonly now: () => number = Date.now) {}
   invalidate(): void { this.markdown = new WeakMap(); }
-  toggleDetails(): boolean { this.detailsVisible = !this.detailsVisible; return this.detailsVisible; }
+  toggleDetails(): boolean {
+    this.detailsVisible = !this.detailsVisible;
+    for (const entry of this.feed.entries) if (entry.kind === "thinking") delete entry.expanded;
+    return this.detailsVisible;
+  }
+  /** Only exact, renderer-generated IDs can toggle thought blocks; no browser navigation. */
+  toggleThinkingLink(url: string): boolean {
+    const entry = this.thoughtLinks.get(url);
+    if (!entry || entry.kind !== "thinking" || !this.feed.entries.includes(entry)) return false;
+    entry.expanded = !(entry.expanded ?? this.detailsVisible);
+    return true;
+  }
+  toggleLatestThinking(): boolean {
+    const entry = this.feed.entries.findLast(item => item.kind === "thinking");
+    if (!entry) return false;
+    entry.expanded = !(entry.expanded ?? this.detailsVisible);
+    return true;
+  }
+  private thoughtLink(entry: FeedEntry): string {
+    let id = this.thoughtIds.get(entry);
+    if (!id) { id = `${THOUGHT_LINK_PREFIX}${++this.nextThoughtId}`; this.thoughtIds.set(entry, id); }
+    this.thoughtLinks.set(id, entry);
+    return id;
+  }
+  private duration(entry: FeedEntry): string {
+    const current = this.now();
+    const end = Number.isFinite(entry.endedAt) ? entry.endedAt! : Number.isFinite(current) ? current : 0;
+    const start = Number.isFinite(entry.startedAt) ? entry.startedAt! : end;
+    return `${Math.floor(Math.max(0, end - start) / 1000)}s`;
+  }
+  private endedClock(entry: FeedEntry): string {
+    if (!Number.isFinite(entry.endedAt)) return "";
+    const date = new Date(entry.endedAt!);
+    if (!Number.isFinite(date.getTime())) return "";
+    return ` ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
 
   private body(entry: FeedEntry, width: number, user: boolean): string[] {
     const text = plainText(entry.text);
@@ -71,6 +110,7 @@ export class FeedView implements Component {
   }
 
   render(width: number): string[] {
+    this.thoughtLinks.clear();
     if (width <= 0) return [""];
     const margin = width >= 8 ? "  " : "";
     const prefixWidth = width >= 4 ? 2 : 0;
@@ -83,11 +123,28 @@ export class FeedView implements Component {
     for (const entry of this.feed.entries) {
       const label = compact(entry.label, 100);
       const kind = entry.kind ?? (entry.key?.startsWith("tool:") ? "tool" : /^(?:You|Assistant|Decide|Execute)(?:\b|\s)/.test(label) ? "message" : "notice");
-      if (kind === "protocol") {
+      if (kind === "protocol" || kind === "diagnostic") {
         if (this.detailsVisible) detail([entry.text, entry.details, entry.output]);
         continue;
       }
-      if (kind === "activity") {
+      if (kind === "thinking") {
+        if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
+        const expanded = entry.expanded ?? this.detailsVisible;
+        const ended = Number.isFinite(entry.endedAt);
+        const title = entry.durationKnown === false ? ended ? "Thought" : "Thinking…" : `${ended ? "Thought for" : "Thinking…"} ${this.duration(entry)}`;
+        const heading = `${expanded ? "▾" : "▸"} ${title}`;
+        line(margin + hyperlink(muted(heading), this.thoughtLink(entry)));
+        if (expanded) {
+          const thought = boundedDetails([entry.text], available);
+          for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text));
+        }
+      } else if (kind === "work") {
+        if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
+        const status = entry.error ? "error" : entry.workStatus ?? (Number.isFinite(entry.endedAt) ? "stopped" : "running");
+        const active = status === "running" && !Number.isFinite(entry.endedAt);
+        const text = active ? `✻ Working… ${this.duration(entry)}` : `✻ Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`;
+        line(margin + (status === "error" ? chalk.red : muted)(text));
+      } else if (kind === "activity") {
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
         line(margin + coral("● ") + muted(`${label}${entry.text ? ` · ${compact(entry.text, 240)}` : ""}`));
         if (this.detailsVisible) detail([entry.details, entry.output]);
@@ -105,10 +162,11 @@ export class FeedView implements Component {
         if (this.detailsVisible) detail([fullTextNeeded ? entry.text : undefined, entry.details, entry.output]);
       } else {
         const user = /^You(?:\b|\s)/.test(label);
-        const prefix = prefixWidth ? (entry.error ? chalk.red : user ? coral : chalk.white)(user ? "❯ " : "● ") : "";
+        const messagePrefixWidth = user ? prefixWidth : 0;
+        const prefix = messagePrefixWidth ? (entry.error ? chalk.red : coral)("❯ ") : "";
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
-        const body = this.body(entry, available, user);
-        for (const [index, text] of (body.length ? body : [""]).entries()) line(margin + (index === 0 ? prefix : " ".repeat(prefixWidth)) + (entry.error ? chalk.red(text) : text));
+        const body = this.body(entry, Math.max(1, width - margin.length - messagePrefixWidth), user);
+        for (const [index, text] of (body.length ? body : [""]).entries()) line(margin + (index === 0 ? prefix : " ".repeat(messagePrefixWidth)) + (entry.error ? chalk.red(text) : text));
         if (this.detailsVisible) detail([entry.details, entry.output]);
       }
     }

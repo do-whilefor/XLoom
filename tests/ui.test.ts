@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Editor, TuiAltScreen, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
 import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import { ResponsiveEditor, runTui } from "../src/ui/index.js";
-import { dispatchCommand, EventFeed, fitLines, formatBoard, plainText, recordCommandHistory, statusLine, type UiController } from "../src/ui/model.js";
+import { dispatchCommand, EventFeed, fitLines, formatBoard, formatRunError, plainText, recordCommandHistory, statusLine, type UiController } from "../src/ui/model.js";
 
 function snapshot(): BoardSnapshot {
   return {
@@ -177,6 +177,93 @@ describe("TUI formatting", () => {
     for (const width of [0, 1, 2, 3, 4, 12, 80]) {
       for (const line of responsive.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
+  });
+});
+
+describe("response timeline model", () => {
+  it("keeps streamed thinking separate from the answer with observed timing", () => {
+    let now = 1000;
+    const feed = new EventFeed(160, 3200, () => now);
+    feed.beginWork();
+    feed.add("You", "question");
+    feed.runtime({ type: "thinking_start", mode: "chat", blockId: "a", text: "" });
+    now = 4000;
+    feed.runtime({ type: "thinking", mode: "chat", blockId: "a", text: "actual provider thought" });
+    now = 7000;
+    feed.runtime({ type: "thinking_end", mode: "chat", blockId: "a", text: "" });
+    feed.runtime({ type: "text", mode: "chat", text: "answer " });
+    feed.runtime({ type: "text", mode: "chat", text: "only" });
+    now = 8100;
+    feed.finishWork("done");
+    expect(feed.entries.map(entry => entry.kind)).toEqual(["message", "thinking", "message", "work"]);
+    expect(feed.entries[1]).toMatchObject({ startedAt: 1000, endedAt: 7000, text: "actual provider thought", durationKnown: true });
+    expect(feed.entries[2]!.text).toBe("answer only");
+    expect(feed.entries.at(-1)).toMatchObject({ startedAt: 1000, endedAt: 8100, workStatus: "done" });
+    expect(feed.working).toBe(false);
+  });
+
+  it("does not invent thinking for waiting, notices, errors, or ordinary answers", () => {
+    const feed = new EventFeed();
+    feed.beginWork();
+    feed.notice("Endpoint pricing is unknown; test");
+    feed.runtime({ type: "text", mode: "chat", text: "answer" });
+    feed.add("xloom", "failed", true);
+    feed.finishWork("error");
+    expect(feed.entries.some(entry => entry.kind === "thinking")).toBe(false);
+    expect(feed.entries.at(-1)!.workStatus).toBe("error");
+    expect(feed.entries[0]!.kind).toBe("diagnostic");
+  });
+
+  it("bounds thinking and freezes interrupted segments without joining separate blocks", () => {
+    let now = 1000;
+    const feed = new EventFeed(5, 40, () => now);
+    feed.beginWork();
+    feed.runtime({ type: "thinking", mode: "chat", blockId: "a", text: "x".repeat(10000) });
+    now = 2000;
+    feed.finishWork("paused");
+    const old = feed.entries[0]!;
+    expect(old.text.length).toBeLessThanOrEqual(41);
+    expect(old.endedAt).toBe(2000);
+    now = 3000;
+    feed.beginWork();
+    feed.runtime({ type: "thinking", mode: "chat", blockId: "a", text: "new block" });
+    feed.finishWork("stopped");
+    expect(old.endedAt).toBe(2000);
+    expect(feed.entries.filter(entry => entry.kind === "thinking")).toHaveLength(2);
+    expect(feed.entries.filter(entry => entry.kind === "work").map(entry => entry.workStatus)).toEqual(["paused", "stopped"]);
+  });
+
+  it("marks fallback thoughts as unknown duration and ignores orphaned ends", () => {
+    const feed = new EventFeed();
+    feed.runtime({ type: "thinking_end", mode: "chat", text: "", blockId: "orphan" });
+    expect(feed.entries).toHaveLength(0);
+    feed.runtime({ type: "thinking_start", mode: "chat", text: "", blockId: "a", replayed: true });
+    feed.runtime({ type: "thinking", mode: "chat", text: "returned final thought", blockId: "a", replayed: true });
+    feed.runtime({ type: "thinking_end", mode: "chat", text: "", blockId: "a", replayed: true });
+    expect(feed.entries[0]!.durationKnown).toBe(false);
+  });
+
+  it("preserves the active footer when the bounded feed evicts old entries", () => {
+    const feed = new EventFeed(3);
+    feed.beginWork();
+    feed.beginWork();
+    for (let index = 0; index < 10; index++) feed.add("notice", String(index));
+    expect(feed.entries).toHaveLength(3);
+    expect(feed.entries.at(-1)!.kind).toBe("work");
+    feed.finishWork("done");
+    feed.beginWork();
+    feed.runtime({ type: "text", mode: "chat", text: "fresh" });
+    expect(feed.entries.at(-2)!.text).toBe("fresh");
+    expect(feed.entries.at(-1)!.kind).toBe("work");
+  });
+
+  it("distinguishes provider timeout from the local reply time budget without claiming a cause", () => {
+    expect(formatRunError(new Error("Request timed out."))).toContain("模型服务请求超时");
+    expect(formatRunError(new Error("Request timed out."))).not.toMatch(/API Key|密钥|180|已修复/);
+    expect(formatRunError(new Error("Chat response timed out; tool side effects may remain."))).toContain("本地时间限制");
+    expect(formatRunError(new Error("other failure"))).toBe("other failure");
+    expect(statusLine(snapshot(), undefined, true)).toContain("费用未知");
+    expect(statusLine(snapshot(), undefined, true)).not.toContain("$");
   });
 });
 

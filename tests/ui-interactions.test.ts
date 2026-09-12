@@ -231,8 +231,13 @@ describe("TUI slash candidates and compact transcript", () => {
     app.terminal.output = "";
     app.tui.renderNow(true);
     const screen = plainText(app.terminal.output);
-    expect(screen.match(/当前端点未提供定价/g)).toHaveLength(1);
+    expect(screen).not.toContain("当前端点未提供定价");
+    expect(screen).toContain("费用未知");
     expect(screen).toContain("File not found");
+    app.terminal.input("\x0f");
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output).match(/当前端点未提供定价/g)).toHaveLength(1);
   });
 });
 

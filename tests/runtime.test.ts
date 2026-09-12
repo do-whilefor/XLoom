@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import { PiRunner, RuntimeRunError, executeTools, parseFinalJson } from "../src/runtime/index.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
@@ -132,6 +132,41 @@ describe("Pi runtime isolation", () => {
     expect(error.message).toContain("single JSON object");
   });
 
+  it("forwards message/tool order before awaiting transcript writes, even for a non-awaited event source", async () => {
+    const input = await request();
+    const observed: RuntimeEvent[] = [];
+    input.onEvent = event => observed.push(event);
+    let listener!: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void;
+    const first = message([{ type: "thinking", thinking: "First message returned thought." },
+      { type: "toolCall", id: "ordered-write", name: "write", arguments: { path: "fixture.txt", content: "fixture" } }], "toolUse");
+    const second = message([{ type: "thinking", thinking: "Second message returned thought." }, { type: "text", text: '{"summary":"ordered result"}' }]);
+    const source: AgentEvent[] = [
+      { type: "message_start", message: first }, { type: "message_end", message: first },
+      { type: "tool_execution_start", toolCallId: "ordered-write", toolName: "write", args: { path: "fixture.txt", content: "fixture" } },
+      { type: "tool_execution_end", toolCallId: "ordered-write", toolName: "write", result: { content: [{ type: "text", text: "Synthetic tool result" }] }, isError: false },
+      { type: "message_start", message: second }, { type: "message_end", message: second },
+    ];
+    const runner = new PiRunner({
+      resolveModel: async () => ({ model, streamFn: stream('{"summary":"unused"}') }),
+      createAgent: () => ({
+        subscribe: (callback: typeof listener) => { listener = callback; return () => {}; },
+        prompt: async () => {
+          const pending = source.map(event => Promise.resolve(listener(event, input.signal)));
+          // This assertion runs before any appendFile promise can complete.
+          try { expect(observed.map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end", "tool_start", "tool_end", "thinking_start", "thinking", "thinking_end"]); }
+          finally { await Promise.all(pending); }
+        },
+        abort() {}, waitForIdle: async () => {},
+      }) as unknown as Agent,
+    });
+    const result = await runner.run(input);
+    const starts = observed.filter(event => event.type === "thinking_start");
+    expect(starts.map(event => event.blockId?.split(":").slice(-2))).toEqual([["1", "0"], ["2", "0"]]);
+    expect(observed.filter(event => event.type === "thinking").map(event => event.text)).toEqual(["First message returned thought.", "Second message returned thought."]);
+    expect(observed.filter(event => event.type === "thinking_end").map(event => event.blockId)).toEqual(starts.map(event => event.blockId));
+    expect(result).toEqual({ output: { summary: "ordered result" }, usage: { input: 26, output: 8, cost: 0.04 } });
+  });
+
   it("redacts credentials split across text streaming chunks", async () => {
     const input = await request();
     let rendered = "";
@@ -255,6 +290,166 @@ async function chatRequest(text = "first private chat message"): Promise<ChatReq
   const input = await request();
   return { text, workspace: input.workspace, model: { provider: "test", model: "chat" }, limits: input.snapshot.config.limits, signal: input.signal, onEvent() {} };
 }
+
+async function thinkingHarness(kind: "chat" | "decide", streamFn: StreamFn, secrets: string[] = [], control?: AbortController, observe?: (event: RuntimeEvent) => void) {
+  const input = await request();
+  const events: RuntimeEvent[] = [];
+  const agents: AgentOptions[] = [];
+  input.onEvent = event => { events.push(event); observe?.(event); };
+  if (control) input.signal = control.signal;
+  const options = { resolveModel: async () => ({ model, streamFn, secrets }), createAgent: (entry: AgentOptions) => { agents.push(entry); return new Agent(entry); } };
+  const completed = kind === "chat" ? new ChatSession(options).send({ text: "fixture", workspace: input.workspace, model: { provider: "test", model: "chat" }, limits: input.snapshot.config.limits, signal: input.signal, onEvent: input.onEvent })
+    : new PiRunner(options).run(input);
+  return { input, events, agents, completed };
+}
+
+function thinkingStream(response: AssistantMessage, chunks?: string[], noDeltas = false): StreamFn {
+  return () => {
+    const events = new AssistantMessageEventStream();
+    queueMicrotask(() => {
+      events.push({ type: "start", partial: response });
+      response.content.forEach((content, contentIndex) => {
+        if (content.type === "thinking") {
+          events.push({ type: "thinking_start", contentIndex, partial: response });
+          if (!noDeltas) for (const delta of chunks ?? [content.thinking]) events.push({ type: "thinking_delta", contentIndex, delta, partial: response });
+          events.push({ type: "thinking_end", contentIndex, content: content.thinking, partial: response });
+        } else if (content.type === "text") events.push({ type: "text_delta", contentIndex, delta: content.text, partial: response });
+      });
+      events.push({ type: "done", reason: response.stopReason as "stop" | "toolUse", message: response });
+      events.end();
+    });
+    return events;
+  };
+}
+
+describe.each(["chat", "decide"] as const)("Pi-returned thinking in %s", kind => {
+  const answer = kind === "chat" ? "Ordinary answer." : '{"summary":"Ordinary answer."}';
+
+  it("forwards distinct thinking start/delta/end events without changing thinking settings or mixing answer text", async () => {
+    const test = await thinkingHarness(kind, thinkingStream(message([
+      { type: "thinking", thinking: "Actual provider-returned thought.", thinkingSignature: "OPAQUE_SIGNATURE_NOT_TEXT" },
+      { type: "text", text: answer },
+    ])));
+    await test.completed;
+    const thoughts = test.events.filter(event => event.type.startsWith("thinking"));
+    expect(thoughts.map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end"]);
+    expect(thoughts.map(event => event.text)).toEqual(["", "Actual provider-returned thought.", ""]);
+    expect(thoughts.every(event => event.mode === kind && typeof event.blockId === "string")).toBe(true);
+    expect(thoughts.every(event => !Object.hasOwn(event, "replayed"))).toBe(true);
+    expect(new Set(thoughts.map(event => event.blockId)).size).toBe(1);
+    expect(test.events.filter(event => event.type === "text").map(event => event.text).join("")).toBe(answer);
+    expect(JSON.stringify(test.events)).not.toContain("OPAQUE_SIGNATURE_NOT_TEXT");
+    expect(test.agents[0]?.initialState?.thinkingLevel).toBe("off");
+  });
+
+  it("redacts model credentials split across thought chunks and does not duplicate the message-end fallback", async () => {
+    const test = await thinkingHarness(kind, thinkingStream(message([
+      { type: "thinking", thinking: "Analyze credential-secret privately." }, { type: "text", text: answer },
+    ]), ["Analyze cred", "ential-", "secret privately."]), ["credential-secret"]);
+    await test.completed;
+    expect(test.events.filter(event => event.type === "thinking").map(event => event.text).join("")).toBe("Analyze [MODEL_CREDENTIAL_REDACTED] privately.");
+    expect(test.events.filter(event => event.type === "thinking_start")).toHaveLength(1);
+    expect(test.events.filter(event => event.type === "thinking_end")).toHaveLength(1);
+    expect(JSON.stringify(test.events)).not.toContain("credential-secret");
+    if (kind === "decide") expect(await readFile(join(test.input.runDir, "events.jsonl"), "utf8")).not.toContain("credential-secret");
+  });
+
+  it("falls back only to actual non-redacted thinking returned in message_end", async () => {
+    const test = await thinkingHarness(kind, stream(() => message([
+      { type: "thinking", thinking: "MUST_NOT_EXPOSE_REDACTED_PAYLOAD", redacted: true, thinkingSignature: "OPAQUE_REDACTED_SIGNATURE" },
+      { type: "thinking", thinking: "Actually returned credential-secret thought.", thinkingSignature: "OPAQUE_SIGNATURE" },
+      { type: "thinking", thinking: "", thinkingSignature: "OPAQUE_ONLY" },
+      { type: "text", text: answer },
+    ])), ["credential-secret"]);
+    await test.completed;
+    expect(test.events.filter(event => event.type.startsWith("thinking")).map(event => [event.type, event.text])).toEqual([
+      ["thinking_start", ""], ["thinking", "Actually returned [MODEL_CREDENTIAL_REDACTED] thought."], ["thinking_end", ""],
+    ]);
+    expect(test.events.filter(event => event.type.startsWith("thinking")).every(event => event.replayed === true)).toBe(true);
+    expect(JSON.stringify(test.events)).not.toMatch(/OPAQUE|MUST_NOT_EXPOSE|credential-secret/);
+    expect(test.events.filter(event => event.type === "text").map(event => event.text).join("")).not.toContain("Actually returned");
+  });
+
+  it("handles providers that return thought content at thinking_end without delta events", async () => {
+    const test = await thinkingHarness(kind, thinkingStream(message([{ type: "thinking", thinking: "Provider end-only thought." }, { type: "text", text: answer }]), undefined, true));
+    await test.completed;
+    expect(test.events.filter(event => event.type === "thinking").map(event => event.text).join("")).toBe("Provider end-only thought.");
+    expect(test.events.filter(event => event.type === "thinking_end")).toHaveLength(1);
+  });
+
+  it("suppresses streaming redacted thinking and never decodes signatures as text", async () => {
+    const test = await thinkingHarness(kind, thinkingStream(message([
+      { type: "thinking", thinking: "OPAQUE_REDACTED_DATA", redacted: true, thinkingSignature: "DO_NOT_DECODE" },
+      { type: "text", text: answer },
+    ])));
+    await test.completed;
+    expect(test.events.some(event => event.type.startsWith("thinking"))).toBe(false);
+    expect(JSON.stringify(test.events)).not.toMatch(/OPAQUE_REDACTED_DATA|DO_NOT_DECODE/);
+  });
+
+  it("uses unique message/content-index block IDs across a native tool turn", async () => {
+    let calls = 0;
+    const fn: StreamFn = (selected, context, options) => thinkingStream(++calls === 1 ? message([
+      { type: "thinking", thinking: "First block." }, { type: "thinking", thinking: "Second block." },
+      { type: "toolCall", id: "thinking-write", name: "write", arguments: { path: "thought-fixture.txt", content: "fixture" } },
+    ], "toolUse") : message([{ type: "thinking", thinking: "Next message block." }, { type: "text", text: answer }]))(selected, context, options);
+    const test = await thinkingHarness(kind, fn);
+    await test.completed;
+    const starts = test.events.filter(event => event.type === "thinking_start");
+    const ends = test.events.filter(event => event.type === "thinking_end");
+    expect(starts).toHaveLength(3);
+    expect(new Set(starts.map(event => event.blockId)).size).toBe(3);
+    expect(starts.map(event => event.blockId?.split(":").slice(-2))).toEqual([["1", "0"], ["1", "1"], ["2", "0"]]);
+    expect(ends.map(event => event.blockId)).toEqual(starts.map(event => event.blockId));
+    expect(test.events.filter(event => event.type === "thinking").map(event => event.text)).toEqual(["First block.", "Second block.", "Next message block."]);
+    const toolStart = test.events.findIndex(event => event.type === "tool_start");
+    const toolEnd = test.events.findIndex(event => event.type === "tool_end");
+    expect(test.events.indexOf(ends[1]!)).toBeLessThan(toolStart);
+    expect(test.events.indexOf(starts[2]!)).toBeGreaterThan(toolEnd);
+  });
+
+  it("ends a streamed thought on provider error while retaining only returned content", async () => {
+    const test = await thinkingHarness(kind, () => {
+      const events = new AssistantMessageEventStream();
+      const partial = message([{ type: "thinking", thinking: "Returned partial thought." }]);
+      queueMicrotask(() => {
+        events.push({ type: "start", partial });
+        events.push({ type: "thinking_start", contentIndex: 0, partial });
+        events.push({ type: "thinking_delta", contentIndex: 0, delta: "Returned partial thought.", partial });
+        events.push({ type: "error", reason: "error", error: { ...message([], "error"), errorMessage: "Synthetic provider error" } });
+        events.end();
+      });
+      return events;
+    });
+    const error = await test.completed.catch(error => error);
+    expect(error).toBeInstanceOf(RuntimeRunError);
+    expect(error.message).toContain("Synthetic provider error");
+    expect(test.events.filter(event => event.type.startsWith("thinking")).map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end"]);
+    expect(test.events.filter(event => event.type === "thinking").map(event => event.text)).toEqual(["Returned partial thought."]);
+    expect(test.events.filter(event => event.type === "text")).toEqual([]);
+  });
+
+  it("settles an open thought when cancelled and does not invent answer text or a completion", async () => {
+    const abort = new AbortController();
+    const test = await thinkingHarness(kind, (_model, _context, options) => {
+      const events = new AssistantMessageEventStream();
+      const partial = message([{ type: "thinking", thinking: "Thought before cancellation." }]);
+      options?.signal?.addEventListener("abort", () => {
+        events.push({ type: "error", reason: "aborted", error: message([], "aborted") }); events.end();
+      }, { once: true });
+      queueMicrotask(() => {
+        events.push({ type: "start", partial });
+        events.push({ type: "thinking_start", contentIndex: 0, partial });
+        events.push({ type: "thinking_delta", contentIndex: 0, delta: "Thought before cancellation.", partial });
+      });
+      return events;
+    }, [], abort, event => { if (event.type === "thinking") abort.abort(); });
+    await expect(test.completed).rejects.toBeInstanceOf(RuntimeRunError);
+    expect(test.events.filter(event => event.type.startsWith("thinking")).map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end"]);
+    expect(test.events.filter(event => event.type === "text")).toEqual([]);
+    expect(test.events.filter(event => event.type === "thinking_end")[0]?.blockId).toBe(test.events[0]?.blockId);
+  });
+});
 
 describe("private Pi chat session", () => {
   it("retains ordinary chat history, streams natural text and counts each response's usage", async () => {

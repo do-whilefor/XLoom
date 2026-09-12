@@ -29,7 +29,7 @@ class MemoryTerminal implements Terminal {
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
-function launch() {
+function launch(options: { now?: () => number; restoredReason?: string } = {}) {
   const board: BoardSnapshot = {
     revision: 0, status: "idle", outcome: null, reason: "", completedSteps: 0, noProgressCount: 0,
     lastMetaStep: 0, lastMetaRevision: 0, usage: { input: 0, output: 0, cost: 0 },
@@ -39,6 +39,7 @@ function launch() {
     goals: [], facts: [], steps: [], findings: [], evidence: [], hints: [],
   };
   const listeners = new Set<(event: LoopEvent) => void>();
+  if (options.restoredReason) { board.status = "stopped"; board.reason = options.restoredReason; }
   const info = { mode: "chat" as "chat" | "run", busy: false, model: "opencode-go/deepseek-v4-flash" };
   const controller = {
     snapshot: vi.fn(() => board),
@@ -60,7 +61,7 @@ function launch() {
   const terminal = new MemoryTerminal();
   const clipboard = { readText: vi.fn(async () => "PRIVATE_CLIPBOARD_KEY"), writeText: vi.fn(async () => true) };
   let controls!: { editor: Editor; tui: TuiAltScreen };
-  const session = runTui(controller, terminal, { clipboard, onReady: value => { controls = value; } });
+  const session = runTui(controller, terminal, { clipboard, now: options.now, onReady: value => { controls = value; } });
   const submit = (text: string): void => { controls.editor.setText(text); terminal.input("\r"); };
   const close = async (): Promise<void> => {
     if (!terminal.stopped) {
@@ -127,6 +128,152 @@ describe("ordinary chat and dual-agent task UI", () => {
     release();
     await app.session;
     expect(app.terminal.stopped).toBe(true);
+  });
+});
+
+describe("Claude-style response timeline", () => {
+  const emit = (app: ReturnType<typeof launch>, event: LoopEvent): void => { for (const listener of app.listeners) listener(event); };
+  const screen = (app: ReturnType<typeof launch>): string => { app.terminal.output = ""; app.tui.renderNow(true); return plainText(app.terminal.output); };
+
+  it("does not show a stopped task's recovery reason when opening ordinary chat", () => {
+    const app = launch({ restoredReason: "Stopped by user; state and evidence retained." });
+    expect(screen(app)).not.toContain("Stopped by user");
+    expect(screen(app)).toContain("chat · idle");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+  });
+
+  it("shows actual thought timing, a plain answer and the final duration after an asynchronous chat", async () => {
+    let now = new Date(2026, 8, 12, 17, 21, 0).getTime();
+    const app = launch({ now: () => now });
+    let release!: () => void;
+    app.controller.chat.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    app.submit("你是什么模型？");
+    expect(screen(app)).toContain("Working… 0s");
+    expect(screen(app)).not.toContain("Thought");
+    emit(app, { type: "runtime", runtime: { type: "thinking_start", mode: "chat", blockId: "a", text: "" } });
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "a", text: "PROVIDER_THINKING" } });
+    now += 6000;
+    emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "a", text: "" } });
+    emit(app, { type: "runtime", runtime: { type: "text", mode: "chat", text: "我是当前配置的测试模型。" } });
+    release();
+    await app.settled();
+    const output = screen(app);
+    expect(output).toContain("Thought for 6s");
+    expect(output).toContain("Worked for 6s · done 17:21");
+    expect(output).toContain("我是当前配置的测试模型");
+    expect(output).not.toContain("● 我是");
+    expect(output).not.toContain("PROVIDER_THINKING");
+    expect(output.indexOf("Worked for")).toBeGreaterThan(output.indexOf("我是当前配置"));
+    app.terminal.input("\x14");
+    expect(screen(app)).toContain("∴ PROVIDER_THINKING");
+    app.terminal.input("\x14");
+    expect(screen(app)).not.toContain("PROVIDER_THINKING");
+    expect(app.controller.hint).not.toHaveBeenCalled();
+  });
+
+  it("handles real mouse clicks on thinking headers without submitting text or copying a click", async () => {
+    const app = launch();
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "click", text: "CLICK_THOUGHT" } });
+    emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "click", text: "" } });
+    screen(app);
+    // Empty chat: fixed title is row 1; the first thought header is row 2.
+    app.terminal.input("\x1b[<0;5;2M");
+    app.terminal.input("\x1b[<0;5;2m");
+    expect(screen(app)).toContain("CLICK_THOUGHT");
+    expect(app.clipboard.writeText).not.toHaveBeenCalled();
+    expect(app.controller.chat).not.toHaveBeenCalled();
+    // Moving while held is selection, not a toggle.
+    app.terminal.input("\x1b[<0;5;2M");
+    app.terminal.input("\x1b[<32;10;2M");
+    app.terminal.input("\x1b[<0;10;2m");
+    await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
+    expect(screen(app)).toContain("CLICK_THOUGHT");
+  });
+
+  it("renders provider timeouts as failures, not successful or fabricated thinking", async () => {
+    let now = 1000;
+    const app = launch({ now: () => now });
+    app.controller.chat.mockImplementation(async () => { now = 7000; throw new Error("Request timed out."); });
+    app.submit("hello");
+    await app.settled();
+    const output = screen(app);
+    expect(output).toContain("模型服务请求超时");
+    expect(output).toContain("Worked for 6s · error");
+    expect(output).not.toContain("· done");
+    expect(output).not.toContain("Thought");
+  });
+
+  it("closes thought timing and marks a cancelled chat paused, not done", async () => {
+    let now = 1000;
+    const app = launch({ now: () => now });
+    let reject!: (error: Error) => void;
+    app.controller.chat.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    app.controller.pause.mockImplementation(() => { reject(new Error("The operation was aborted")); });
+    app.submit("hello");
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "cancel", text: "partial provider thought" } });
+    now += 6000;
+    app.terminal.input("\x1b");
+    await app.settled();
+    const output = screen(app);
+    expect(output).toContain("Thought for 6s");
+    expect(output).toContain("Worked for 6s · paused");
+    expect(output).not.toContain("· done");
+    now += 2000;
+    expect(screen(app)).toContain("Worked for 6s · paused");
+  });
+
+  it("keeps thought clicks correct after scrolling the conversation", () => {
+    const app = launch();
+    for (let index = 0; index < 40; index++) emit(app, { type: "notice", message: `earlier ${index}` });
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "scroll", text: "SCROLLED_THOUGHT" } });
+    emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "scroll", text: "" } });
+    screen(app);
+    expect(app.tui.viewportTop).toBeGreaterThan(0);
+    // Header + 40 one-line notices + blank group separator + thought header.
+    const row = 43 - app.tui.viewportTop;
+    app.terminal.input(`\x1b[<0;5;${row}M`);
+    app.terminal.input(`\x1b[<0;5;${row}m`);
+    expect(screen(app)).toContain("SCROLLED_THOUGHT");
+    expect(app.controller.chat).not.toHaveBeenCalled();
+  });
+
+  it("keeps synchronous startup failures before the final error marker", async () => {
+    const app = launch();
+    app.controller.runGoal.mockImplementation(() => { throw new Error("TASK_CREATE_FAILED"); });
+    app.submit("/run local task");
+    await app.settled();
+    const output = screen(app);
+    expect(output.indexOf("TASK_CREATE_FAILED")).toBeGreaterThan(-1);
+    expect(output.indexOf("Worked for")).toBeGreaterThan(output.indexOf("TASK_CREATE_FAILED"));
+    expect(output).toContain("· error");
+  });
+
+  it("cannot end an active controller-owned meta response by issuing /start", async () => {
+    const app = launch();
+    app.info.mode = "run";
+    app.info.busy = true;
+    app.board.status = "running";
+    emit(app, { type: "handoff", handoff: { mode: "metacog", role: "decide", runId: "meta", revision: 1, trigger: { kind: "manual", reason: "manual review" } } });
+    app.submit("/start");
+    await app.settled();
+    expect(app.controller.start).not.toHaveBeenCalled();
+    expect(screen(app)).toContain("Working…");
+    expect(screen(app)).not.toContain("Worked for");
+    app.info.busy = false;
+    app.board.status = "completed";
+    emit(app, { type: "result", result: { mode: "metacog", summary: "COMMITTED_FINAL" }, snapshot: app.board });
+    await app.settled();
+    const output = screen(app);
+    expect(output.indexOf("Worked for")).toBeGreaterThan(output.indexOf("COMMITTED_FINAL"));
+    expect(output).toContain("· done");
+  });
+
+  it("does not use a stored stopped task as the completion status of a successful chat", async () => {
+    const app = launch({ restoredReason: "Stopped by user" });
+    app.submit("hello");
+    await app.settled();
+    expect(screen(app)).toContain("· done");
+    expect(screen(app)).not.toContain("· stopped");
   });
 });
 

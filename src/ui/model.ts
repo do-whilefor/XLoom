@@ -39,6 +39,7 @@ export const HELP = [
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
   "输入 / 显示命令候选；↑/↓ 选择，Tab / Enter 补全，再按 Enter 执行；Esc 关闭候选",
   "/details 或 Ctrl+O 展开 / 收起工具详情和协议输出；默认只显示工具摘要与已提交结果",
+  "点击 Thought / Thinking 标题展开真实思考内容；Ctrl+T 切换最近一段（模型需返回思考流）",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
   "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
@@ -65,12 +66,12 @@ export function fitLines(value: string, width: number): string[] {
   return wrapTextWithAnsi(clean, width).map((line) => truncateToWidth(line, width, ""));
 }
 
-export function statusLine(board: BoardSnapshot, session?: SessionInfo): string {
+export function statusLine(board: BoardSnapshot, session?: SessionInfo, pricingUnknown = false): string {
   if (session?.mode === "chat") return `chat · ${session.status ?? (session.busy ? "running" : "idle")} · ${compact(session.model, 120)}` +
-    (session.usage ? ` · ${(session.usage.input + session.usage.output).toLocaleString("en-US")} tokens · $${session.usage.cost.toFixed(3)}` : "");
+    (session.usage ? ` · ${(session.usage.input + session.usage.output).toLocaleString("en-US")} tokens · ${pricingUnknown ? "费用未知" : `$${session.usage.cost.toFixed(3)}`}` : pricingUnknown ? " · 费用未知" : "");
   const tokens = board.usage.input + board.usage.output;
   return `${session ? "run · " : ""}${board.status} · r${board.revision} · step ${board.completedSteps}` +
-    ` · ${tokens.toLocaleString("en-US")} tokens · $${board.usage.cost.toFixed(3)}` +
+    ` · ${tokens.toLocaleString("en-US")} tokens · ${pricingUnknown ? "费用未知" : `$${board.usage.cost.toFixed(3)}`}` +
     (board.outcome ? ` · ${board.outcome}` : "");
 }
 
@@ -95,9 +96,18 @@ export function formatBoard(board: BoardSnapshot): string {
 }
 
 export interface FeedEntry {
-  kind?: "message" | "activity" | "tool" | "notice" | "protocol";
+  kind?: "message" | "activity" | "tool" | "notice" | "protocol" | "thinking" | "work" | "diagnostic";
   label: string; text: string; key?: string; error?: boolean;
   details?: string; output?: string; state?: "running" | "done" | "error";
+  startedAt?: number; endedAt?: number; expanded?: boolean; durationKnown?: boolean;
+  workStatus?: "running" | "done" | "error" | "paused" | "stopped";
+}
+
+export function formatRunError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^Request timed out\.?$/i.test(message)) return "模型服务请求超时。请检查模型服务或网络后重试；已执行的工具操作不会自动回滚。";
+  if (message.startsWith("Chat response timed out;")) return "本次回复达到本地时间限制。请先检查已执行的工具操作，再决定是否重试。";
+  return message;
 }
 
 function roleLabel(mode: Mode | "chat"): string {
@@ -121,20 +131,51 @@ function toolTarget(event: RuntimeEvent): string {
 export class EventFeed {
   readonly entries: FeedEntry[] = [];
   private pricingNoticeShown = false;
-  constructor(private readonly maxEntries = 160, private readonly maxText = 3200) {}
+  private work?: FeedEntry;
+  constructor(private readonly maxEntries = 160, private readonly maxText = 3200, private readonly now = Date.now) {}
+  get pricingUnknown(): boolean { return this.pricingNoticeShown; }
+  get working(): boolean { return this.work !== undefined; }
+
+  beginWork(): void {
+    if (this.work) return;
+    this.breakStream();
+    this.work = { kind: "work", label: "xloom", text: "", startedAt: this.now(), workStatus: "running" };
+    this.entries.push(this.work);
+    this.trim();
+  }
+
+  finishWork(status: Exclude<FeedEntry["workStatus"], "running" | undefined>): void {
+    this.endThinking();
+    this.breakStream();
+    if (!this.work) return;
+    this.work.workStatus = status;
+    this.work.endedAt = this.now();
+    this.work = undefined;
+  }
+
+  private append(entry: FeedEntry): void {
+    const index = this.work ? this.entries.indexOf(this.work) : -1;
+    if (index >= 0) this.entries.splice(index, 0, entry);
+    else this.entries.push(entry);
+    this.trim();
+  }
+
+  private tail(): FeedEntry | undefined { return this.entries.at(this.work ? -2 : -1); }
+  private endThinking(): void {
+    for (const entry of this.entries) if (entry.kind === "thinking" && entry.endedAt === undefined) entry.endedAt = this.now();
+  }
 
   add(label: string, text: string, error = false): void {
     this.breakStream();
     const kind = (label === "xloom" || label === "Loop" || label === "恢复状态") && !text.includes("\n") ? "notice" : "message";
-    this.entries.push({ kind, label: plainText(label), text: plainText(text).slice(0, 9000), error });
-    this.trim();
+    this.append({ kind, label: plainText(label), text: plainText(text).slice(0, 9000), error });
   }
 
   notice(text: string, error = false): void {
     if (!error && text.startsWith("Endpoint pricing is unknown;")) {
       if (this.pricingNoticeShown) return;
       this.pricingNoticeShown = true;
-      this.add("xloom", "当前端点未提供定价；费用仅供估算，金额预算无法准确执行。");
+      this.append({ kind: "diagnostic", label: "xloom", text: "当前端点未提供定价；费用仅供估算，金额预算无法准确执行。" });
       return;
     }
     this.add("xloom", text, error);
@@ -145,9 +186,10 @@ export class EventFeed {
   }
 
   handoff(event: AgentHandoff): void {
+    this.endThinking();
     this.breakStream();
     const phase = event.mode === "metacog" ? "复核" : event.mode === "execute" ? "执行" : "规划";
-    this.entries.push({ kind: "activity", label: roleLabel(event.mode),
+    this.append({ kind: "activity", label: roleLabel(event.mode),
       text: `${phase}${event.stepId ? ` · ${plainText(event.stepId)}` : ""}`,
       details: `r${event.revision} · ${event.trigger.kind}\n${plainText(event.trigger.reason).slice(0, 2000)}` });
     this.trim();
@@ -155,17 +197,30 @@ export class EventFeed {
 
   runtime(event: RuntimeEvent): void {
     const label = roleLabel(event.mode);
-    if (event.type === "text") {
-      const last = this.entries.at(-1);
+    if (event.type === "thinking_start" || event.type === "thinking" || event.type === "thinking_end") {
+      this.breakStream();
+      const key = `thinking:${event.mode}:${event.blockId ?? "current"}`;
+      let entry = this.entries.findLast(item => item.kind === "thinking" && item.key === key && item.endedAt === undefined);
+      if (!entry && event.type === "thinking_end") return;
+      if (!entry) { entry = { kind: "thinking", label, text: "", key, startedAt: this.now(), durationKnown: !event.replayed }; this.append(entry); }
+      if (event.type === "thinking") {
+        const text = entry.text + plainText(event.text);
+        entry.text = text.length > this.maxText ? `…${text.slice(-this.maxText)}` : text;
+      }
+      if (event.type === "thinking_end") entry.endedAt = this.now();
+    } else if (event.type === "text") {
+      this.endThinking();
+      const last = this.tail();
       if (last?.label === label && last.key === "stream") {
         const joined = last.text + plainText(event.text);
         last.text = joined.length > this.maxText ? `…${joined.slice(-this.maxText)}` : joined;
       } else {
-        this.entries.push({ kind: event.mode === "chat" ? "message" : "protocol", label, text: plainText(event.text).slice(-this.maxText), key: "stream" });
+        this.append({ kind: event.mode === "chat" ? "message" : "protocol", label, text: plainText(event.text).slice(-this.maxText), key: "stream" });
       }
     } else if (event.type === "notice") {
       this.notice(compact(event.text, 700), event.isError);
     } else {
+      this.endThinking();
       this.breakStream();
       const key = `tool:${event.mode}:${event.toolCallId ?? event.toolName ?? "unknown"}`;
       // A new call may reuse an ID in a new Pi context. Never overwrite a prior call.
@@ -177,13 +232,13 @@ export class EventFeed {
       if (event.type !== "tool_start") entry.output = plainText(event.text).slice(0, 9000);
       entry.state = state;
       entry.error = event.isError;
-      if (!existing) this.entries.push(entry);
+      if (!existing) this.append(entry);
     }
     this.trim();
   }
 
   breakStream(): void {
-    const last = this.entries.at(-1);
+    const last = this.tail();
     if (last?.key === "stream") delete last.key;
   }
 
