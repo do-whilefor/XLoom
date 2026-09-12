@@ -1,0 +1,56 @@
+import { readFile, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { z } from "zod";
+import type { createWriteTool } from "@earendil-works/pi-coding-agent";
+import { executionSchema } from "../schema.js";
+import type { RunRequest, Usage } from "../types.js";
+
+export const stageSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
+  execution: executionSchema,
+  yieldToDecide: z.boolean().optional(),
+}).strict();
+
+export function stagePath(request: RunRequest): string { return join(request.runDir, "artifacts", "checkpoint.json"); }
+
+/** Existing write tool, with an explicitly advertised controller submission file.
+ * All other writes retain Pi semantics. A file alone never becomes a committed fact. */
+export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: RunRequest, usage: Usage, redact: (value: string) => string = value => value) {
+  let yielded = false;
+  let summary = "";
+  const clean = (value: unknown): unknown => {
+    if (typeof value === "string") return redact(value);
+    if (Array.isArray(value)) return value.map(clean);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clean(item)]));
+    return value;
+  };
+  return {
+    get yielded() { return yielded; },
+    get summary() { return summary; },
+    tool: {
+      ...tool,
+      async execute(...args: Parameters<typeof tool.execute>) {
+        if (yielded) throw new Error("This Execute run has yielded after a committed checkpoint; remaining tools were not executed.");
+        const result = await tool.execute(...args);
+        const canonical = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+        if (!request.onCheckpoint || canonical(resolve(request.workspace, args[1].path)) !== canonical(stagePath(request))) return result;
+        request.signal.throwIfAborted();
+        if ((await stat(stagePath(request))).size > 1_048_576) throw new Error("Checkpoint proposal exceeds 1 MiB.");
+        const source = await readFile(stagePath(request), "utf8");
+        if (Buffer.byteLength(source) > 1_048_576) throw new Error("Checkpoint proposal exceeds 1 MiB.");
+        const submission = stageSchema.parse(clean(JSON.parse(source.replace(/^\uFEFF/, ""))));
+        const board = await request.onCheckpoint(submission.id, submission.execution, { ...usage });
+        yielded = submission.yieldToDecide ?? false;
+        summary = submission.execution.summary;
+        return { ...result, content: [{ type: "text" as const, text: JSON.stringify({
+          checkpoint: submission.id, committed: true, revision: board.revision, yielded,
+          // Return committed public identifiers so the next batch can refer to
+          // already-submitted evidence instead of inventing or resubmitting IDs.
+          facts: board.facts.map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
+          evidence: board.evidence.map(item => ({ id: item.id, path: item.path, description: item.description })),
+          instruction: yielded ? "Return control to Decide; do not execute further tools." : "Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
+        }) }] };
+      },
+    },
+  };
+}

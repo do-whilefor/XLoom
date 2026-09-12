@@ -32,6 +32,11 @@ export function createRunBudget(limits: ProjectConfig["limits"], usage: Usage, s
     return { context: { ...context, tools: [], systemPrompt: `${context.systemPrompt}\n\n${finalInstruction}` } };
   };
   return {
+    get canRequest(): boolean {
+      return !signal.aborted && (maxTurns === null || turns < maxTurns)
+        && (limits.maxTokens === null || spent.input + spent.output + usage.input + usage.output < limits.maxTokens)
+        && (limits.maxCost === null || spent.cost + usage.cost < limits.maxCost);
+    },
     instruction: `${instruction}${maxTurns === 1 ? `\n${finalInstruction}` : ""}`,
     toolsAllowed: maxTurns === null || maxTurns > 1,
     shouldStopAfterTurn,

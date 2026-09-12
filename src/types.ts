@@ -37,9 +37,14 @@ export interface ProjectConfig {
 }
 export interface Goal { id: string; description: string; parentId: string | null; status: "active" | "satisfied" | "abandoned"; factIds: string[] }
 export interface Fact { id: string; description: string; stepId: string | null; evidenceIds: string[]; supersedes?: string }
+/** Existing facts used together under explicit shared conditions. Missing items are unverified prerequisites. */
+export interface Combination {
+  requires: string[]; missing: string[]; scope: string; stateVersion: string; expectedCapability: string; counterEvidence?: string[];
+}
 export interface Step {
   id: string; goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string;
   priority: number; status: StepStatus; attempts: number; runId: string | null; leaseUntil: number | null; result?: string;
+  combination?: Combination;
 }
 export interface Evidence { id: string; path: string; sha256: string; bytes: number; description: string; runId: string; stepId: string; excerpt?: string }
 export interface Impact { capability: string; object: string; result: string; scope: string; prerequisites: string }
@@ -49,12 +54,21 @@ export interface Finding {
 }
 export interface Hint { id: string; content: string; createdAt: string }
 export interface Usage { input: number; output: number; cost: number }
+export interface AttemptProposal {
+  /** Stable hypothesis identifier, reused across repeated tests. */
+  hypothesis: string; scope: string; identity: string; stateVersion: string; baseline: string; changedVariable: string;
+  outcome: "supports" | "refutes" | "inconclusive" | "blocked"; observation: string; evidenceRefs: string[];
+}
+export interface Attempt extends Omit<AttemptProposal, "evidenceRefs"> {
+  id: string; evidenceIds: string[]; conditionKey: string; outcomeKey: string; runId: string; stepId: string;
+}
 export interface BoardSnapshot {
   revision: number; config: ProjectConfig; status: RunStatus; outcome: Outcome | null; reason: string;
   goals: Goal[]; facts: Fact[]; steps: Step[]; findings: Finding[]; evidence: Evidence[]; hints: Hint[];
   usage: Usage; completedSteps: number; noProgressCount: number; lastMetaStep: number; lastMetaRevision: number; elapsedMs?: number;
+  attempts?: Attempt[];
 }
-export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number }
+export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination }
 export interface Decision {
   summary: string;
   steps?: StepProposal[];
@@ -66,6 +80,7 @@ export interface Decision {
 }
 export interface Execution {
   summary: string; result: "done" | "no_progress" | "blocked";
+  attempts?: AttemptProposal[];
   evidence?: { ref: string; path: string; description: string }[];
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];
   findings?: { key: string; title: string; target: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string }[];
@@ -76,9 +91,10 @@ export interface RunRequest {
   context?: BlackboardContext;
   trigger?: OuterLoopTrigger;
   blackboardPath?: string;
+  onCheckpoint?: (checkpointId: string, output: unknown, cumulativeUsage: Usage) => Promise<BoardSnapshot> | BoardSnapshot;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }
-export interface RunResult { output: unknown; usage: Usage }
+export interface RunResult { output: unknown; usage: Usage; yielded?: boolean }
 export interface AgentRunner { run(request: RunRequest): Promise<RunResult> }
 export interface RuntimeEvent {
   type: "text" | "narration" | "usage" | "thinking_start" | "thinking" | "thinking_end" | "tool_start" | "tool_update" | "tool_end" | "notice";

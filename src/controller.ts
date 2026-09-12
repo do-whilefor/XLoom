@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { BlackboardStore } from "./store.js";
 import { decisionSchema, usageSchema } from "./schema.js";
-import { projectContext, type ContextProjector } from "./loop/context.js";
+import { pendingStepReviews, projectContext, type ContextProjector } from "./loop/context.js";
 import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
 import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
 
@@ -80,6 +80,10 @@ export class LoopController {
       const exhausted = this.budgetReason(snapshot);
       if (exhausted) { this.store.setStatus("paused", `${exhausted}; explicit resource limit reached, not Goal completion. Review configured limits in xloom.json before resuming.`); this.board("state"); return; }
       const step: Step | undefined = mode === "execute" ? this.policy.selectStep(snapshot) : undefined;
+      if (step && pendingStepReviews(snapshot).some(review => review.stepId === step.id)) {
+        this.store.setStatus("paused", `Scheduling policy selected Step ${step.id} with superseded dependencies. Review and replace this plan before resuming.`);
+        this.board("state"); return;
+      }
       if (mode === "execute" && !step) { mode = "metacog"; trigger = { kind: "empty_plan", reason: "No ready Step; identify missing work or justify Goal completion from evidence." }; continue; }
       const runId = `${mode}-${randomUUID()}`;
       const runDir = path.join(this.store.dataDir, "runs", runId);
@@ -99,6 +103,13 @@ export class LoopController {
       try {
         const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
           signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
+        if (mode === "execute") request.onCheckpoint = (checkpointId, output, cumulativeUsage) => {
+          cancellation.signal.throwIfAborted();
+          const committed = this.store.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage);
+          this.board();
+          this.emit({ type: "result", result: { mode: "execute", summary: committed.reason } });
+          return committed;
+        };
         request.context = this.projectContext(request);
         this.emit({ type: "handoff", handoff: { role: mode === "execute" ? "execute" : "decide", mode, runId, revision: snapshot.revision, stepId: claimedStep?.id, trigger } });
         cancellation.signal.throwIfAborted();
@@ -137,20 +148,32 @@ export class LoopController {
       if (current.status !== "running" || current.outcome) return;
       if (hintsChanged) { mode = "metacog"; trigger = { kind: "hint", reason: "A new Hint arrived; reassess the plan and Goal against the latest blackboard." }; continue; }
       if (needsCompletionReview) { mode = "metacog"; trigger = { kind: "completion", reason: "Independently check the whole Goal, evidence, pending work and blind spots before accepting completion." }; continue; }
+      if (result?.yielded) {
+        mode = "decide";
+        trigger = { kind: "execution_result", reason: "Execute committed a partial checkpoint and returned control. Review new evidence and replan unfinished work; the Step success signal has not been fully verified." };
+        continue;
+      }
       if (mode === "execute") {
         const review = this.policy.reviewAfterExecution(snapshot, current, step!.id);
         mode = review ? "metacog" : "decide";
         trigger = review ?? { kind: "execution_result", reason: "A Step result was committed. Compare it with the Goal and choose the next useful action." };
       } else if (mode === "metacog") {
-        if (!current.steps.some(item => item.status === "ready")) {
-          this.store.setStatus("paused", "Review produced no executable step or evidence-backed conclusion. Add a hint and resume."); this.board("state"); return;
+        const stale = new Set(pendingStepReviews(current).map(review => review.stepId));
+        if (!current.steps.some(item => item.status === "ready" && !stale.has(item.id))) {
+          this.store.setStatus("paused", current.steps.some(item => item.status === "ready" && stale.has(item.id))
+            ? "Review left only Steps with superseded dependencies and no executable step. Recheck the replacement Facts, abandon stale plans and create a current plan before resuming."
+            : "Review produced no executable step or evidence-backed conclusion. Add a hint and resume.");
+          this.board("state"); return;
         }
         mode = "execute";
         trigger = { kind: "planned", reason: "Execute the next ready Step from the reviewed blackboard plan." };
       } else {
-        mode = current.steps.some(item => item.status === "ready") ? "execute" : "metacog";
+        const stale = new Set(pendingStepReviews(current).map(review => review.stepId));
+        mode = current.steps.some(item => item.status === "ready" && !stale.has(item.id)) ? "execute" : "metacog";
         trigger = mode === "execute" ? { kind: "planned", reason: "Execute the next ready Step; report observations and evidence, not a task-level conclusion." }
-          : { kind: "empty_plan", reason: "Planning produced no ready Step. Repair the plan or justify an evidence-backed conclusion." };
+          : current.steps.some(item => item.status === "ready" && stale.has(item.id))
+            ? { kind: "fact_revision", reason: "All ready Steps depend on superseded Facts. Review their causal assumptions, abandon stale plans and create Steps supported by current conditions." }
+            : { kind: "empty_plan", reason: "Planning produced no ready Step. Repair the plan or justify an evidence-backed conclusion." };
       }
     }
   }

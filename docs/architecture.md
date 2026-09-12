@@ -10,13 +10,13 @@ SettingsService 只复用 Pi ModelRuntime 的本地目录、持久 API Key 和 O
 
 ## 两个角色，三个运行模式
 
-`decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。运行时将 `metacog` 映射到 Decide 的模型，加载简短的复核指令。每次调用均创建新的 Pi Agent；没有共享 `messages`、session continuation 或让一个 Agent 总结另一方聊天的通路。
+`decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。运行时将 `metacog` 映射到 Decide 的模型，加载简短的复核指令。每个新 run 创建新的 Pi Agent；同一次 run 可维护私有上下文并在模型瞬断后续接一次。不同 run / 角色之间没有共享 `messages`，也不让一个 Agent 总结另一方聊天。
 
-三个红队运行模式现在都挂载 read / write / edit / powershell。Decide 可使用工具减少信息缺口，但结果仍受 Decision 契约限制；新增权威事实/证据由 Execute 提交，不能用 Decide 的私有工具历史作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，避免与另一个任务混淆。
+Decide / 元认知仅挂载 `read`，负责读证据、制定计划、验证交接条件与审查。Execute 使用 `read / write / edit / powershell` 完成调查和状态变更，新增权威事实 / 证据由 Execute 提交。Decide 的私有阅读历史不作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，避免与另一个任务混淆。
 
-一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 完成一个 Step，提交证据/事实/线索 → Controller 归档证据并事务提交 → fresh Decide 重排下一步。达到触发条件时，使用 fresh Decide 进行元认知；提议完成时再独立复核，控制器检查最终状态所需证据关联。
+一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 调查，必要时阶段性提交证据 / 事实 / 条件尝试 → Controller 归档证据并事务提交 → Execute 继续或交回 fresh Decide。最终结果结算 Step；主动交回时 Step 保持“尚未完整验证”的 `blocked` 结果，fresh Decide 另提后续工作。达到触发条件时使用 fresh Decide 元认知；提议完成时再独立复核。
 
-Pi 内层负责一次 Agent 调用中的模型响应、四工具调用与继续执行，本版不修改它。xloom 外层只负责在独立调用之间组织黑板、选步、触发复核和判定是否接受完成提议。没有第三个审查 Agent，也没有两个共享会话的持久进程。
+Pi 内层负责一次 Agent 调用中的模型响应、已挂载工具调用与继续执行，本版不修改 Pi 依赖源码。xloom 控制器负责组织黑板、校验阶段提交、选步、触发复核和判定是否接受完成提议。没有第三个审查 Agent，也没有两个共享会话的持久进程。
 
 Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可执行的新计划便继续。根 Goal 必须由 metacog 在同一次结果中标记 satisfied 并给出最终结论，引用支持全局完成判断的事实；正常 Decide 的根 Goal 更新或完成提议只触发独立复核，不提前关闭根目标。复核期间有新 Hint，则再次使用新黑板复核。
 
@@ -30,10 +30,13 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 | `app.ts` / `workspace.ts` | 聊天/任务路由、任务指针、单工作区锁、非秘密模型设置 | 会话选择与任务管理，不共享历史 |
 | `runtime/chat.ts` | 独立普通聊天 Pi Agent、四工具、取消与用量 | 可选聊天持久化，不注入红队黑板 |
 | `runtime/settings.ts` | Pi 目录、持久凭据与 OAuth callbacks | 复用 Pi 新增的供应商登录能力 |
-| `loop/context.ts` | `ContextProjector`：角色视图、依赖保留、历史尾部与省略说明 | 按预算投影、更细粒度的任务上下文策略 |
-| `loop/policy.ts` | `LoopPolicy`：ready Step 选取、执行后的复核触发 | 调整排序与复核频率，不改变完成条件 |
+| `loop/context.ts` | `ContextProjector`：事实索引、因果与修正闭包、组合条件、旧依赖复核 | 更细粒度的任务上下文策略 |
+| `loop/attempts.ts` | 条件试验去重、兼容旧输出的进展标记 | 改善假设标识稳定性，不以新文件冒充进展 |
+| `loop/policy.ts` | `LoopPolicy`：ready Step 选取、拒选旧依赖、执行后复核 | 调整排序与复核频率，不改变完成条件 |
 | `runtime/prompts.ts` | 短角色指令、输出协议、序列化公开视图及触发原因 | 契约版本演进 |
-| `runtime/pi-runner.ts` | fresh Pi Agent、四工具、事件/usage/取消 | 不改变 `AgentRunner` 的其他执行后端 |
+| `runtime/pi-runner.ts` | fresh Pi Agent、按角色选工具、同次调用续接与协议修复、事件 / usage / 取消 | 不改变 `AgentRunner` 的其他执行后端 |
+| `runtime/continuity.ts` | Pi token 估算与完整交互压缩、私有检查点保存和恢复校验 | 更稳健的容量估算与摘要验证 |
+| `runtime/stage.ts` | 原生 write 的指定文件提交协议、公开引用返回、主动移交 | 不增设工具名 |
 | `runtime/models.ts` | Pi ModelRuntime 模型目录、认证和流式适配 | 随 Pi 升级扩展供应商，不维护独立模型名单 |
 | `store.ts` | SQLite 权威状态、关联检查、归档与可读投影 | 存储迁移、证据分层或远程存储 |
 | `controller.ts` | 串行调度、预算、调用策略/投影、生命周期与完成复核不变量 | 构造参数注入策略；不增加 Agent 角色 |
@@ -47,7 +50,11 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 默认 `ContextProjector` 显式选取字段，不序列化模型配置、凭据、Step 的运行锁字段、Evidence 的 runId 或任何聊天历史。Decide / 元认知始终保留全部 Goal、ready/claimed Step、非 closed Finding 和全部 Hint；无关历史只取最近 8 个已结算 Step、12 个 Fact、8 个 closed Finding、8 份 Evidence。Execute 主要保留当前 Step、祖先 Goal 和直接相关 Finding。
 
-两种视图都补齐已选 Fact 的证据及双向 supersedes 链，避免只看到旧事实。已选记录的历史 Step 来源以 `stepOrigins` 提供，不递归带入全部历史计划。必需依赖不受历史尾部数量限制；单份证据片段最多 2,000 字符，截断有标记。`projection` 明确提供省略数量、不可用引用和阅读提示；缺失内容不是负面证据，关键细节不足时安排 Execute 查阅当前任务黑板或原始证据，不读取另一调用的聊天。投影不改写持久黑板，也不是硬 Token 预算或知识库。
+两种视图提供全部 Fact 的简短 `factIndex`，供规划发现较早的线索。对已选事实递归补齐 `Fact.stepId → 来源 Step.from → 前置 Facts`，并补齐证据及双向 supersedes 链；相关历史 Step 以 `stepOrigins` 提供，不灌入无关计划。组合的已有前提和反证同样参与依赖闭包。Decide / 元认知获得简短 attempts，Execute 只保留与分配 / 来源 Step 或组合范围、环境版本相关的尝试；隐藏 run ID 和内部去重 key。
+
+必需依赖不受历史尾部数量限制；单份证据片段最多 2,000 字符，截断有标记。`projection` 明确提供省略数量、不可用引用和阅读提示；缺失内容不是负面证据，关键细节不足时读取当前任务黑板 / 原始证据或安排 Execute 继续取证。投影不改写持久黑板，也不是硬 Token 预算或知识库。
+
+`pendingStepReviews(snapshot)` 找出 ready Step 对已修正事实的直接或间接依赖，包括来源链和组合反证。公开 `projection.stepReviews` 给出旧事实与替代事实 ID；Policy 不选取这些旧计划，Controller 先交 fresh Decide 重新规划。若复核后仍只有失效计划，则保留未完成状态并暂停，不能因该队列为空而宣称 Goal 完成。
 
 失败 Step 可带公开 `recovery`，只提供历史产物目录和 `evidenceStatus: unverified`，不暴露聊天日志入口。新 Decide 可将检查该目录作为新 Step；恢复引用本身不能充当证据。这样既保留写入后失败的检查路径，也不自动重放旧操作。
 
@@ -55,7 +62,7 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 手动 `/meta`、新 Hint、空计划和完成前复核由 Controller 保留为流程不变量。`LoopController` 第三个可选参数接收 `policy` 与 `projectContext`；默认行为无需配置。`handoff` 事件携带两个角色之一、运行模式、黑板版本、Step 和触发原因，供 TUI / headless 显示；触发原因也写入 `run_started` 审计。TUI 不增加常驻介绍或底部帮助行。
 
-`result` 事件只在 `applyDecision` / `applyExecution` 成功后发出，携带已提交摘要及非空最终状态，不把流式协议或工具返回当作已确认结果。TUI 将角色交接、工具摘要、聊天正文和协议细节分层渲染；`/details` / Ctrl+O 仅切换本地展示，不改变 Agent 上下文、证据归档或 Loop。`/` 候选使用 Pi Editor 的命令补全接口，仅有静态应用命令与模型角色，不扫描文件、不读取凭据；候选 Enter 在应用层映射为补全，下一次 Enter 才执行。
+`result` 事件只在 Controller 成功提交结果 / 阶段结果后发出，携带已提交摘要，不把流式协议或普通工具返回当作已确认结果。TUI 将角色交接、工具摘要、聊天正文和协议细节分层渲染；`/details` / Ctrl+O 仅切换本地展示，不改变 Agent 上下文、证据归档或 Loop。`/` 候选使用 Pi Editor 的命令补全接口，仅有静态应用命令与模型角色，不扫描文件、不读取凭据；候选 Enter 在应用层映射为补全，下一次 Enter 才执行。
 
 运行时 `thinking_start` / `thinking` / `thinking_end` 仅转发提供方实际公开的思考块，以调用、消息和内容块编号隔离，采用跨增量凭据过滤；不使用签名或 redacted 内容。仅在最终消息回放的块标记 `replayed`，展示层不宣称其推理耗时。UI 的工作尾行和思考块都只属于本地事件流，不注入任一角色的上下文；完成、失败、暂停、停止保持不同显示。内部 `xloom-thinking:` 标题链接复用 Pi 的点击/拖动识别，仅允许当前视图生成的 ID；不打开外部地址。重绘计时器在工作结束或退出时清理，Ctrl+T / Ctrl+O 提供键盘后备操作。
 
@@ -69,6 +76,51 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 6. 确认影响要求完整影响字段、原始证据与 PoC、审查说明。此处确定性验证的是结构与关联，不是取代动态证据审查。
 7. 新 Hint 到达正在进行的规划时，完成结论暂缓，转入读取新黑板的元认知。
 8. 数据库状态和审计事件同一事务提交。证据文件先归档；若后续验证失败，可能留下不被引用的归档文件，但图和 run 不会部分提交。暂不自动清理这些文件，以免误删研究材料。
+
+## 阶段提交与累计用量
+
+`RunRequest.onCheckpoint?: (checkpointId, output, cumulativeUsage) => BoardSnapshot | Promise<BoardSnapshot>` 是可选后端接口。默认 PiRunner 不增加工具名，而是包装 Execute 原生 `write`：只有写入提示中指定的绝对 `artifacts/checkpoint.json` 路径才触发提交。内容契约为：
+
+```json
+{
+  "id": "checkpoint-1",
+  "execution": {
+    "summary": "保存已完成的观察，继续验证下一条件",
+    "result": "done",
+    "evidence": [{ "ref": "response", "path": "responses.txt", "description": "原始对照响应" }],
+    "facts": [{ "ref": "observed", "description": "已观测到的具体差异", "evidenceRefs": ["response"] }]
+  },
+  "yieldToDecide": false
+}
+```
+
+`execution` 使用同一 `executionSchema`。文件本身不代表已经提交；解析、引用及证据校验全部通过后才返回 `committed: true`、黑板 revision 和公开引用。后续批次用新 checkpoint ID；最终结果只提交尚未入库的增量，并用返回的真实 ID 引用已存材料。写其他文件保持 Pi 工具原语义；经 PowerShell / edit 改该文件不会触发此 write 提交通路。
+
+`BlackboardStore.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage)` 与最终 `applyExecution` 共用数据校验和归档。SQLite 事务同时提交权威记录、`execution_checkpoint` 审计、检查点 ID / 内容哈希及本 run 已计用量。相同 ID / 内容重复投递幂等，不增加 revision、记录或用量；相同 ID 内容不同会被拒绝。后续失败或进程恢复仍保留已提交材料；未完成批次只保留原始 artifacts，不能自动变成事实。
+
+checkpoint 不结束 run / Step，不增加 `completedSteps`。新支持 / 反证发现可即时清除停滞并记录该 run 已有实质进展；最终结算不会因仅提交一个空增量就把这次运行误判为无进展。`yieldToDecide: true` 使 PiRunner 停止后续工具并返回 `RunResult.yielded: true`，以 `blocked` 明确原 Step 尚未完整验证，Controller 强制 fresh Decide 接手；交接不是最终完成。
+
+`run_progress` 保存累计已计入的 input / output / cost，checkpoint 要求累计值不下降。最终成功、失败或取消只追加尚未计入的差额；无法提供更完整用量时保留已知值，不能负向冲销。Runner 的预算基线固定为开始 run 时的用量，不能用 checkpoint 后的黑板累计值再次加上本 run 全量。UI 收到权威黑板更新后同样只保留未提交的实时用量。
+
+## 组合与条件化尝试
+
+`StepProposal` / `Step` 可带 `combination: { requires, missing, scope, stateVersion, expectedCapability, counterEvidence? }`。`requires` 与 `counterEvidence` 是已有 Fact ID，`requires` 还必须属于 `Step.from`；`missing` 是尚未验证的条件描述。多个 `from` 已表达组合来源，新增字段只说明这些事实能否在相同条件下成立以及下一步要补什么。环境版本等组合条件变化可提出同描述的新 Step，保留旧记录以供追溯。
+
+`Execution.attempts?` 的每项为 `{ hypothesis, scope, identity, stateVersion, baseline, changedVariable, outcome, observation, evidenceRefs }`。`hypothesis` 是稳定标识，重复试验应复用；`outcome` 只允许 `supports | refutes | inconclusive | blocked`。每项必须引用至少一份经过大小 / SHA-256 校验的原始证据；该检查验证关联与完整性，无法代替对证据真实性、结论语义的审查。
+
+Store 生成 `conditionKey = hash(hypothesis, scope, identity, stateVersion, baseline, changedVariable)` 和 `outcomeKey = hash(conditionKey, outcome)`。假设标识做空白 / 大小写规范化；实际范围、身份、环境与变量保留大小写以区分敏感路径 / 值。同条件同结论仅合并证据引用，新的时间戳、不同 observation 措辞和新 Fact ID 不带来额外进展；原始事件、文件和事实仍归档。新的 `supports` / `refutes` 条件结论才算进展，`inconclusive` / `blocked` 留档但不单凭记录增加重置停滞。相同条件的支持与反证都保留，交由后续复核解释冲突。
+
+旧输出未提交 attempts 时继续兼容，按规范化 Fact 描述 / 修正关系和有证据支持的 Finding 阶段新增判断。孤立 Evidence、未取证 lead、仅改 next 文案、仅重开 / 降级 Finding 不算进展。兼容模式不能识别任意语义改写；结构化模式也依赖稳定假设 ID 和真实条件描述，不能声称实现了通用语义去重。
+
+## 当前 run 的上下文与失败续接
+
+`runtime/continuity.ts` 使用 Pi 的 token 估算、压缩判定和对话序列化工具。接近已知模型窗口时保留初始任务、至少两个完整近期交互批次与近期上下文，使用同角色模型生成较早交互的私有摘要；不会拆开 assistant 工具调用和对应 tool result。摘要明确标为未验证的有损记忆，保留假设、前提、身份 / 环境变化、已执行动作、反证和证据索引，不能提交为原始证据或当成用户指令。较小的摘要才替换消息；无法安全压缩的输入保留原状，过大的单条输入仍可能触及提供方容量。
+
+`continuation.json` 在消息边界以临时文件 + 原子替换保存身份、完成消息、未完成工具 ID 和累计用量；私有模型思考 / 签名不写入该检查点，已知模型凭据经过过滤。该文件不投影到另一角色。载入时核对版本、角色、当前 run、Step、工作区、模型与端点；未完成工具或不匹配的调用 / 结果拒绝自动恢复。
+
+仅当前 PiRunner 调用中的已识别瞬断可从完整检查点续接一次：保留已完成工具结果，移除尾部失败模型响应，不自动重新执行工具。认证 / 配置 / 上下文容量错误、用户取消、损坏检查点或不确定工具副作用需要退出这次调用。最终 JSON 无效时可追加一次工具禁用的格式修复，请求只能整理已观察且未提交的增量。取消、180 秒单次超时及显式资源限制仍生效；摘要、失败响应、续接和修复的实际 token 全部计量，不设置新的默认累计 token / 回合上限。
+
+这是同次运行内的私有连续性。进程重启仍保留失败 Step，并由 fresh Decide 检查公开记录和 artifacts；新 run 不自动载入前一 run 的私有会话，也不跨角色恢复它。普通 ChatSession 在进程内复用上下文压缩和一次瞬断续接，计入摘要 token；它不持久化 continuation 文件，也不使用研究结果 JSON 修复。
 
 ## 最终状态
 
@@ -96,7 +148,7 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 ## 验证层次
 
-Schema / Store 测试覆盖字段与图一致性；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证调度、取消、预算和恢复；Context / Policy 测试覆盖依赖闭包、省略说明、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、聊天历史、各模式四工具、独立上下文、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
+Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 失败保留 / 用量差额、条件变化与重复观察；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证阶段交接、旧依赖复核、取消、预算和恢复；Context / Policy 测试覆盖递归因果闭包、事实索引、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、Decide 只读 / Execute 四工具、上下文压缩、同次瞬断续接、协议修复、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
 
 外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
 

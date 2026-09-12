@@ -62,6 +62,27 @@ export const usageSchema = z.object({
   cost: z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER),
 }).strict();
 
+export const combinationSchema = z.object({
+  requires: refs.min(1),
+  missing: z.array(text()).max(128),
+  scope: text(),
+  stateVersion: text(),
+  expectedCapability: text(),
+  counterEvidence: refs.optional(),
+}).strict();
+
+export const attemptSchema = z.object({
+  hypothesis: id,
+  scope: text(),
+  identity: text(),
+  stateVersion: text(),
+  baseline: text(),
+  changedVariable: text(),
+  outcome: z.enum(["supports", "refutes", "inconclusive", "blocked"]),
+  observation: text(),
+  evidenceRefs: refs.min(1),
+}).strict();
+
 export const decisionSchema = z.object({
   summary: text(),
   steps: z.array(z.object({
@@ -71,6 +92,7 @@ export const decisionSchema = z.object({
     successSignal: text(),
     evidencePlan: text(),
     priority,
+    combination: combinationSchema.optional(),
   }).strict()).max(32).optional(),
   goals: z.array(z.object({ id, description: text(), parentId: id }).strict()).max(32).optional(),
   updateSteps: z.array(z.object({
@@ -99,6 +121,7 @@ export const decisionSchema = z.object({
 export const executionSchema = z.object({
   summary: text(),
   result: z.enum(["done", "no_progress", "blocked"]),
+  attempts: z.array(attemptSchema).max(128).optional(),
   evidence: z.array(z.object({ ref: id, path: text(4_096), description: text() }).strict()).max(128).optional(),
   facts: z.array(z.object({
     ref: id,

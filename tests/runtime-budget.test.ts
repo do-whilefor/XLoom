@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { Agent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
@@ -34,6 +34,11 @@ function message(content: AssistantMessage["content"], stopReason: AssistantMess
 function write(path = "fixture.txt", content = fixture, id = "fixture-write"): AssistantMessage {
   return message([{ type: "toolCall", id, name: "write", arguments: { path, content } }], "toolUse");
 }
+function fixtureTool(kind: Kind, path = "fixture.txt", content = fixture, id = "fixture-tool"): AssistantMessage {
+  return kind === "decide" ? message([{ type: "toolCall", id, name: "read", arguments: { path: "source.txt" } }], "toolUse") : write(path, content, id);
+}
+const availableTools = (kind: Kind) => kind === "decide" ? ["read"] : ["read", "write", "edit", "powershell"];
+const observedFixture = (kind: Kind, workspace: string, path = "fixture.txt") => join(workspace, kind === "decide" ? "source.txt" : path);
 function answer(kind: Kind): AssistantMessage {
   return message([{ type: "text", text: kind === "chat" ? "The local fixture is verified."
     : JSON.stringify({ summary: "The local fixture is verified.", ...(kind === "execute" ? { result: "done" } : {}) }) }]);
@@ -43,6 +48,7 @@ async function harness(kind: Kind, response: (context: Context, call: number) =>
   overrides: Partial<ProjectConfig["limits"]> = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "xloom-budget-test-"));
   directories.push(workspace);
+  if (kind === "decide") await writeFile(join(workspace, "source.txt"), fixture);
   const abort = new AbortController();
   const seen: Context[] = [];
   const events: RuntimeEvent[] = [];
@@ -88,35 +94,35 @@ async function harness(kind: Kind, response: (context: Context, call: number) =>
 describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn in %s", kind => {
   it("keeps tools available beyond the old twelve-turn cap with unlimited input/output usage", async () => {
     const test = await harness(kind, (context, call) => {
-      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(availableTools(kind));
       expect(context.systemPrompt).not.toContain("final allowed model turn");
-      return call <= 14 ? write(`fixture-${call}.txt`, fixture, `write-${call}`) : answer(kind);
+      return call <= 14 ? fixtureTool(kind, `fixture-${call}.txt`, fixture, `fixture-${call}`) : answer(kind);
     }, { maxTurnsPerRun: null, maxTokens: null, maxCost: null });
     test.input.snapshot.usage = { input: 1_000_000_000, output: 1_000_000_000, cost: 0 };
     expect(await test.run()).toEqual({ input: once.input * 15, output: once.output * 15, cost: expect.closeTo(once.cost * 15) });
     expect(test.seen).toHaveLength(15);
     expect(test.events.filter(event => event.type === "tool_end" && !event.isError)).toHaveLength(14);
-    expect(await readFile(join(test.workspace, "fixture-14.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace, "fixture-14.txt"), "utf8")).toBe(fixture);
   });
 
   it("still honors cancellation when the model-turn cap is disabled", async () => {
-    const test = await harness(kind, () => write(), { maxTurnsPerRun: null, maxTokens: null });
+    const test = await harness(kind, () => fixtureTool(kind), { maxTurnsPerRun: null, maxTokens: null });
     test.input.onEvent = event => { if (event.type === "tool_end") test.abort.abort(); };
     const error = await test.run().catch(error => error);
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.usage).toEqual(once);
     expect(test.seen).toHaveLength(1);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
   });
 
-  it("preserves the first tool result and performs one write before the final tool-free turn", async () => {
+  it("preserves the first role-appropriate tool result before the final tool-free turn", async () => {
     const test = await harness(kind, (context, call) => {
       if (call === 1) {
-        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
-        return write();
+        expect(context.tools?.map(tool => tool.name)).toEqual(availableTools(kind));
+        return fixtureTool(kind);
       }
       expect(context.tools).toEqual([]);
-      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "write", toolCallId: "fixture-write", isError: false });
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: kind === "decide" ? "read" : "write", toolCallId: "fixture-tool", isError: false });
       expect(context.systemPrompt).toContain("final allowed model turn");
       return answer(kind);
     });
@@ -124,8 +130,8 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
     expect(test.seen).toHaveLength(2);
     expect(test.agentsCreated).toBe(1);
     expect(test.events.filter(event => event.type === "tool_start")).toHaveLength(1);
-    expect(test.events.filter(event => event.type === "tool_end")).toMatchObject([{ toolName: "write", isError: false }]);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(test.events.filter(event => event.type === "tool_end")).toMatchObject([{ toolName: kind === "decide" ? "read" : "write", isError: false }]);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
   });
 
   it("uses no tools when only one model turn is allowed", async () => {
@@ -153,7 +159,7 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
 
   it("rejects a hallucinated final write without replaying or overwriting the prior side effect", async () => {
     const test = await harness(kind, (context, call) => {
-      if (call === 1) return write();
+      if (call === 1) return fixtureTool(kind);
       expect(context.tools).toEqual([]);
       return write("fixture.txt", "MUST NOT OVERWRITE THE EXISTING FIXTURE", "forbidden-final-write");
     });
@@ -163,28 +169,29 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
     expect(error.usage).toEqual(twice);
     expect(test.seen).toHaveLength(2);
     expect(test.events.filter(event => event.type === "tool_end")).toMatchObject([{ isError: false }, { isError: true }]);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
+    if (kind === "decide") await expect(readFile(join(test.workspace, "fixture.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each(["tokens", "cost"] as const)("does not enter the reporting turn after reaching the %s limit", async resource => {
-    const test = await harness(kind, () => write(), resource === "tokens" ? { maxTokens: 15 } : { maxCost: 0.01 });
+    const test = await harness(kind, () => fixtureTool(kind), resource === "tokens" ? { maxTokens: 15 } : { maxCost: 0.01 });
     const error = await test.run().catch(error => error);
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.message).toContain(resource === "tokens" ? "maxTokens=15" : "maxCost=0.01");
     expect(error.usage).toEqual(once);
     expect(test.seen).toHaveLength(1);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
   });
 
   it("keeps both turns' usage and the existing fixture when the final provider response fails", async () => {
-    const test = await harness(kind, (_context, call) => call === 1 ? write()
+    const test = await harness(kind, (_context, call) => call === 1 ? fixtureTool(kind)
       : { ...message([], "error"), errorMessage: "Synthetic final provider failure" });
     const error = await test.run().catch(error => error);
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.message).toContain("Synthetic final provider failure");
     expect(error.usage).toEqual(twice);
     expect(test.seen).toHaveLength(2);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
   });
 
   it("does not spend a reserved turn after an early normal final response", async () => {
@@ -195,7 +202,7 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
   });
 
   it("honors cancellation after the completed tool without entering the reporting turn", async () => {
-    const test = await harness(kind, () => write());
+    const test = await harness(kind, () => fixtureTool(kind));
     test.input.onEvent = event => {
       test.events.push(event);
       if (event.type === "tool_end") test.abort.abort(new Error("Synthetic cancellation after local write"));
@@ -204,19 +211,19 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.usage).toEqual(once);
     expect(test.seen).toHaveLength(1);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
   });
 });
 
 describe.each(["execute", "decide"] as const)("invalid final protocol in %s", kind => {
   it("retains both turns' usage and artifacts when the final response is not JSON", async () => {
-    const test = await harness(kind, (_context, call) => call === 1 ? write() : message([{ type: "text", text: "Not the required JSON object." }]));
+    const test = await harness(kind, (_context, call) => call === 1 ? fixtureTool(kind) : message([{ type: "text", text: "Not the required JSON object." }]));
     const error = await test.run().catch(error => error);
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.message).toContain("single JSON object");
     expect(error.usage).toEqual(twice);
     expect(test.seen).toHaveLength(2);
-    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+    expect(await readFile(observedFixture(kind, test.workspace), "utf8")).toBe(fixture);
     await expect(readFile(join(test.input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

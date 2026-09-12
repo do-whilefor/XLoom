@@ -1,12 +1,23 @@
 import { dirname, join } from "node:path";
-import type { BoardSnapshot, Evidence, Fact, Finding, Goal, Hint, Mode, RunRequest, Step } from "../types.js";
+import type { Attempt, BoardSnapshot, Evidence, Fact, Finding, Goal, Hint, Mode, RunRequest, Step } from "../types.js";
 
 export type ContextStep = Omit<Step, "runId" | "leaseUntil"> & {
   /** A failed run may have left files here; this is not committed or verified Evidence. */
   recovery?: { artifacts: string; evidenceStatus: "unverified" };
 };
 export type ContextEvidence = Omit<Evidence, "runId">;
-export type StepOrigin = Pick<Step, "id" | "description" | "status">;
+export type StepOrigin = Pick<Step, "id" | "description" | "status" | "from" | "combination">;
+export interface FactIndexEntry {
+  id: string;
+  summary: string;
+  stepId: string | null;
+  evidenceIds: string[];
+  supersedes?: string;
+  replacedBy: string[];
+  status: "available" | "superseded";
+}
+export interface StepReview { stepId: string; staleFactIds: string[]; replacementFactIds: string[] }
+export type ContextAttempt = Omit<Attempt, "runId" | "conditionKey" | "outcomeKey">;
 type Collection = "goals" | "facts" | "steps" | "findings" | "evidence" | "hints";
 type ReferenceKind = "goals" | "facts" | "steps" | "evidence";
 
@@ -20,11 +31,15 @@ export interface BlackboardContext {
   noProgressCount: number;
   goals: Goal[];
   facts: Fact[];
+  /** Discovery summaries, not complete evidence: old isolated clues remain findable. */
+  factIndex: FactIndexEntry[];
+  /** Compact condition-aware trial summaries; referenced evidence may be omitted. */
+  attempts: ContextAttempt[];
   steps: ContextStep[];
   findings: Finding[];
   evidence: ContextEvidence[];
   hints: Hint[];
-  /** Identity-only provenance: these are not executable plans or a second history. */
+  /** Causal provenance and conditions, without the old executable plans. */
   stepOrigins: StepOrigin[];
   projection: {
     mode: Mode;
@@ -32,6 +47,8 @@ export interface BlackboardContext {
     originStepCount: number;
     truncatedExcerpts: number;
     unavailableReferences: Record<ReferenceKind, string[]>;
+    stepReviews: StepReview[];
+    omittedAttempts: number;
     notice: string;
   };
 }
@@ -42,7 +59,92 @@ export type ContextProjector = (request: RunRequest) => BlackboardContext;
 const tailLimits = { steps: 8, facts: 12, findings: 8, evidence: 8 } as const;
 const excerptLimit = 2_000;
 const pending = (step: Step): boolean => step.status === "ready" || step.status === "claimed";
-const notice = "This is a role-specific, partial blackboard view, not the complete history. Omission is not negative evidence, an untested boundary, or permission to repeat an old action. Counts describe omitted records, not their contents. Essential dependencies are retained and may exceed a fixed context budget. stepOrigins identify provenance only; their omitted plans are not available here. Superseded Facts are historical and must be read with their replacements. Evidence excerpts may be partial: schedule Execute to inspect the referenced artifact and record adequate evidence when a critical comparison is missing. Failed Steps may expose recovery.artifacts: within that old run, inspect only its artifacts directory for partial side effects, not sibling logs. Its files are unverified, may be absent, and are not committed Evidence or Facts; inspect before deciding whether any action should be retried. If inspected recovery material must be submitted as evidence, retain verifiable evidence in the current run's artifacts directory. Unavailable references indicate missing source records, never verified facts. Never inspect private run transcripts or chats.";
+const notice = "This is a role-specific, partial blackboard view, not the complete history. Omission is not negative evidence, an untested boundary, or permission to repeat an old action. Counts describe omitted records, not their contents. Essential dependencies are retained and may exceed a fixed context budget. stepOrigins preserve causal inputs and combination conditions; their omitted executable plans are not available here. factIndex is a discovery index of every Fact for Decide/metacog, and only related Facts for Execute; summaries may be truncated and its references need not be expanded in this view. Schedule Execute from an indexed Fact to inspect its full dependencies and evidence. An available index entry means only that no replacement was recorded, not that its conditions are still valid. attempts are compact trial summaries whose evidence references may also be omitted; a refutation applies only to its stated scope, identity, state, baseline and changed variable. Inspect full evidence before treating a truncated summary as a decisive comparison. Superseded Facts are historical and must be read with their replacements. stepReviews lists pending Steps whose direct or causal inputs were superseded: recheck applicability, identity, scope and state, then abandon/replan instead of treating old evidence as current support. Combination requires must hold together in the same applicable scope and state; missing conditions are unverified. Evidence excerpts may be partial: schedule Execute to inspect the referenced artifact and record adequate evidence when a critical comparison is missing. Failed Steps may expose recovery.artifacts: within that old run, inspect only its artifacts directory for partial side effects, not sibling logs. Its files are unverified, may be absent, and are not committed Evidence or Facts; inspect before deciding whether any action should be retried. If inspected recovery material must be submitted as evidence, retain verifiable evidence in the current run's artifacts directory. Unavailable references indicate missing source records, never verified facts. Never inspect private run transcripts or chats.";
+
+function projectCombination(combination: NonNullable<Step["combination"]>): NonNullable<Step["combination"]> {
+  return {
+    requires: [...combination.requires], missing: [...combination.missing], scope: combination.scope,
+    stateVersion: combination.stateVersion, expectedCapability: combination.expectedCapability,
+    ...(combination.counterEvidence === undefined ? {} : { counterEvidence: [...combination.counterEvidence] }),
+  };
+}
+
+function compact(value: string, length = 240): string {
+  return value.length > length ? `${value.slice(0, length)}…` : value;
+}
+
+function projectAttempt(attempt: Attempt): ContextAttempt {
+  return {
+    id: attempt.id, stepId: attempt.stepId, hypothesis: compact(attempt.hypothesis), scope: attempt.scope,
+    identity: attempt.identity, stateVersion: attempt.stateVersion, baseline: compact(attempt.baseline),
+    changedVariable: compact(attempt.changedVariable), outcome: attempt.outcome, observation: compact(attempt.observation, 500),
+    evidenceIds: [...attempt.evidenceIds],
+  };
+}
+
+function factInputs(step: Step): string[] {
+  return [...step.from, ...(step.combination?.requires ?? []), ...(step.combination?.counterEvidence ?? [])];
+}
+
+/** Supersession invalidates applicability of dependent plans, not their archived evidence. */
+export function pendingStepReviews(board: BoardSnapshot): StepReview[] {
+  const facts = new Map(board.facts.map(fact => [fact.id, fact]));
+  const steps = new Map(board.steps.map(step => [step.id, step]));
+  const replacements = new Map<string, string[]>();
+  for (const fact of board.facts) if (fact.supersedes) {
+    const previous = replacements.get(fact.supersedes) ?? [];
+    previous.push(fact.id);
+    replacements.set(fact.supersedes, previous);
+  }
+  if (!replacements.size) return [];
+
+  const dependencies = new Map<string, string[]>();
+  function causalInputs(fact: Fact): string[] {
+    const cached = dependencies.get(fact.id);
+    if (cached) return cached;
+    // A correction may have used the prior Fact as an input to retest it. That
+    // historical input alone must not make the corrected Fact permanently stale.
+    const corrected = new Set<string>();
+    let prior = fact.supersedes;
+    while (prior && !corrected.has(prior)) {
+      corrected.add(prior);
+      prior = facts.get(prior)?.supersedes;
+    }
+    const origin = fact.stepId ? steps.get(fact.stepId) : undefined;
+    const inputs = origin ? factInputs(origin).filter(id => !corrected.has(id)) : [];
+    dependencies.set(fact.id, inputs);
+    return inputs;
+  }
+
+  const reviews: StepReview[] = [];
+  for (const step of board.steps.filter(pending)) {
+    const queue = factInputs(step);
+    const visited = new Set<string>();
+    const stale = new Set<string>();
+    const replacementIds = new Set<string>();
+    for (let index = 0; index < queue.length; index++) {
+      const id = queue[index]!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      if (replacements.has(id)) {
+        stale.add(id);
+        const successors = [...replacements.get(id)!];
+        const seen = new Set<string>();
+        for (let cursor = 0; cursor < successors.length; cursor++) {
+          const successor = successors[cursor]!;
+          if (seen.has(successor)) continue;
+          seen.add(successor);
+          replacementIds.add(successor);
+          successors.push(...(replacements.get(successor) ?? []));
+        }
+      }
+      const fact = facts.get(id);
+      if (fact) queue.push(...causalInputs(fact));
+    }
+    if (stale.size) reviews.push({ stepId: step.id, staleFactIds: [...stale], replacementFactIds: [...replacementIds] });
+  }
+  return reviews;
+}
 
 // Select fields explicitly, including nested records, so future runtime fields and
 // accidentally attached messages/credentials cannot leak through object spreads.
@@ -56,6 +158,7 @@ export function projectStep(step: Step, runsDir?: string): ContextStep {
     id: step.id, goalId: step.goalId, from: [...step.from], description: step.description,
     successSignal: step.successSignal, evidencePlan: step.evidencePlan, priority: step.priority,
     status: step.status, attempts: step.attempts,
+    ...(step.combination === undefined ? {} : { combination: projectCombination(step.combination) }),
     ...(step.result === undefined ? {} : { result: step.result }),
     ...(recovery === undefined ? {} : { recovery }),
   };
@@ -102,6 +205,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
     goals: new Set<string>(), facts: new Set<string>(), steps: new Set<string>(),
     findings: new Set<string>(), evidence: new Set<string>(),
   };
+  const originIds = new Set<string>();
   const unavailable = { goals: new Set<string>(), facts: new Set<string>(), steps: new Set<string>(), evidence: new Set<string>() };
   const replacements = new Map<string, string[]>();
   for (const fact of board.facts) {
@@ -127,7 +231,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
   function addStep(step: Step): void {
     selected.steps.add(step.id);
     addGoal(step.goalId);
-    for (const factId of step.from) selected.facts.add(factId);
+    for (const factId of factInputs(step)) selected.facts.add(factId);
   }
 
   function addFinding(finding: Finding): void {
@@ -138,19 +242,35 @@ export function projectContext(request: RunRequest): BlackboardContext {
   }
 
   function closeFacts(): void {
-    const queue = [...selected.facts];
-    const visited = new Set<string>();
+    const queue: { kind: "facts" | "steps" | "evidence"; id: string }[] = [
+      ...[...selected.facts].map(id => ({ kind: "facts" as const, id })),
+      ...[...selected.evidence].map(id => ({ kind: "evidence" as const, id })),
+    ];
+    const visited = { facts: new Set<string>(), steps: new Set<string>(), evidence: new Set<string>() };
     for (let index = 0; index < queue.length; index++) {
-      const id = queue[index]!;
-      if (visited.has(id)) continue;
-      visited.add(id);
-      for (const replacement of replacements.get(id) ?? []) queue.push(replacement);
-      const fact = facts.get(id);
-      if (!fact) { unavailable.facts.add(id); continue; }
-      selected.facts.add(id);
-      for (const evidenceId of fact.evidenceIds) selected.evidence.add(evidenceId);
-      // Both directions matter: an assigned Step may still refer to a stale Fact.
-      if (fact.supersedes) queue.push(fact.supersedes);
+      const { kind, id } = queue[index]!;
+      if (visited[kind].has(id)) continue;
+      visited[kind].add(id);
+      if (kind === "facts") {
+        for (const replacement of replacements.get(id) ?? []) queue.push({ kind, id: replacement });
+        const fact = facts.get(id);
+        if (!fact) { unavailable.facts.add(id); continue; }
+        selected.facts.add(id);
+        for (const evidenceId of fact.evidenceIds) queue.push({ kind: "evidence", id: evidenceId });
+        if (fact.stepId) queue.push({ kind: "steps", id: fact.stepId });
+        // Both directions matter: an assigned Step may still refer to a stale Fact.
+        if (fact.supersedes) queue.push({ kind, id: fact.supersedes });
+      } else if (kind === "evidence") {
+        const item = evidence.get(id);
+        if (!item) { unavailable.evidence.add(id); continue; }
+        selected.evidence.add(id);
+        queue.push({ kind: "steps", id: item.stepId });
+      } else {
+        const origin = steps.get(id);
+        if (!origin) { unavailable.steps.add(id); continue; }
+        originIds.add(id);
+        for (const inputId of factInputs(origin)) queue.push({ kind: "facts", id: inputId });
+      }
     }
   }
 
@@ -182,28 +302,17 @@ export function projectContext(request: RunRequest): BlackboardContext {
   }
   closeFacts();
 
-  const originIds = new Set<string>();
-  for (const id of selected.facts) {
-    const fact = facts.get(id);
-    if (fact?.stepId) originIds.add(fact.stepId);
-  }
-  for (const id of selected.evidence) {
-    const item = evidence.get(id);
-    if (item) originIds.add(item.stepId);
-    else unavailable.evidence.add(id);
-  }
   const stepOrigins: StepOrigin[] = [];
   for (const origin of steps.values()) {
     if (originIds.has(origin.id) && !selected.steps.has(origin.id)) {
-      stepOrigins.push({ id: origin.id, description: origin.description, status: origin.status });
+      stepOrigins.push({ id: origin.id, description: origin.description, status: origin.status, from: [...origin.from],
+        ...(origin.combination === undefined ? {} : { combination: projectCombination(origin.combination) }) });
     }
   }
-  for (const id of originIds) {
-    if (selected.steps.has(id)) continue;
-    if (!steps.has(id)) unavailable.steps.add(id);
-  }
-
   let truncatedExcerpts = 0;
+  const attempts = (board.attempts ?? []).filter(attempt => request.mode !== "execute" ||
+    selected.steps.has(attempt.stepId) || originIds.has(attempt.stepId) ||
+    (request.step?.combination && attempt.scope === request.step.combination.scope && attempt.stateVersion === request.step.combination.stateVersion));
   const projectedEvidence = board.evidence.filter(item => selected.evidence.has(item.id)).map(item => {
     const excerpt = item.excerpt?.slice(0, excerptLimit);
     if (item.excerpt && item.excerpt.length > excerptLimit) truncatedExcerpts++;
@@ -221,6 +330,13 @@ export function projectContext(request: RunRequest): BlackboardContext {
     completedSteps: board.completedSteps, noProgressCount: board.noProgressCount,
     goals: board.goals.filter(goal => selected.goals.has(goal.id)).map(projectGoal),
     facts: board.facts.filter(fact => selected.facts.has(fact.id)).map(projectFact),
+    factIndex: board.facts.filter(fact => request.mode !== "execute" || selected.facts.has(fact.id)).map(fact => ({
+      id: fact.id, summary: compact(fact.description),
+      stepId: fact.stepId, evidenceIds: [...fact.evidenceIds],
+      ...(fact.supersedes === undefined ? {} : { supersedes: fact.supersedes }),
+      replacedBy: [...(replacements.get(fact.id) ?? [])], status: replacements.has(fact.id) ? "superseded" : "available",
+    })),
+    attempts: attempts.map(projectAttempt),
     steps: [...steps.values()].filter(step => selected.steps.has(step.id)).map(step => projectStep(step, dirname(request.runDir))),
     findings: board.findings.filter(finding => selected.findings.has(finding.id)).map(projectFinding),
     evidence: projectedEvidence,
@@ -238,6 +354,8 @@ export function projectContext(request: RunRequest): BlackboardContext {
       },
       originStepCount: stepOrigins.length, truncatedExcerpts,
       unavailableReferences: { goals: [...unavailable.goals], facts: [...unavailable.facts], steps: [...unavailable.steps], evidence: [...unavailable.evidence] },
+      stepReviews: pendingStepReviews({ ...board, steps: [...steps.values()] }).filter(review => selected.steps.has(review.stepId)),
+      omittedAttempts: (board.attempts ?? []).length - attempts.length,
       notice,
     },
   };

@@ -147,6 +147,17 @@ describe("agent output contracts", () => {
     expect(parsedExecution).toEqual(execution);
   });
 
+  it("accepts explicit combination conditions and evidence-backed conditional attempts", () => {
+    const combination = { requires: ["fact-1"], missing: ["A second account"], scope: "fixture", stateVersion: "v1", expectedCapability: "Read fixture", counterEvidence: [] };
+    expect(decisionSchema.parse({ ...decision, steps: [{ ...decision.steps![0], combination }] }).steps![0].combination).toEqual(combination);
+    const attempt = { hypothesis: "fixture-read", scope: "fixture", identity: "account-A", stateVersion: "v1", baseline: "owner access", changedVariable: "requester", outcome: "refutes", observation: "Denied", evidenceRefs: ["e1"] };
+    expect(executionSchema.parse({ ...execution, attempts: [attempt] }).attempts).toEqual([attempt]);
+    expect(executionSchema.safeParse({ ...execution, attempts: [{ ...attempt, evidenceRefs: [] }] }).success).toBe(false);
+    expect(executionSchema.safeParse({ ...execution, attempts: [{ ...attempt, outcome: "confirmed" }] }).success).toBe(false);
+    expect(executionSchema.safeParse({ ...execution, attempts: [{ ...attempt, conditionKey: "invented" }] }).success).toBe(false);
+    expect(decisionSchema.safeParse({ ...decision, steps: [{ ...decision.steps![0], combination: { ...combination, requires: [] } }] }).success).toBe(false);
+  });
+
   it.each(["lead", "technical_hit"])("allows Execute finding status %s", (status) => {
     expect(executionSchema.safeParse({ ...execution, findings: [{ ...execution.findings![0], status }] }).success).toBe(true);
   });

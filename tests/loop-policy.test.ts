@@ -44,6 +44,26 @@ describe("outer-loop Step selection", () => {
     expect(snapshot.outcome).toBeNull();
   });
 
+  it("does not schedule plans whose direct or causal inputs were superseded", () => {
+    const snapshot = board({ steps: [step("DIRECT", { from: ["OLD"], priority: 100 }),
+      step("DERIVE", { status: "done", from: ["OLD"] }), step("INDIRECT", { from: ["DERIVED"], priority: 90 }),
+      step("CORRECT", { status: "done", from: ["OLD"] }), step("CURRENT", { from: ["NEW"], priority: 10 })],
+      facts: [{ ...fact("OLD"), stepId: null }, { ...fact("DERIVED"), stepId: "DERIVE" }, { ...fact("NEW", "OLD"), stepId: "CORRECT" }] });
+    const before = structuredClone(snapshot);
+    expect(defaultLoopPolicy.selectStep(snapshot)?.id).toBe("CURRENT");
+    expect(snapshot).toEqual(before);
+    snapshot.steps = snapshot.steps.filter(item => item.id !== "CURRENT");
+    expect(defaultLoopPolicy.selectStep(snapshot)).toBeUndefined();
+    expect(snapshot.status).toBe("running");
+  });
+
+  it("rechecks superseded counterevidence before executing a combination plan", () => {
+    const snapshot = board({ steps: [step("COMBINE", { combination: {
+      requires: [], missing: [], scope: "account alice", stateVersion: "v1", expectedCapability: "combined fixture path", counterEvidence: ["OLD"],
+    } })], facts: [{ ...fact("OLD"), stepId: null }, { ...fact("NEW", "OLD"), stepId: null }] });
+    expect(defaultLoopPolicy.selectStep(snapshot)).toBeUndefined();
+  });
+
   it("allows a different scheduling implementation through the interface", () => {
     const policy: LoopPolicy = { selectStep: snapshot => snapshot.steps.find(item => item.status === "ready" && item.id === "S3"), reviewAfterExecution: () => undefined };
     expect(policy.selectStep(board({ steps: [step(), step("S3")] }))?.id).toBe("S3");

@@ -1,4 +1,5 @@
 import type { BoardSnapshot, OuterLoopTrigger, Step } from "../types.js";
+import { pendingStepReviews } from "./context.js";
 
 /** Scheduling only: the Decide Agent, never this policy, judges evidence and Goal completion. */
 export interface LoopPolicy {
@@ -15,7 +16,8 @@ function sameIds(left: string[], right: string[]): boolean {
 /** Replaceable outer scheduling strategy; Pi's model/tool loop is unaffected. */
 export const defaultLoopPolicy: LoopPolicy = {
   selectStep(board) {
-    return board.steps.filter(step => step.status === "ready")
+    const needsReview = new Set(pendingStepReviews(board).map(review => review.stepId));
+    return board.steps.filter(step => step.status === "ready" && !needsReview.has(step.id))
       .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id))[0];
   },
 

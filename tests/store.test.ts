@@ -353,7 +353,7 @@ describe("findings and outcome gates", () => {
     expect(board.noProgressCount).toBe(1);
   });
 
-  it("counts explicitly reopening a closed finding as a substantive state change", () => {
+  it("keeps a reopened finding but requires actual new conditions or facts before crediting progress", () => {
     const store = openStore();
     const first = produceHit(store);
     runDecision(store, { summary: "Close initial fixture hypothesis", reviews: [{ findingId: first.findings[0].id, status: "closed", rating: "unrated", reason: "Initial variable refuted; reopen under a new fixture state" }] });
@@ -364,8 +364,8 @@ describe("findings and outcome gates", () => {
     }, usage);
     expect(board.findings[0]).toMatchObject({ status: "technical_hit", rating: "unrated" });
     expect(board.findings[0].review).toBeUndefined();
-    expect(board.steps.find(step => step.runId === runId)?.status).toBe("done");
-    expect(board.noProgressCount).toBe(0);
+    expect(board.steps.find(step => step.runId === runId)?.status).toBe("no_progress");
+    expect(board.noProgressCount).toBe(1);
   });
 
   it("requires technical validation before a lead may be impact verified", () => {

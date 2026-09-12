@@ -9,6 +9,10 @@ import { buildRunPrompt } from "./prompts.js";
 import { resolveModel, type ModelResolver } from "./models.js";
 import { createRunBudget } from "./run-budget.js";
 import { createCheckedPowerShellTool } from "./powershell.js";
+import { decisionSchema, executionSchema, formatValidationError } from "../schema.js";
+import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure } from "./continuity.js";
+import { stageWriter } from "./stage.js";
+import { credentialPatterns, redactCredentials } from "./redaction.js";
 
 export class RuntimeRunError extends Error {
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions) { super(message, options); this.name = "RuntimeRunError"; }
@@ -64,7 +68,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
   type Thought = { id: string; pending: string; sawDelta: boolean; ended: boolean; replayed: boolean };
   let thoughts = new Map<number, Thought>();
   const availableText = (value: string, flush: boolean) => flush ? value.length
-    : Math.max(0, value.length - Math.max(0, ...secrets().map(secret => secret.length - 1)));
+    : Math.max(0, value.length - Math.max(0, ...credentialPatterns(secrets()).map(secret => secret.length - 1)));
   const emitText = (delta: string, flush = false) => {
     pendingText = redact(pendingText + delta);
     const available = availableText(pendingText, flush);
@@ -172,7 +176,7 @@ export class PiRunner implements AgentRunner {
         .filter((secret): secret is string => typeof secret === "string" && secret.length > 0);
       // Pi may refresh OAuth during a run; include credentials discovered after resolution.
       const secrets = () => [...new Set([...(selected.secrets ?? []), ...configuredSecrets])].sort((a, b) => b.length - a.length);
-      redact = (value) => secrets().reduce((clean, secret) => secret ? clean.split(secret).join("[MODEL_CREDENTIAL_REDACTED]") : clean, value);
+      redact = value => redactCredentials(value, secrets());
       await mkdir(join(request.runDir, "artifacts"), { recursive: true });
       const budget = createRunBudget(request.snapshot.config.limits, usage, request.snapshot.usage, "agent", request.signal);
       const prompt = buildRunPrompt(request);
@@ -181,13 +185,66 @@ export class PiRunner implements AgentRunner {
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
+      const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
+      const tools = request.mode === "execute" ? executeTools(request.workspace).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createReadTool(request.workspace)];
+      const checkpointFile = join(request.runDir, "continuation.json");
+      const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
+        baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };
+      const pending = new Set<string>();
+      let checkpointError: Error | undefined;
+      const persist = async () => {
+        if (!agent?.state) return;
+        try { await saveCheckpoint(checkpointFile, { identity, messages: agent.state.messages, pendingToolCalls: [...pending], usage }, redact); }
+        catch (error) { checkpointError = error instanceof Error ? error : new Error(String(error)); throw checkpointError; }
+      };
+      let modelRequests = 0;
+      let requestLimitReached = false;
+      const finalRequest = () => request.snapshot.config.limits.maxTurnsPerRun !== null
+        && modelRequests === request.snapshot.config.limits.maxTurnsPerRun - 1;
+      const finalInstruction = "This is the final allowed model request. Tools are unavailable. Return the required JSON from completed observations only; do not claim unfinished work succeeded.";
+      const canRequest = () => budget.canRequest && (request.snapshot.config.limits.maxTurnsPerRun === null
+        || modelRequests < request.snapshot.config.limits.maxTurnsPerRun);
+      const summarizer = createContextSummarizer(selected.streamFn, consumed => {
+        const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
+        usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
+        emit({ type: "usage", mode: request.mode, text: "", usage: added });
+      }, request.id);
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
-        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: budget.toolsAllowed ? executeTools(request.workspace) : [] },
-        streamFn: selected.streamFn,
+        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: budget.toolsAllowed ? tools : [] },
+        streamFn: (...args) => {
+          request.signal.throwIfAborted();
+          if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");
+          modelRequests++;
+          return selected.streamFn(...args);
+        },
         toolExecution: "sequential",
         sessionId: request.id,
-        shouldStopAfterTurn: budget.shouldStopAfterTurn,
-        prepareNextTurnWithContext: budget.prepareNextTurnWithContext,
+        beforeToolCall: async () => {
+          if (checkpointError) return { block: true, reason: "Private checkpoint could not be saved; tool was not executed.", terminate: true };
+          if (stage?.yielded) return { block: true, reason: "Execute has yielded to Decide; remaining tools were not executed.", terminate: true };
+          request.signal.throwIfAborted();
+          return undefined;
+        },
+        shouldStopAfterTurn: async context => {
+          const stopped = await budget.shouldStopAfterTurn(context);
+          const exhausted = request.snapshot.config.limits.maxTurnsPerRun !== null && modelRequests >= request.snapshot.config.limits.maxTurnsPerRun;
+          if (exhausted && context.message.content.some(part => part.type === "toolCall")) requestLimitReached = true;
+          return stopped || exhausted || !!stage?.yielded;
+        },
+        prepareNextTurnWithContext: async context => {
+          request.signal.throwIfAborted();
+          if (!canRequest()) throw new Error("Explicit invocation budget exhausted before context maintenance.");
+          const next = await budget.prepareNextTurnWithContext(context);
+          const base = next?.context ?? context.context;
+          const prepared = await prepareContext(base.messages, selected.model, request.signal, summarizer);
+          if (!canRequest()) throw new Error("Explicit invocation budget exhausted during context maintenance.");
+          if (prepared.compacted) {
+            agent!.state.messages = prepared.messages;
+            await persist();
+            emit({ type: "notice", mode: request.mode, text: `Private context compacted (${prepared.estimatedTokensBefore} → ${prepared.estimatedTokensAfter} estimated tokens); original evidence remains available.` });
+          }
+          return { context: { ...base, messages: prepared.messages, ...(finalRequest() ? { tools: [], systemPrompt: `${base.systemPrompt}\n${finalInstruction}` } : {}) } };
+        },
       });
       unsubscribe = agent.subscribe(async (event) => {
         if (event.type === "message_end" && event.message.role === "assistant") {
@@ -198,6 +255,12 @@ export class PiRunner implements AgentRunner {
         }
         // Keep UI/block state ordered at callback entry, before transcript I/O.
         forward!.handle(event);
+        if (event.type === "message_end") {
+          if (event.message.role === "assistant") for (const part of event.message.content) if (part.type === "toolCall") pending.add(part.id);
+          if (event.message.role === "toolResult") pending.delete(event.message.toolCallId);
+          // This awaited write precedes execution of any assistant tool batch.
+          await persist();
+        }
         // Log completed messages and tool events. Partial transcript copies would grow quadratically.
         if (event.type !== "message_update" && event.type !== "message_start" && event.type !== "agent_end") {
           await appendFile(join(request.runDir, "events.jsonl"), `${redact(JSON.stringify(event))}\n`);
@@ -211,10 +274,49 @@ export class PiRunner implements AgentRunner {
       if (request.signal.aborted) agent.abort();
       await running;
       request.signal.throwIfAborted();
+      if (isTransientModelFailure(finalMessage) && canRequest() && !checkpointError && !stage?.yielded) {
+        const checkpoint = await loadCheckpoint(checkpointFile, identity);
+        if (!checkpoint) throw new Error("No complete private checkpoint is available for continuation.");
+        agent.state.messages = checkpoint.messages;
+        if (finalRequest()) {
+          agent.state.tools = [];
+          agent.state.systemPrompt += `\n${finalInstruction}`;
+        }
+        emit({ type: "notice", mode: request.mode, text: "Transient model failure; continuing once from this role's completed tool results. No tool calls are replayed." });
+        finalMessage = undefined;
+        await agent.continue();
+        request.signal.throwIfAborted();
+      }
       if (budget.error) throw new Error(budget.error);
+      if (requestLimitReached) throw new Error(`Agent budget reached before a final result (maxTurnsPerRun=${request.snapshot.config.limits.maxTurnsPerRun}, requests=${modelRequests}); completed evidence is retained.`);
+      if (checkpointError) throw checkpointError;
+      if (stage?.yielded) {
+        const result: RunResult = { output: { summary: `${stage.summary} Partial checkpoint handed to Decide; Step success remains unverified.`, result: "blocked" }, usage, yielded: true };
+        await writeFile(join(request.runDir, "output.json"), JSON.stringify(result, null, 2), { flag: "wx" });
+        return result;
+      }
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
       if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
-      const output = parseFinalJson(redact(contentText(finalMessage)));
+      const validate = () => {
+        const parsed = parseFinalJson(redact(contentText(finalMessage)));
+        const validated = (request.mode === "execute" ? executionSchema : decisionSchema).safeParse(parsed);
+        if (!validated.success) throw new Error(formatValidationError(validated.error));
+        return validated.data;
+      };
+      let output: unknown;
+      try { output = validate(); }
+      catch (error) {
+        if (!canRequest()) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape; requesting one tool-free format repair using existing results." });
+        agent.state.tools = [];
+        agent.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
+        await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, IDs, findings, or completion. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
+        request.signal.throwIfAborted();
+        if (budget.error) throw new Error(budget.error);
+        if (finalMessage?.stopReason !== "stop") throw new Error(finalMessage?.errorMessage ?? "Protocol repair did not finish.");
+        output = validate();
+      }
       await writeFile(join(request.runDir, "output.json"), JSON.stringify({ output, usage }, null, 2), { flag: "wx" });
       return { output, usage };
     } catch (error) {

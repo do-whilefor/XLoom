@@ -354,6 +354,99 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.controller.snapshot().reason).toContain("no executable step");
   });
 
+  it("reviews superseded pending plans once, then pauses without executing or cycling through the stale plan", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") {
+        const output = fixtureExecution(request);
+        if (request.snapshot.completedSteps === 1) {
+          output.facts![0]!.description = "Corrected synthetic observation under changed fixture conditions";
+          output.facts![0]!.supersedes = request.snapshot.facts[0]!.id;
+          output.findings = [];
+        }
+        return result(output);
+      }
+      if (request.snapshot.completedSteps === 0) return result(plan("Record initial synthetic condition"));
+      if (request.snapshot.completedSteps === 1) return result({ summary: "Schedule correction before the dependent action", steps: [
+        { ...plan().steps![0]!, description: "Retest initial condition", priority: 100, from: [request.snapshot.facts[0]!.id] },
+        { ...plan().steps![0]!, description: "OLD DEPENDENT PLAN MUST NOT EXECUTE", priority: 90, from: [request.snapshot.facts[0]!.id] },
+      ] });
+      expect(request.context!.projection.stepReviews).toHaveLength(1);
+      return result({ summary: "Review did not resolve the outdated dependency" });
+    });
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "execute", "metacog"]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 2 });
+    expect(test.controller.snapshot().reason).toContain("superseded dependencies");
+    expect(test.controller.snapshot().steps.at(-1)).toMatchObject({ status: "ready", attempts: 0 });
+    await test.controller.start();
+    expect(test.requests.slice(-2).map(request => request.mode)).toEqual(["decide", "metacog"]);
+    expect(test.requests.at(-1)?.trigger?.kind).toBe("fact_revision");
+    expect(test.requests.filter(request => request.mode === "execute")).toHaveLength(2);
+    expect(test.controller.snapshot().status).toBe("paused");
+  });
+
+  it("continues after metacognition replaces an outdated plan with current evidence", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") {
+        const output = fixtureExecution(request);
+        if (request.snapshot.completedSteps === 1) {
+          output.facts![0]!.description = "Corrected synthetic condition";
+          output.facts![0]!.supersedes = request.snapshot.facts[0]!.id;
+          output.findings = [];
+        }
+        return result(output);
+      }
+      if (!request.snapshot.completedSteps) return result(plan());
+      if (request.snapshot.completedSteps === 1) return result({ summary: "Set up a correction and dependent plan", steps: [
+        { ...plan().steps![0]!, priority: 100, from: [request.snapshot.facts[0]!.id] },
+        { ...plan().steps![0]!, description: "Outdated dependent action", priority: 90, from: [request.snapshot.facts[0]!.id] },
+      ] });
+      if (request.snapshot.completedSteps === 2) {
+        expect(request.mode).toBe("metacog");
+        const review = request.context!.projection.stepReviews[0]!;
+        return result({ summary: "Use the corrected fact after checking scope and state", updateSteps: [
+          { id: review.stepId, action: "abandon", reason: "Original prerequisite was superseded" },
+        ], steps: [{ ...plan("Current condition plan").steps![0]!, from: [request.snapshot.facts.at(-1)!.id] }] });
+      }
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.filter(request => request.mode === "execute").map(request => request.step!.description)).toEqual([
+      plan().steps![0]!.description, plan().steps![0]!.description, "Current condition plan",
+    ]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", completedSteps: 3 });
+    expect(test.controller.snapshot().steps[2]).toMatchObject({ status: "abandoned", attempts: 0 });
+    expect(test.events.some(event => event.snapshot?.status === "paused")).toBe(false);
+  });
+
+  it("guards against a custom scheduling policy returning a stale plan before claiming or calling Execute", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") {
+        const output = fixtureExecution(request);
+        if (request.snapshot.completedSteps === 1) {
+          output.facts![0]!.description = "Corrected synthetic condition";
+          output.facts![0]!.supersedes = request.snapshot.facts[0]!.id;
+          output.findings = [];
+        }
+        return result(output);
+      }
+      if (!request.snapshot.completedSteps) return result(plan());
+      if (request.snapshot.completedSteps === 1) return result({ summary: "Prioritize correction before old dependent plan", steps: [
+        { ...plan().steps![0]!, priority: 100, from: [request.snapshot.facts[0]!.id] },
+        { ...plan().steps![0]!, description: "Stale high priority action", priority: 90, from: [request.snapshot.facts[0]!.id] },
+      ] });
+      return result({ summary: "Create a valid lower priority alternative", steps: [
+        { ...plan().steps![0]!, from: [request.snapshot.facts.at(-1)!.id], priority: 10 },
+      ] });
+    }, {}, { policy: { ...defaultLoopPolicy, selectStep: board => board.steps.filter(step => step.status === "ready").sort((a, b) => b.priority - a.priority)[0] } });
+    await test.controller.start();
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", completedSteps: 2, outcome: null });
+    expect(test.controller.snapshot().reason).toContain("Scheduling policy selected Step");
+    expect(test.requests.filter(request => request.mode === "execute")).toHaveLength(2);
+    expect(test.controller.snapshot().steps.filter(step => step.status === "ready").map(step => step.attempts)).toEqual([0, 0]);
+    expect(test.store.runs().some(run => run.status === "running")).toBe(false);
+  });
+
   it("uses the Decide metacog mode at the configured periodic boundary", async () => {
     const test = setup((request) => {
       if (request.mode === "execute") return result(fixtureExecution(request));

@@ -169,7 +169,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     for (const run of test.seen) {
       expect(run.contexts[0]?.messages).toHaveLength(1);
       expect(run.contexts[0]?.messages[0]?.role).toBe("user");
-      expect(run.contexts[0]?.tools?.map(tool => tool.name) ?? []).toEqual(["read", "write", "edit", "powershell"]);
+      expect(run.contexts[0]?.tools?.map(tool => tool.name) ?? []).toEqual(run.channel === "offline-execute" ? ["read", "write", "edit", "powershell"] : ["read"]);
       expect(JSON.stringify(run.contexts[0])).not.toContain(privateTurn);
       expect(JSON.stringify(run.contexts[0])).not.toContain("fixture-write");
     }

@@ -3,7 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
-import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Usage } from "./types.js";
+import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
+import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cost: 0 });
@@ -11,7 +12,6 @@ const id = (prefix: string) => `${prefix}-${randomUUID().slice(0, 12)}`;
 const normalize = (value: string) => value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
 const union = <T>(...lists: T[][]): T[] => [...new Set(lists.flat())];
 const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
-const progressKey = (board: BoardSnapshot) => JSON.stringify({ facts: board.facts.map(item => item.id), evidence: board.evidence.map(item => item.sha256).sort(), findings: board.findings.map(item => ({ key: item.key, status: item.status, evidence: [...item.evidenceIds].sort(), facts: [...item.factIds].sort() })) });
 const assert: (test: unknown, message: string) => asserts test = (test, message) => { if (!test) throw new Error(message); };
 const inside = (root: string, file: string) => { const relative = path.relative(root, file); return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); };
 
@@ -42,7 +42,9 @@ export class BlackboardStore {
       this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
       this.db.exec(`CREATE TABLE IF NOT EXISTS board (id INTEGER PRIMARY KEY CHECK (id=1), value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, mode TEXT NOT NULL, stepId TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER);`);
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, mode TEXT NOT NULL, stepId TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER);
+        CREATE TABLE IF NOT EXISTS run_progress (runId TEXT PRIMARY KEY, usage TEXT NOT NULL, progressed INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS execution_checkpoints (runId TEXT NOT NULL, checkpointId TEXT NOT NULL, payloadHash TEXT NOT NULL, PRIMARY KEY(runId, checkpointId));`);
       const old = this.db.prepare("SELECT value FROM board WHERE id=1").get();
       if (!old) {
         const board: BoardSnapshot = { revision: 0, config, status: "idle", outcome: null, reason: "Ready",
@@ -181,14 +183,33 @@ export class BlackboardStore {
         step.leaseUntil = Date.now() + board.config.limits.stepTimeoutSeconds * 1000;
       } else assert(!stepId, "Only Execute may claim a step.");
       this.db.prepare("INSERT INTO runs VALUES (?,?,?,?,?,NULL)").run(runId, mode, stepId ?? null, "running", Date.now());
+      this.db.prepare("INSERT INTO run_progress (runId,usage,progressed) VALUES (?,?,0)").run(runId, JSON.stringify(zeroUsage()));
     });
+  }
+
+  private accountedRun(runId: string): { usage: Usage; progressed: boolean } {
+    const value = this.db.prepare("SELECT usage,progressed FROM run_progress WHERE runId=?").get(runId);
+    return value ? { usage: JSON.parse(String(value.usage)), progressed: Boolean(value.progressed) } : { usage: zeroUsage(), progressed: false };
+  }
+
+  private accountUsage(board: BoardSnapshot, runId: string, cumulativeUsage: Usage, strict = false): void {
+    const current = this.accountedRun(runId);
+    if (strict) assert(cumulativeUsage.input >= current.usage.input && cumulativeUsage.output >= current.usage.output && cumulativeUsage.cost + Number.EPSILON >= current.usage.cost,
+      "Checkpoint usage must be cumulative and nondecreasing.");
+    const accounted: Usage = { input: 0, output: 0, cost: 0 };
+    for (const field of ["input", "output", "cost"] as const) {
+      accounted[field] = Math.max(current.usage[field], cumulativeUsage[field]);
+      board.usage[field] += accounted[field] - current.usage[field];
+    }
+    this.db.prepare("INSERT INTO run_progress (runId,usage,progressed) VALUES (?,?,?) ON CONFLICT(runId) DO UPDATE SET usage=excluded.usage")
+      .run(runId, JSON.stringify(accounted), Number(current.progressed));
   }
 
   private finishRun(board: BoardSnapshot, runId: string, usage: Usage, status: string): StoredRun {
     usage = usageSchema.parse(usage);
     const run = this.db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as unknown as StoredRun | undefined;
     assert(run?.status === "running", "Run is not active or was already committed.");
-    board.usage.input += usage.input; board.usage.output += usage.output; board.usage.cost += usage.cost;
+    this.accountUsage(board, runId, usage);
     board.elapsedMs = (board.elapsedMs ?? 0) + Math.max(0, Date.now() - run.startedAt);
     this.db.prepare("UPDATE runs SET status=?,finishedAt=? WHERE id=?").run(status, Date.now(), runId);
     return run;
@@ -239,7 +260,13 @@ export class BlackboardStore {
       for (const proposal of decision.steps ?? []) {
         assert(board.goals.some(goal => goal.id === proposal.goalId && goal.status === "active"), "Step requires an active goal.");
         factsExist(proposal.from);
-        const equivalent = board.steps.some(step => step.goalId === proposal.goalId && normalize(step.description) === normalize(proposal.description) && JSON.stringify([...step.from].sort()) === JSON.stringify([...proposal.from].sort()));
+        if (proposal.combination) {
+          factsExist(proposal.combination.requires);
+          factsExist(proposal.combination.counterEvidence ?? []);
+          assert(proposal.combination.requires.every(ref => proposal.from.includes(ref)), "Combination requirements must belong to the Step's from facts.");
+        }
+        const conditions = (step: Pick<Step, "combination">) => step.combination ? JSON.stringify([step.combination.scope, step.combination.stateVersion, [...step.combination.requires].sort(), [...step.combination.missing].sort(), step.combination.expectedCapability, [...(step.combination.counterEvidence ?? [])].sort()]) : "";
+        const equivalent = board.steps.some(step => step.goalId === proposal.goalId && normalize(step.description) === normalize(proposal.description) && JSON.stringify([...step.from].sort()) === JSON.stringify([...proposal.from].sort()) && conditions(step) === conditions(proposal));
         if (!equivalent) board.steps.push({ ...proposal, id: id("S"), status: "ready", attempts: 0, runId: null, leaseUntil: null });
       }
       for (const review of decision.reviews ?? []) {
@@ -278,7 +305,45 @@ export class BlackboardStore {
       assert(run.mode === "execute", "Wrong run channel.");
       const step = board.steps.find(item => item.id === run.stepId);
       assert(step?.status === "claimed" && step.runId === runId, "Step claim does not match run.");
-      const before = progressKey(board);
+      const newProgress = this.applyExecutionRecords(board, runId, step, output);
+      const progress = newProgress || this.accountedRun(runId).progressed;
+      step.status = output.result === "blocked" ? "blocked" : progress ? "done" : "no_progress";
+      step.result = output.summary; step.leaseUntil = null;
+      board.completedSteps++; board.noProgressCount = progress ? 0 : board.noProgressCount + 1;
+      board.reason = output.summary;
+    });
+  }
+
+  /** Commit durable observations without releasing the current Step or replaying its tools. */
+  applyExecutionCheckpoint(runId: string, checkpointId: string, input: unknown, cumulativeUsage: Usage): BoardSnapshot {
+    assert(/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId), "Invalid checkpoint ID.");
+    const output: Execution = executionSchema.parse(input);
+    cumulativeUsage = usageSchema.parse(cumulativeUsage);
+    const payloadHash = hash(Buffer.from(JSON.stringify(output)));
+    const previous = this.db.prepare("SELECT payloadHash FROM execution_checkpoints WHERE runId=? AND checkpointId=?").get(runId, checkpointId);
+    if (previous) {
+      assert(previous.payloadHash === payloadHash, "Checkpoint ID already committed with different content.");
+      return this.snapshot();
+    }
+    return this.mutate("execution_checkpoint", { runId, checkpointId, output }, board => {
+      const run = this.db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as unknown as StoredRun | undefined;
+      assert(run?.status === "running", "Run is not active or was already committed.");
+      assert(run.mode === "execute", "Wrong run channel.");
+      const step = board.steps.find(item => item.id === run.stepId);
+      assert(step?.status === "claimed" && step.runId === runId, "Step claim does not match run.");
+      this.accountUsage(board, runId, cumulativeUsage, true);
+      const progress = this.applyExecutionRecords(board, runId, step, output);
+      if (progress) {
+        this.db.prepare("UPDATE run_progress SET progressed=1 WHERE runId=?").run(runId);
+        board.noProgressCount = 0;
+      }
+      board.reason = output.summary;
+      this.db.prepare("INSERT INTO execution_checkpoints VALUES (?,?,?)").run(runId, checkpointId, payloadHash);
+    });
+  }
+
+  private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): boolean {
+      const before = legacyProgressMarkers(board);
       const evidenceMap = new Map<string, string>();
       const factMap = new Map<string, string>();
       let artifactBytes = 0;
@@ -293,7 +358,10 @@ export class BlackboardStore {
       }
       const resolveEvidence = (refs: string[]) => union(refs.map(ref => {
         const resolved = evidenceMap.get(ref) ?? ref;
-        assert(board.evidence.some(item => item.id === resolved), `Unknown evidence reference: ${ref}`); return resolved;
+        const evidence = board.evidence.find(item => item.id === resolved);
+        assert(evidence, `Unknown evidence reference: ${ref}`);
+        this.verifyEvidence(evidence);
+        return resolved;
       }));
       for (const proposal of output.facts ?? []) {
         assert(!factMap.has(proposal.ref) && !board.facts.some(item => item.id === proposal.ref), "Duplicate or ambiguous fact ref.");
@@ -331,13 +399,21 @@ export class BlackboardStore {
           board.findings.push(finding);
         }
       }
-      const after = progressKey(board);
-      const progress = before !== after;
-      step.status = output.result === "blocked" ? "blocked" : progress ? "done" : "no_progress";
-      step.result = output.summary; step.leaseUntil = null;
-      board.completedSteps++; board.noProgressCount = progress ? 0 : board.noProgressCount + 1;
-      board.reason = output.summary;
-    });
+      let attemptProgress = false;
+      for (const proposal of output.attempts ?? []) {
+        const evidenceIds = resolveEvidence(proposal.evidenceRefs);
+        assert(evidenceIds.length > 0, "Attempts require original evidence references.");
+        const keys = attemptKeys(proposal);
+        const attempts = board.attempts ??= [];
+        const existing = attempts.find(item => item.outcomeKey === keys.outcomeKey);
+        if (existing) existing.evidenceIds = union(existing.evidenceIds, evidenceIds);
+        else {
+          const { evidenceRefs: _localRefs, ...attempt } = proposal;
+          attempts.push({ ...attempt, ...keys, id: id("A"), runId, stepId: step.id, evidenceIds });
+          if (proposal.outcome === "supports" || proposal.outcome === "refutes") attemptProgress = true;
+        }
+      }
+      return output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker));
   }
 
   private ingestEvidence(runId: string, stepId: string, source: string, description: string): Evidence {
@@ -406,7 +482,7 @@ export class BlackboardStore {
       const board = this.snapshot();
       const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
       for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
-      rows.push("```", "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${item.path} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
+      rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${item.path} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
       const temporary = `${file}.${this.lockToken}.tmp`;
       writeFileSync(temporary, rows.join("\n"), "utf8");
       renameSync(temporary, file);

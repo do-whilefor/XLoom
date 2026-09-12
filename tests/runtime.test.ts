@@ -57,14 +57,14 @@ describe("Pi runtime isolation", () => {
     const options: AgentOptions[] = [];
     const selected: ModelConfig[] = [];
     const runner = new PiRunner({
-      resolveModel: async (config) => { selected.push(config); return { model, streamFn: stream('{"summary":"only this run"}', seen) }; },
+      resolveModel: async (config) => { selected.push(config); return { model, streamFn: stream(JSON.stringify({ summary: "only this run", ...(config.model === "execute" ? { result: "no_progress" } : {}) }), seen) }; },
       createAgent: (entry) => { options.push(entry); return new Agent(entry); },
     });
     for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
-    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual(Array.from({ length: 3 }, () => ["read", "write", "edit", "powershell"]));
-    expect(options.every((entry) => entry.toolExecution === "sequential" && !entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
+    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read"], ["read", "write", "edit", "powershell"], ["read"]]);
+    expect(options.every((entry) => entry.toolExecution === "sequential" && entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(seen.every((context) => context.messages.length === 1 && context.messages[0].role === "user")).toBe(true);
     expect(seen.every((context) => !JSON.stringify(context).includes("only this run") && !JSON.stringify(context).includes("DO_NOT_EXPOSE_ENV_NAME"))).toBe(true);
   });
@@ -128,8 +128,164 @@ describe("Pi runtime isolation", () => {
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream("not json") }) });
     const error = await runner.run(input).catch((failure) => failure);
     expect(error).toBeInstanceOf(RuntimeRunError);
-    expect(error.usage.input).toBe(13);
+    expect(error.usage.input).toBe(26);
     expect(error.message).toContain("single JSON object");
+  });
+
+  it("repairs the final schema once with no tools and preserves earlier side effects", async () => {
+    const input = await request("execute");
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "saved", name: "write", arguments: { path: "observed.txt", content: "observed once" } }], "toolUse");
+      if (calls === 2) return message([{ type: "text", text: '{"summary":"Artifact saved"}' }]);
+      expect(context.tools).toEqual([]);
+      expect(JSON.stringify(context.messages)).toContain("saved");
+      expect(JSON.stringify(context.messages)).toContain("result: Required");
+      return message([{ type: "text", text: '{"summary":"Artifact saved; success unverified","result":"no_progress"}' }]);
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toMatchObject({ result: "no_progress" });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(await readFile(join(input.workspace, "observed.txt"), "utf8")).toBe("observed once");
+    expect(calls).toBe(3);
+  });
+
+  it("does not execute hallucinated repair tools or start further repair turns", async () => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "text", text: "bad JSON" }]);
+      expect(context.tools).toEqual([]);
+      return message([{ type: "toolCall", id: "bad-repair", name: "write", arguments: { path: "forbidden.txt", content: "must not exist" } }], "toolUse");
+    }) }) });
+    await expect(runner.run(input)).rejects.toThrow("Protocol repair did not finish");
+    expect(calls).toBe(2);
+    await expect(readFile(join(input.workspace, "forbidden.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["decide", "metacog"] as const)("enforces read-only %s even if the model requests a write", async mode => {
+    const input = await request(mode);
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "forbidden", name: "write", arguments: { path: "forbidden.txt", content: "do not mutate" } }], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", isError: true });
+      return message([{ type: "text", text: '{"summary":"Delegate mutation to Execute"}' }]);
+    }) }) });
+    await runner.run(input);
+    await expect(readFile(join(input.workspace, "forbidden.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("continues a transient model failure from durable complete tool results without replay", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "thinking", thinking: "PRIVATE REASONING" }, { type: "toolCall", id: "once", name: "write", arguments: { path: "once.txt", content: "one write" } }], "toolUse");
+      if (calls === 2) return { ...message([], "error"), errorMessage: "503 upstream temporarily unavailable" };
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "once", isError: false });
+      expect(JSON.stringify(context.messages)).not.toContain("PRIVATE REASONING");
+      expect(JSON.stringify(context.messages)).not.toContain("503 upstream");
+      return message([{ type: "text", text: '{"summary":"Retained prior observation","result":"no_progress"}' }]);
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(events.filter(event => event.type === "tool_start")).toHaveLength(1);
+    expect(await readFile(join(input.workspace, "once.txt"), "utf8")).toBe("one write");
+    const checkpoint = JSON.parse(await readFile(join(input.runDir, "continuation.json"), "utf8"));
+    expect(checkpoint).toMatchObject({ pendingToolCalls: [], usage: result.usage, identity: { role: "execute", stepId: "s1" } });
+    expect(JSON.stringify(checkpoint)).not.toContain("PRIVATE REASONING");
+  });
+
+  it.each(["authentication", "turn-budget", "token-budget", "cancellation"])("does not retry after %s", async reason => {
+    const input = await request();
+    const abort = new AbortController();
+    input.signal = abort.signal;
+    if (reason === "turn-budget") input.snapshot.config.limits.maxTurnsPerRun = 1;
+    if (reason === "token-budget") input.snapshot.config.limits.maxTokens = 1;
+    let calls = 0;
+    input.onEvent = event => { if (reason === "cancellation" && event.type === "usage") abort.abort(); };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return { ...message([], "error"), errorMessage: reason === "authentication" ? "401 invalid API key" : "503 service unavailable" };
+    }) }) });
+    const error = await runner.run(input).catch(error => error);
+    expect(error).toBeInstanceOf(RuntimeRunError);
+    expect(error.usage.input).toBe(13);
+    expect(calls).toBe(1);
+  });
+
+  it("persists all pending tool IDs before the first tool executes", async () => {
+    const input = await request("execute");
+    let calls = 0;
+    let checked = false;
+    const runner = new PiRunner({
+      resolveModel: async () => ({ model, streamFn: stream(() => ++calls === 1 ? message([
+        { type: "toolCall", id: "a", name: "write", arguments: { path: "a.txt", content: "a" } },
+        { type: "toolCall", id: "b", name: "write", arguments: { path: "b.txt", content: "b" } },
+      ], "toolUse") : message([{ type: "text", text: '{"summary":"two observed writes","result":"no_progress"}' }])) }),
+      createAgent: options => new Agent({ ...options, beforeToolCall: async (context, signal) => {
+        if (!checked) {
+          const saved = JSON.parse(await readFile(join(input.runDir, "continuation.json"), "utf8"));
+          expect(saved.pendingToolCalls).toEqual(["a", "b"]);
+          await expect(readFile(join(input.workspace, "a.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+          checked = true;
+        }
+        return options.beforeToolCall?.(context, signal);
+      } }),
+    });
+    await runner.run(input);
+    expect(checked).toBe(true);
+  });
+
+  it("reserves the final actual request for reporting after a transient failure", async () => {
+    const input = await request("execute");
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "first", name: "write", arguments: { path: "first.txt", content: "one" } }], "toolUse");
+      if (calls === 2) return { ...message([], "error"), errorMessage: "503 unavailable" };
+      expect(context.tools).toEqual([]);
+      expect(context.systemPrompt).toContain("final allowed model request");
+      return message([{ type: "text", text: '{"summary":"One observed write; task unfinished","result":"no_progress"}' }]);
+    }) }) });
+    const result = await runner.run(input);
+    expect(calls).toBe(3);
+    expect(result.usage.input).toBe(39);
+    expect(await readFile(join(input.workspace, "first.txt"), "utf8")).toBe("one");
+  });
+
+  it("compacts long conversations at complete tool boundaries and accounts for summary tokens", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.config.limits.maxTokens = null;
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    await writeFile(join(input.workspace, "long.txt"), "Synthetic observation. ".repeat(500));
+    let calls = 0;
+    let summaries = 0;
+    let sawSummary = false;
+    const runner = new PiRunner({ resolveModel: async () => ({ model: { ...model, contextWindow: 16000 }, streamFn: stream(context => {
+      if (context.systemPrompt?.startsWith("Summarize the older conversation")) {
+        summaries++;
+        expect(context.tools).toEqual([]);
+        return message([{ type: "text", text: "Repeatedly inspected long.txt. No verified conclusion; preserve the current Step and inspect original evidence." }]);
+      }
+      sawSummary ||= JSON.stringify(context.messages).includes("XLOOM PRIVATE CONTEXT SUMMARY");
+      // Every retained call must still have its corresponding result.
+      for (const item of context.messages) if (item.role === "assistant") for (const part of item.content) if (part.type === "toolCall") {
+        expect(context.messages.some(result => result.role === "toolResult" && result.toolCallId === part.id)).toBe(true);
+      }
+      return ++calls <= 12 ? message([{ type: "toolCall", id: `read-${calls}`, name: "read", arguments: { path: "long.txt" } }], "toolUse")
+        : message([{ type: "text", text: '{"summary":"Observations retained; no verified conclusion","result":"no_progress"}' }]);
+    }) }) });
+    const result = await runner.run(input);
+    expect(summaries).toBeGreaterThan(0);
+    expect(sawSummary).toBe(true);
+    expect(events.filter(event => event.type === "tool_start")).toHaveLength(12);
+    expect(result.usage.input).toBe((calls + summaries) * 13);
+    expect(events.filter(event => event.type === "usage")).toHaveLength(calls + summaries);
   });
 
   it("forwards message/tool order before awaiting transcript writes, even for a non-awaited event source", async () => {
@@ -191,6 +347,30 @@ describe("Pi runtime isolation", () => {
     const input = await request();
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => message([{ type: "text", text: '{"summary":"truncated"}' }], "length")) }) });
     await expect(runner.run(input)).rejects.toThrow("length");
+  });
+
+  it("redacts JSON-encoded credentials across single-character streaming chunks", async () => {
+    const input = await request();
+    const secret = 'key-with-"quotes\\and-newline\n';
+    let rendered = "";
+    input.onEvent = event => { if (event.type === "text") rendered += event.text; };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, secrets: [secret], streamFn: () => {
+      const output = new AssistantMessageEventStream();
+      const text = JSON.stringify({ summary: secret });
+      const result = message([{ type: "text", text }]);
+      queueMicrotask(() => {
+        output.push({ type: "start", partial: result });
+        for (const delta of text) output.push({ type: "text_delta", contentIndex: 0, delta, partial: result });
+        output.push({ type: "done", reason: "stop", message: result });
+        output.end();
+      });
+      return output;
+    } }) });
+    expect((await runner.run(input)).output).toEqual({ summary: "[MODEL_CREDENTIAL_REDACTED]" });
+    expect(JSON.parse(rendered)).toEqual({ summary: "[MODEL_CREDENTIAL_REDACTED]" });
+    const persisted = await readFile(join(input.runDir, "events.jsonl"), "utf8");
+    expect(persisted).not.toContain("key-with-");
+    for (const line of persisted.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow();
   });
 
   it("includes credentials refreshed by Pi after initial resolution in streaming and saved output redaction", async () => {
@@ -293,6 +473,7 @@ async function chatRequest(text = "first private chat message"): Promise<ChatReq
 
 async function thinkingHarness(kind: "chat" | "decide", streamFn: StreamFn, secrets: string[] = [], control?: AbortController, observe?: (event: RuntimeEvent) => void) {
   const input = await request();
+  await writeFile(join(input.workspace, "public-evidence.txt"), "LOCAL FIXTURE ONLY");
   const events: RuntimeEvent[] = [];
   const agents: AgentOptions[] = [];
   input.onEvent = event => { events.push(event); observe?.(event); };
@@ -301,6 +482,11 @@ async function thinkingHarness(kind: "chat" | "decide", streamFn: StreamFn, secr
   const completed = kind === "chat" ? new ChatSession(options).send({ text: "fixture", workspace: input.workspace, model: { provider: "test", model: "chat" }, limits: input.snapshot.config.limits, signal: input.signal, onEvent: input.onEvent })
     : new PiRunner(options).run(input);
   return { input, events, agents, completed };
+}
+
+function fixtureTool(kind: "chat" | "decide", id: string, path: string): AssistantMessage["content"][number] {
+  return { type: "toolCall", id, name: kind === "decide" ? "read" : "write",
+    arguments: kind === "decide" ? { path: "public-evidence.txt" } : { path, content: "LOCAL FIXTURE ONLY" } };
 }
 
 function thinkingStream(response: AssistantMessage, chunks?: string[], noDeltas = false): StreamFn {
@@ -335,7 +521,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
         { type: "text", text: "I will inspect a local fixture." },
         { type: "thinking", thinking: "Provider-returned thought." },
         { type: "text", text: "I will keep the observed result." },
-        { type: "toolCall", id: "id-write", name: "write", arguments: { path: "id-fixture.txt", content: "fixture" } },
+        fixtureTool(kind, "id-write", "id-fixture.txt"),
       ], "toolUse") : message([
         { type: "thinking", thinking: "Next provider-returned thought." },
         { type: "text", text: answer },
@@ -357,12 +543,12 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
 
   it("emits actual pre-tool prose once and reports one usage event per assistant message, not per tool", async () => {
     let calls = 0;
-    const narration = "I will write a local fixture and then read it back.";
+    const narration = "I will inspect the local fixture and verify it again.";
     const test = await thinkingHarness(kind, stream(context => {
       if (++calls === 1) return message([
         { type: "text", text: narration },
-        { type: "toolCall", id: "narration-write", name: "write", arguments: { path: "narration-fixture.txt", content: "LOCAL FIXTURE ONLY" } },
-        { type: "toolCall", id: "narration-read", name: "read", arguments: { path: "narration-fixture.txt" } },
+        fixtureTool(kind, "narration-write", "narration-fixture.txt"),
+        { type: "toolCall", id: "narration-read", name: "read", arguments: { path: kind === "decide" ? "public-evidence.txt" : "narration-fixture.txt" } },
       ], "toolUse");
       expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
       const response = message([{ type: "text", text: answer }]);
@@ -380,7 +566,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     expect(test.events.filter(event => event.type === "tool_start")).toHaveLength(2);
     expect(test.events.findIndex(event => event.type === "narration")).toBeLessThan(test.events.findIndex(event => event.type === "tool_start"));
     expect(test.events.findIndex(event => event.type === "usage")).toBeLessThan(test.events.findIndex(event => event.type === "tool_start"));
-    expect(await readFile(join(test.input.workspace, "narration-fixture.txt"), "utf8")).toBe("LOCAL FIXTURE ONLY");
+    expect(await readFile(join(test.input.workspace, kind === "decide" ? "public-evidence.txt" : "narration-fixture.txt"), "utf8")).toBe("LOCAL FIXTURE ONLY");
   });
 
   it.each([
@@ -395,7 +581,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     let calls = 0;
     const test = await thinkingHarness(kind, stream(() => ++calls === 1 ? message([
       { type: "text", text: protocol! },
-      { type: "toolCall", id: "protocol-write", name: "write", arguments: { path: "protocol-fixture.txt", content: "fixture" } },
+      fixtureTool(kind, "protocol-write", "protocol-fixture.txt"),
     ], "toolUse") : message([{ type: "text", text: answer }])));
     await test.completed;
     expect(test.events.filter(event => event.type === "narration")).toEqual([]);
@@ -406,7 +592,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     let calls = 0;
     const finalJson = '{"summary":"Only structured final output"}';
     const test = await thinkingHarness(kind, stream(() => ++calls === 1 ? message([
-      { type: "toolCall", id: "silent-write", name: "write", arguments: { path: "silent-fixture.txt", content: "fixture" } },
+      fixtureTool(kind, "silent-write", "silent-fixture.txt"),
     ], "toolUse") : message([{ type: "text", text: finalJson }])));
     const completed = await test.completed;
     expect(test.events.filter(event => event.type === "narration")).toEqual([]);
@@ -419,7 +605,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     const test = await thinkingHarness(kind, (selected, context, options) => {
       const response = ++calls === 1 ? message([
         { type: "text", text: "I will inspect the fixture using credential-secret." },
-        { type: "toolCall", id: "redacted-narration-write", name: "write", arguments: { path: "redacted-fixture.txt", content: "fixture" } },
+        fixtureTool(kind, "redacted-narration-write", "redacted-fixture.txt"),
       ], "toolUse") : message([{ type: "text", text: answer }]);
       return thinkingStream(response)(selected, context, options);
     }, ["credential-secret"]);
@@ -435,7 +621,7 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     let calls = 0;
     const test = await thinkingHarness(kind, (_model, _context, options) => {
       if (++calls === 1) return stream(() => message([
-        { type: "toolCall", id: "usage-write", name: "write", arguments: { path: "usage-fixture.txt", content: "fixture" } },
+        fixtureTool(kind, "usage-write", "usage-fixture.txt"),
       ], "toolUse"))(_model, _context, options);
       const output = new AssistantMessageEventStream();
       const failure = { ...message([], stopReason), errorMessage: "Synthetic provider interruption" };
@@ -528,7 +714,7 @@ describe.each(["chat", "decide"] as const)("Pi-returned thinking in %s", kind =>
     let calls = 0;
     const fn: StreamFn = (selected, context, options) => thinkingStream(++calls === 1 ? message([
       { type: "thinking", thinking: "First block." }, { type: "thinking", thinking: "Second block." },
-      { type: "toolCall", id: "thinking-write", name: "write", arguments: { path: "thought-fixture.txt", content: "fixture" } },
+      fixtureTool(kind, "thinking-write", "thought-fixture.txt"),
     ], "toolUse") : message([{ type: "thinking", thinking: "Next message block." }, { type: "text", text: answer }]))(selected, context, options);
     const test = await thinkingHarness(kind, fn);
     await test.completed;
@@ -641,7 +827,7 @@ describe("private Pi chat session", () => {
     const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream("PRIVATE_CHAT_REPLY", contexts) }) });
     await session.send(input);
     const redteam: Context[] = [];
-    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream('{"summary":"public board only"}', redteam) }) });
+    const runner = new PiRunner({ resolveModel: async config => ({ model, streamFn: stream(JSON.stringify({ summary: "public board only", ...(config.model === "execute" ? { result: "no_progress" } : {}) }), redteam) }) });
     for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
     expect(redteam.every(context => context.messages.length === 1)).toBe(true);
     for (const privateText of [input.text, "PRIVATE_CHAT_REPLY"]) expect(JSON.stringify(redteam)).not.toContain(privateText);
