@@ -5,7 +5,7 @@ import { decisionSchema, executionSchema } from "../src/schema.js";
 import { ChatSession, chatPrompt } from "../src/runtime/chat.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
 import { powerShellPrompt } from "../src/runtime/powershell.js";
-import type { BoardSnapshot, RunRequest } from "../src/types.js";
+import type { BoardSnapshot, RunRequest, RuntimeEvent } from "../src/types.js";
 
 const model: Model<"openai-completions"> = {
   id: "offline", name: "offline", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -42,7 +42,9 @@ describe("compact built-in prompts", () => {
       expect(seen).toHaveLength(2);
       expect(seen.map(context => context.messages.length)).toEqual([1, 3]);
       for (const context of seen) {
-        expect(context.systemPrompt?.trim()).toBe(chatPrompt);
+        expect(context.systemPrompt?.startsWith(`${chatPrompt}\n`)).toBe(true);
+        expect(context.systemPrompt).toContain('Model ID: "offline"; provider: "test".');
+        expect(context.systemPrompt).toContain("For model questions, give this exact ID.");
         expect(context.systemPrompt!.length).toBeLessThanOrEqual(300);
         expect(context.systemPrompt).not.toMatch(/model-turn limit|maxTurnsPerRun|final allowed model|JSON object/);
         expect(context.systemPrompt).not.toContain(powerShellPrompt);
@@ -53,6 +55,38 @@ describe("compact built-in prompts", () => {
         const shell = context.tools!.find(tool => tool.name === "powershell")!;
         expect(shell.description.split(powerShellPrompt)).toHaveLength(2);
       }
+    } finally {
+      session.reset();
+    }
+  });
+
+  it("sends the exact configured model identity to the provider and updates it on model changes", async () => {
+    const seen: Context[] = [];
+    const events: RuntimeEvent[] = [];
+    const session = captureChat(seen);
+    const input = { text: "你是什么模型？", workspace: process.cwd(), model: { provider: "custom-gateway", model: "deepseek-flash" },
+      limits: defaultConfig("chat identity fixture").limits, signal: new AbortController().signal,
+      onEvent: (event: RuntimeEvent) => events.push(event) };
+    try {
+      await session.send(input);
+      await session.send({ ...input, model: { provider: "other-provider", model: "custom/Future-Model:Preview@2026-09" } });
+      expect(seen).toHaveLength(2);
+      expect(seen.map(context => context.messages.length)).toEqual([1, 1]);
+      expect(seen[0]!.systemPrompt).toContain('Model ID: "deepseek-flash"; provider: "custom-gateway".');
+      expect(seen[1]!.systemPrompt).toContain('Model ID: "custom/Future-Model:Preview@2026-09"; provider: "other-provider".');
+      expect(seen[1]!.systemPrompt).not.toContain("deepseek-flash");
+      for (const context of seen) {
+        // The fixture resolver returns "offline". Neither that catalog ID nor
+        // an application persona may replace the user's configured request ID.
+        expect(context.systemPrompt).not.toContain('Model ID: "offline"');
+        expect(context.systemPrompt).not.toContain("You are Xloom");
+        expect(context.messages[0]).toMatchObject({ role: "user", content: [{ type: "text", text: input.text }] });
+      }
+      // Identity questions still use the provider and forward its natural reply;
+      // no local question matcher or canned response bypasses the model.
+      expect(events.filter(event => event.type === "text").map(event => event.text)).toEqual([
+        "Offline fixture reply.", "Offline fixture reply.",
+      ]);
     } finally {
       session.reset();
     }
