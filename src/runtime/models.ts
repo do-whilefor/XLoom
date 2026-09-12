@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Model, Api, AuthResult } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -48,6 +49,14 @@ function validateBaseUrl(baseUrl: string): void {
   if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error("Model baseUrl must be an HTTP(S) URL without credentials or query parameters.");
   }
+}
+
+function requiresOpenCodeSession(model: Model<Api>): boolean {
+  if (model.provider !== "opencode-go") return false;
+  try {
+    const url = new URL(model.baseUrl);
+    return url.origin === "https://opencode.ai" && /^\/zen\/go(?:\/|$)/.test(url.pathname);
+  } catch { return false; }
 }
 
 function trackCredentials(runtime: ModelRuntime, secrets: string[]): void {
@@ -122,8 +131,18 @@ export const resolveModel: ModelResolver = async (config, signal) => {
   if (!auth) throw new Error(`No Pi credentials configured for ${config.provider}; use Pi login, its environment variables, or apiKeyEnv.`);
   const builtin = builtinModels().getModel(config.provider, config.model);
   const costKnown = !config.baseUrl && (builtin?.baseUrl === model.baseUrl || (!builtin && Object.values(model.cost).some((value) => typeof value === "number" && value > 0)));
+  const fallbackSessionId = randomUUID();
   return {
     model, secrets, costKnown,
-    streamFn: (selected, context, options) => runtime.streamSimple(selected, context, { ...options, apiKey: explicitKey, maxTokens: model.maxTokens }),
+    streamFn: (selected, context, options) => runtime.streamSimple(selected, context, {
+      ...options,
+      // Go requires a session header that Pi 0.84.4 does not supply itself.
+      // Agent session IDs stay stable across chat turns; direct calls get a local fallback.
+      ...(requiresOpenCodeSession(selected) ? { headers: {
+        ...Object.fromEntries(Object.entries(options?.headers ?? {}).filter(([key]) => key.toLowerCase() !== "x-opencode-session")),
+        "x-opencode-session": options?.sessionId || fallbackSessionId,
+      } } : {}),
+      apiKey: explicitKey, maxTokens: model.maxTokens,
+    }),
   };
 };

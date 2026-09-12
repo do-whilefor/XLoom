@@ -115,6 +115,57 @@ describe("Pi model resolution", () => {
     expect(stream).toHaveBeenCalledWith(result.model, { messages: [] }, expect.objectContaining({ apiKey: undefined }));
   });
 
+  it("adds the active Agent session header to OpenCode Go while preserving unrelated headers", async () => {
+    vi.stubEnv("XLOOM_TEST_KEY", "local-placeholder");
+    const result = await resolveModel({ provider: "opencode-go", model: "deepseek-flash", api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go", apiKeyEnv: "XLOOM_TEST_KEY" }, signal());
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    const headers = { "x-user-header": "preserve-me", "X-OpenCode-Session": "obsolete-session" };
+    result.streamFn(result.model, { messages: [] }, { sessionId: "chat-stable-id", headers });
+    result.streamFn(result.model, { messages: [] }, { sessionId: "chat-stable-id", headers });
+    result.streamFn(result.model, { messages: [] }, { sessionId: "next-agent-run", headers });
+    expect(stream.mock.calls.map(call => call[2]?.headers)).toEqual([
+      { "x-user-header": "preserve-me", "x-opencode-session": "chat-stable-id" },
+      { "x-user-header": "preserve-me", "x-opencode-session": "chat-stable-id" },
+      { "x-user-header": "preserve-me", "x-opencode-session": "next-agent-run" },
+    ]);
+    expect(headers).toEqual({ "x-user-header": "preserve-me", "X-OpenCode-Session": "obsolete-session" });
+    expect(result.model).toMatchObject({ id: "deepseek-flash", api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" });
+  });
+
+  it.each(["https://opencode.ai/zen/go/", "https://opencode.ai/zen/go/v1"])("uses a stable resolver-local fallback session for %s", async baseUrl => {
+    vi.stubEnv("XLOOM_TEST_KEY", "local-placeholder");
+    const config = { provider: "opencode-go", model: "deepseek-flash", api: "anthropic-messages" as const, baseUrl, apiKeyEnv: "XLOOM_TEST_KEY" };
+    const result = await resolveModel(config, signal());
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    result.streamFn(result.model, { messages: [] });
+    result.streamFn(result.model, { messages: [] }, { headers: { "x-extra": "retained" } });
+    const first = stream.mock.calls[0]?.[2]?.headers?.["x-opencode-session"];
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(stream.mock.calls[1]?.[2]?.headers).toEqual({ "x-extra": "retained", "x-opencode-session": first });
+    const independent = await resolveModel(config, signal());
+    const otherStream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    independent.streamFn(independent.model, { messages: [] });
+    expect(otherStream.mock.calls[0]?.[2]?.headers?.["x-opencode-session"]).not.toBe(first);
+  });
+
+  it.each([
+    ["custom-go", "https://opencode.ai/zen/go"],
+    ["opencode-go", "https://proxy.example.invalid/zen/go"],
+    ["opencode-go", "https://opencode.ai.example.invalid/zen/go"],
+    ["opencode-go", "https://opencode.ai/zen/gopher"],
+    ["opencode-go", "https://opencode.ai/zen/v1"],
+    ["opencode-go", "http://opencode.ai/zen/go"],
+    ["opencode-go", "https://opencode.ai:8443/zen/go"],
+  ])("does not add the Go header to provider %s at %s", async (provider, baseUrl) => {
+    vi.stubEnv("XLOOM_TEST_KEY", "local-placeholder");
+    const result = await resolveModel({ provider, model: "custom-model", api: "anthropic-messages", baseUrl, apiKeyEnv: "XLOOM_TEST_KEY" }, signal());
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    const headers = { "x-custom": "keep" };
+    result.streamFn(result.model, { messages: [] }, { sessionId: "unused-session", headers });
+    expect(stream.mock.calls[0]?.[2]?.headers).toEqual(headers);
+    expect(stream.mock.calls[0]?.[2]?.headers).not.toHaveProperty("x-opencode-session");
+  });
+
   it("does not fall back to an environment key when Pi OAuth refresh fails", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "unused-environment-key");
     await saveAuth({ anthropic: { type: "oauth", access: "expired-access", refresh: "invalid-refresh", expires: 0 } });

@@ -32,7 +32,7 @@ export interface ProjectConfig {
   goal: string;
   scope: string;
   context: string;
-  models: { decide: ModelConfig; execute: ModelConfig };
+  models: { decide: ModelConfig; execute: ModelConfig; chat?: ModelConfig };
   limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number; stepTimeoutSeconds: number; metacogEvery: number };
 }
 export interface Goal { id: string; description: string; parentId: string | null; status: "active" | "satisfied" | "abandoned"; factIds: string[] }
@@ -75,9 +75,10 @@ export interface RunRequest {
   /** Public, task-local view assembled by the outer loop; never another Agent's chat. */
   context?: BlackboardContext;
   trigger?: OuterLoopTrigger;
+  blackboardPath?: string;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }
 export interface RunResult { output: unknown; usage: Usage }
 export interface AgentRunner { run(request: RunRequest): Promise<RunResult> }
-export interface RuntimeEvent { type: "text" | "tool_start" | "tool_update" | "tool_end" | "notice"; mode: Mode; text: string; toolName?: string; toolCallId?: string; isError?: boolean }
-export interface LoopEvent { type: "state" | "board" | "runtime" | "notice" | "handoff"; snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff }
+export interface RuntimeEvent { type: "text" | "tool_start" | "tool_update" | "tool_end" | "notice"; mode: Mode | "chat"; text: string; toolName?: string; toolCallId?: string; isError?: boolean }
+export interface LoopEvent { type: "state" | "board" | "runtime" | "notice" | "handoff" | "session"; snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff }

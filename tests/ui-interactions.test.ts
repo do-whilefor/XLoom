@@ -99,7 +99,7 @@ describe("TUI layout and input history", () => {
     expect(app.editor.getExpandedText()).toBe("第二条信息");
     app.terminal.input("\x1b[B");
     expect(app.editor.getExpandedText()).toBe("尚未发送\n第二行草稿");
-    expect(app.controller.hint).toHaveBeenCalledTimes(2);
+    expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
   it("stores commands and deduplicates consecutive identical history entries", () => {
@@ -111,7 +111,7 @@ describe("TUI layout and input history", () => {
     expect(app.editor.getExpandedText()).toBe("/board");
     app.terminal.input("\x1b[A");
     expect(app.editor.getExpandedText()).toBe("旧信息");
-    expect(app.controller.hint).toHaveBeenCalledOnce();
+    expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
   it("retains multiline cursor movement on Alt+Up and Alt+Down", () => {
@@ -129,10 +129,10 @@ describe("TUI layout and input history", () => {
 
   it("keeps Alt+Enter as newline until an explicit submission", () => {
     const app = launch();
-    app.editor.setText("第一行");
+    app.editor.setText("/hint 第一行");
     app.terminal.input("\x1b\r");
     app.terminal.input("第二行");
-    expect(app.editor.getExpandedText()).toBe("第一行\n第二行");
+    expect(app.editor.getExpandedText()).toBe("/hint 第一行\n第二行");
     expect(app.controller.hint).not.toHaveBeenCalled();
     app.terminal.input("\r");
     expect(app.controller.hint).toHaveBeenCalledWith("第一行\n第二行");
@@ -148,7 +148,7 @@ describe("TUI clipboard", () => {
     expect(readText).toHaveBeenCalledOnce();
     expect(app.controller.hint).not.toHaveBeenCalled();
     app.terminal.input("\r");
-    expect(app.controller.hint).toHaveBeenCalledWith("中文 🧪\n第二行");
+    expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
   it("does not execute a pasted /quit command until Enter", async () => {
@@ -180,24 +180,24 @@ describe("TUI clipboard", () => {
     let resolve!: (text: string) => void;
     const readText = vi.fn(() => new Promise<string>((done) => { resolve = done; }));
     const app = launch({ readText, writeText: vi.fn(async () => true) });
-    app.editor.setText("草稿");
+    app.editor.setText("/hint 草稿");
     app.terminal.input("\x16");
     app.terminal.input("\r");
     expect(app.controller.hint).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(readText).toHaveBeenCalledOnce());
     resolve("续写");
-    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("草稿续写"));
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("/hint 草稿续写"));
     app.terminal.input("\r");
     expect(app.controller.hint).toHaveBeenCalledWith("草稿续写");
   });
 
   it("leaves the editor intact and usable when reading the clipboard fails", async () => {
     const app = launch({ readText: vi.fn(async () => { throw new Error("clipboard is busy"); }), writeText: vi.fn(async () => true) });
-    app.editor.setText("保留草稿");
+    app.editor.setText("/hint 保留草稿");
     app.terminal.input("\x16");
     await vi.waitFor(() => expect(app.editor.disableSubmit).toBe(false));
     app.tui.renderNow(true);
-    expect(app.editor.getExpandedText()).toBe("保留草稿");
+    expect(app.editor.getExpandedText()).toBe("/hint 保留草稿");
     expect(plainText(app.terminal.output)).toMatch(/clipboard|剪贴板/i);
     app.terminal.input("\r");
     expect(app.controller.hint).toHaveBeenCalledWith("保留草稿");

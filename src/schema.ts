@@ -52,7 +52,7 @@ export const projectConfigSchema = z.object({
   goal: text(16_000),
   scope: text(16_000),
   context: z.string().max(64_000).default(""),
-  models: z.object({ decide: modelConfigSchema, execute: modelConfigSchema }).strict(),
+  models: z.object({ decide: modelConfigSchema, execute: modelConfigSchema, chat: modelConfigSchema.optional() }).strict(),
   limits: limitsSchema.default({}),
 }).strict();
 

@@ -24,7 +24,7 @@ export function executeTools(workspace: string) {
   return [createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createPowerShellTool(workspace)];
 }
 
-function contentText(value: unknown): string {
+export function contentText(value: unknown): string {
   if (typeof value === "string") return value;
   if (!value || typeof value !== "object") return "";
   const content = (value as { content?: unknown }).content;
@@ -32,7 +32,7 @@ function contentText(value: unknown): string {
   return content.flatMap((part) => part && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n");
 }
 
-function runtimeEvent(event: AgentEvent, mode: RunRequest["mode"]): RuntimeEvent | undefined {
+export function runtimeEvent(event: AgentEvent, mode: RuntimeEvent["mode"]): RuntimeEvent | undefined {
   switch (event.type) {
     case "message_update":
       if (event.assistantMessageEvent.type === "text_delta") return { type: "text", mode, text: event.assistantMessageEvent.delta };
@@ -84,7 +84,7 @@ export class PiRunner implements AgentRunner {
       };
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
-        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: request.mode === "execute" ? executeTools(request.workspace) : [] },
+        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: executeTools(request.workspace) },
         streamFn: selected.streamFn,
         toolExecution: "sequential",
         sessionId: request.id,

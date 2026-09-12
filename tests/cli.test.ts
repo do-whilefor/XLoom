@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { defaultConfig, loadConfig, saveNewConfig } from "../src/config.js";
+import { CHAT_GOAL, defaultConfig, loadConfig, saveNewConfig } from "../src/config.js";
+import { BlackboardStore } from "../src/store.js";
+import { selectTask } from "../src/workspace.js";
 import { renderReport } from "../src/report.js";
 import type { BoardSnapshot } from "../src/types.js";
 
@@ -125,6 +127,43 @@ describe("command-line entry points", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/Cannot read xloom configuration/);
     expect(existsSync(path.join(root, ".xloom"))).toBe(false);
+  });
+
+  it("does not turn a chat-only configuration into a headless research task", () => {
+    const root = workspace();
+    saveNewConfig(path.join(root, "xloom.json"), defaultConfig(CHAT_GOAL));
+    const result = cli(["run", "--headless"], root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("No red-team goal yet");
+    expect(existsSync(path.join(root, ".xloom", "blackboard.sqlite"))).toBe(false);
+    expect(existsSync(path.join(root, ".xloom", "session.lock"))).toBe(false);
+  });
+
+  it("reads the selected independent TUI task rather than creating or using a root task", () => {
+    const root = workspace();
+    saveNewConfig(path.join(root, "xloom.json"), defaultConfig(CHAT_GOAL));
+    const store = new BlackboardStore(root, defaultConfig("Selected TUI fixture goal"), { taskId: "task-selected" });
+    store.hint("Only this task hint");
+    const before = store.snapshot(); store.close(); selectTask(root, "task-selected");
+    const result = cli(["report"], root);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Selected TUI fixture goal");
+    expect(result.stdout).not.toContain(CHAT_GOAL);
+    const reopened = new BlackboardStore(root, before.config, { taskId: "task-selected" });
+    expect(reopened.snapshot()).toEqual(before); reopened.close();
+    expect(existsSync(path.join(root, ".xloom", "blackboard.sqlite"))).toBe(false);
+  });
+
+  it.each(["../outside", "missing-task"])("releases the headless session lock for an invalid selected task (%s)", taskId => {
+    const root = workspace();
+    saveNewConfig(path.join(root, "xloom.json"), defaultConfig("Must not become replacement task"));
+    mkdirSync(path.join(root, ".xloom"));
+    writeFileSync(path.join(root, ".xloom", "current-task.json"), JSON.stringify({ taskId }));
+    const result = cli(["run", "--headless"], root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Invalid task ID|No blackboard yet/);
+    expect(existsSync(path.join(root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(path.join(root, ".xloom", "tasks"))).toBe(false);
   });
 
   it("fails without a model request when the named credential variable is missing", () => {

@@ -21,15 +21,18 @@ export interface StoredRun { id: string; mode: Mode; stepId: string | null; stat
 export class BlackboardStore {
   readonly workspace: string;
   readonly dataDir: string;
+  readonly projectionPath: string;
   projectionError: string | null = null;
   private db!: DatabaseSync;
   private lockPath: string;
   private lockToken = randomUUID();
   private closed = false;
 
-  constructor(workspace: string, config: ProjectConfig) {
+  constructor(workspace: string, config: ProjectConfig, options: { taskId?: string } = {}) {
     this.workspace = realpathSync(workspace);
-    this.dataDir = path.join(this.workspace, ".xloom");
+    assert(options.taskId === undefined || /^[a-zA-Z0-9_-]{1,100}$/.test(options.taskId), "Invalid task ID.");
+    this.dataDir = options.taskId ? path.join(this.workspace, ".xloom", "tasks", options.taskId) : path.join(this.workspace, ".xloom");
+    this.projectionPath = options.taskId ? path.join(this.dataDir, "blackboard.md") : path.join(this.workspace, "state", "blackboard.md");
     this.lockPath = path.join(this.dataDir, "controller.lock");
     config = projectConfigSchema.parse(config);
     mkdirSync(this.dataDir, { recursive: true });
@@ -152,6 +155,13 @@ export class BlackboardStore {
       board.status = status; board.reason = reason;
       if (status === "running" && board.outcome === "NEED_INPUT") board.outcome = null;
     });
+  }
+
+  updateModels(models: ProjectConfig["models"]): BoardSnapshot {
+    const board = this.snapshot();
+    assert(board.status !== "running" && !this.runs().some(run => run.status === "running"), "Pause the task before changing models.");
+    const config = projectConfigSchema.parse({ ...board.config, models });
+    return this.mutate("models_updated", { models: config.models }, current => { current.config = config; });
   }
 
   hint(content: string): BoardSnapshot {
@@ -389,9 +399,9 @@ export class BlackboardStore {
 
   private project(): void {
     try {
-      const stateDir = path.join(this.workspace, "state");
+      const stateDir = path.dirname(this.projectionPath);
       mkdirSync(stateDir, { recursive: true });
-      const file = path.join(stateDir, "blackboard.md");
+      const file = this.projectionPath;
       assert(!existsSync(file) || readFileSync(file, "utf8").startsWith(marker), "Preserving existing state/blackboard.md; not an xloom-generated view.");
       const board = this.snapshot();
       const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];

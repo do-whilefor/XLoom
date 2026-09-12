@@ -4,18 +4,17 @@ import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
-import { defaultConfig, loadConfig, saveNewConfig } from "./config.js";
+import { CHAT_GOAL, defaultConfig, loadConfig, saveNewConfig } from "./config.js";
 import { BlackboardStore } from "./store.js";
 import { LoopController } from "./controller.js";
 import { DemoRunner } from "./demo.js";
 import { renderReport } from "./report.js";
-import type { BoardSnapshot } from "./types.js";
+import { currentTaskId, readSavedBoard, taskDirectory, WorkspaceLock } from "./workspace.js";
 
 const help = `xloom — local two-agent research loop (Windows MVP)
 
   xloom init --goal "User-supplied goal / authorized target" [--scope "target details"]
-  xloom run [--headless]       Open TUI, or start immediately in headless mode
+  xloom run [--headless]       Open chat TUI, or resume configured task headlessly
   xloom status               Read the saved board without running agents
   xloom report               Print a Markdown report with evidence references
   xloom doctor               Check local Node/PowerShell/config/model credentials
@@ -23,21 +22,11 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
 Options: --workspace PATH  --config PATH  --help
-TUI: /start /pause /stop /hint text /meta /board /help /exit /quit
+TUI: plain text chats; /run GOAL starts a separate two-agent task
+     /model /apikey /login /logout /new /start /pause /stop /hint /meta /board /help /exit
 User input defines authorization. No extra authorization confirmation or hooks.
-Execute has read/write/edit/powershell with the current user's OS permissions.
+Chat and both agents have read/write/edit/powershell with the current user's OS permissions.
 `;
-
-function savedBoard(workspace: string): BoardSnapshot {
-  const file = path.join(workspace, ".xloom", "blackboard.sqlite");
-  if (!existsSync(file)) throw new Error("No blackboard yet. Initialize xloom.json and run xloom first.");
-  const db = new DatabaseSync(file, { readOnly: true });
-  try {
-    const row = db.prepare("SELECT value FROM board WHERE id=1").get();
-    if (!row) throw new Error("Blackboard is empty.");
-    return JSON.parse(String(row.value));
-  } finally { db.close(); }
-}
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ options: {
@@ -68,7 +57,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "status" || command === "report") {
-    const board = savedBoard(workspace);
+    const board = readSavedBoard(workspace);
     process.stdout.write(command === "report" ? renderReport(board) : `${JSON.stringify({ status: board.status, outcome: board.outcome, reason: board.reason, revision: board.revision, steps: board.completedSteps, findings: board.findings.length, usage: board.usage, elapsedMs: board.elapsedMs ?? 0 }, null, 2)}\n`);
     return;
   }
@@ -79,18 +68,32 @@ async function main(): Promise<void> {
     if (existsSync(configPath)) {
       const config = loadConfig(configPath);
       const { resolveModel } = await import("./runtime/index.js");
-      for (const role of ["decide", "execute"] as const) {
-        const resolved = await resolveModel(config.models[role], new AbortController().signal);
+      for (const role of ["chat", "decide", "execute"] as const) {
+        const resolved = await resolveModel(config.models[role] ?? config.models.execute, new AbortController().signal);
         process.stdout.write(`${role}: ${resolved.model.provider}/${resolved.model.id}; Pi credential resolution OK (no model request)\n`);
       }
     } else process.stdout.write("No xloom.json yet; use init --goal. No model request was made.\n");
     return;
   }
   if (!values.headless && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("TUI needs an interactive terminal. Use --headless to run explicitly without a TUI.");
+  if (!demo && !values.headless) {
+    if (!existsSync(configPath)) saveNewConfig(configPath, defaultConfig(CHAT_GOAL));
+    const [{ AppController }, { startTui }] = await Promise.all([import("./app.js"), import("./ui/index.js")]);
+    const app = new AppController(workspace, configPath, loadConfig(configPath));
+    try { await startTui(app); } finally { await app.close(); }
+    return;
+  }
   const config = demo ? defaultConfig("DEMO: validate only the offline synthetic protocol fixture", "Local synthetic fixture; no external target") : loadConfig(configPath);
   if (demo) { config.title = "xloom DEMO (synthetic, no live test)"; saveNewConfig(configPath, config); process.stdout.write(`DEMO workspace: ${workspace}\n`); }
   const runner = demo ? new DemoRunner() : new (await import("./runtime/index.js")).PiRunner();
-  const store = new BlackboardStore(workspace, config);
+  const sessionLock = new WorkspaceLock(workspace);
+  let store: BlackboardStore;
+  try {
+    const taskId = demo ? undefined : currentTaskId(workspace);
+    const saved = taskId || existsSync(path.join(taskDirectory(workspace, taskId), "blackboard.sqlite")) ? readSavedBoard(workspace, taskId) : undefined;
+    if (!saved && config.goal === CHAT_GOAL) throw new Error("No red-team goal yet. Open the TUI and use /run with your goal first.");
+    store = new BlackboardStore(workspace, saved ? { ...saved.config, models: config.models, limits: config.limits } : config, { taskId });
+  } catch (error) { sessionLock.close(); throw error; }
   const controller = new LoopController(store, runner);
   try {
     if (values.headless) {
@@ -108,13 +111,13 @@ async function main(): Promise<void> {
       });
       try { await controller.start(); } finally { unsubscribe(); process.off("SIGINT", interrupt); process.off("SIGTERM", interrupt); }
       const board = controller.snapshot();
-      process.stdout.write(`${board.outcome ?? board.status}: ${board.reason}\nBlackboard: ${path.join(workspace, "state", "blackboard.md")}\n`);
+      process.stdout.write(`${board.outcome ?? board.status}: ${board.reason}\nBlackboard: ${store.projectionPath}\n`);
       if (board.status === "error") process.exitCode = 1;
     } else {
       const { startTui } = await import("./ui/index.js");
       await startTui(controller);
     }
-  } finally { await controller.waitForIdle(); store.close(); }
+  } finally { await controller.waitForIdle(); store.close(); sessionLock.close(); }
 }
 
 main().catch(error => { process.stderr.write(`xloom: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

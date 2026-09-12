@@ -6,7 +6,8 @@ import { Agent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agen
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import { PiRunner, RuntimeRunError, executeTools, parseFinalJson } from "../src/runtime/index.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
-import type { BoardSnapshot, ModelConfig, RunRequest } from "../src/types.js";
+import { ChatSession, type ChatRequest } from "../src/runtime/chat.js";
+import type { BoardSnapshot, ModelConfig, RunRequest, RuntimeEvent } from "../src/types.js";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -62,7 +63,7 @@ describe("Pi runtime isolation", () => {
     for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
-    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([[], ["read", "write", "edit", "powershell"], []]);
+    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual(Array.from({ length: 3 }, () => ["read", "write", "edit", "powershell"]));
     expect(options.every((entry) => entry.toolExecution === "sequential" && !entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(seen.every((context) => context.messages.length === 1 && context.messages[0].role === "user")).toBe(true);
     expect(seen.every((context) => !JSON.stringify(context).includes("only this run") && !JSON.stringify(context).includes("DO_NOT_EXPOSE_ENV_NAME"))).toBe(true);
@@ -70,6 +71,7 @@ describe("Pi runtime isolation", () => {
 
   it("only projects blackboard fields and keeps evidence excerpts", async () => {
     const input = await request();
+    input.blackboardPath = join(input.workspace, "task-state", "blackboard.md");
     Object.assign(input.snapshot, { messages: [{ text: "SECRET_PRIOR_CHAT" }] });
     input.snapshot.evidence.push({ id: "e1", path: "artifact", sha256: "hash", bytes: 1, description: "brief", runId: "r0", stepId: "s0", excerpt: "original result" });
     const prompt = buildRunPrompt(input);
@@ -81,6 +83,24 @@ describe("Pi runtime isolation", () => {
     expect(prompt.userPrompt).toContain("Priority is an integer 0–1000");
     expect(prompt.userPrompt).toContain("Never abandon the root Goal");
     expect(prompt.userPrompt).toContain("whole Goal is met");
+    expect(JSON.parse(prompt.userPrompt.split("\n").at(-1)!)).toMatchObject({ blackboardFile: input.blackboardPath });
+  });
+
+  it.each(["decide", "metacog"] as const)("lets %s use Pi's native read without changing its JSON output contract", async mode => {
+    const input = await request(mode);
+    await writeFile(join(input.workspace, "public-evidence.txt"), "existing public evidence");
+    let calls = 0;
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "decide-read", name: "read", arguments: { path: "public-evidence.txt" } }], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      expect(JSON.stringify(context.messages.at(-1))).toContain("existing public evidence");
+      return message([{ type: "text", text: '{"summary":"Inspected existing evidence; no new fact IDs invented"}' }]);
+    }) }) });
+    expect((await runner.run(input)).output).toEqual({ summary: "Inspected existing evidence; no new fact IDs invented" });
+    expect(calls).toBe(2);
+    expect(events).toContainEqual(expect.objectContaining({ type: "tool_end", mode, toolName: "read", isError: false }));
   });
 
   it("also redacts the other channel's explicitly configured model key", async () => {
@@ -228,5 +248,190 @@ describe("runtime protocol", () => {
     expect(parseFinalJson('{"summary":"ok"}')).toEqual({ summary: "ok" });
     expect(parseFinalJson('```json\n{"summary":"ok"}\n```')).toEqual({ summary: "ok" });
     for (const invalid of ["null", "[]", "1", "here: {}", "{} {}", '```json\n{}\n```\nextra']) expect(() => parseFinalJson(invalid)).toThrow();
+  });
+});
+
+async function chatRequest(text = "first private chat message"): Promise<ChatRequest> {
+  const input = await request();
+  return { text, workspace: input.workspace, model: { provider: "test", model: "chat" }, limits: input.snapshot.config.limits, signal: input.signal, onEvent() {} };
+}
+
+describe("private Pi chat session", () => {
+  it("retains ordinary chat history, streams natural text and counts each response's usage", async () => {
+    const input = await chatRequest();
+    const seen: Context[] = [];
+    const events: RuntimeEvent[] = [];
+    const agents: AgentOptions[] = [];
+    input.onEvent = event => events.push(event);
+    let resolves = 0;
+    const session = new ChatSession({
+      resolveModel: async () => { resolves++; return { model, streamFn: stream("A natural language reply, not JSON.", seen) }; },
+      createAgent: options => { agents.push(options); return new Agent(options); },
+    });
+    expect(await session.send(input)).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(await session.send({ ...input, text: "second message" })).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(resolves).toBe(2);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].initialState?.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+    expect(agents[0].beforeToolCall).toBeUndefined();
+    expect(agents[0].afterToolCall).toBeUndefined();
+    expect(seen.map(context => context.messages.length)).toEqual([1, 3]);
+    expect(JSON.stringify(seen[1])).toContain("first private chat message");
+    expect(JSON.stringify(seen[1])).toContain("A natural language reply, not JSON.");
+    expect(seen[0].systemPrompt).not.toContain("Return one JSON object");
+    expect(events.filter(event => event.type === "text")).toEqual([
+      { type: "text", mode: "chat", text: "A natural language reply, not JSON." },
+      { type: "text", mode: "chat", text: "A natural language reply, not JSON." },
+    ]);
+  });
+
+  it("executes native tools in a continuing chat without creating a red-team blackboard", async () => {
+    const input = await chatRequest("Write and inspect a synthetic fixture");
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    let calls = 0;
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "chat-write", name: "write", arguments: { path: "chat-fixture.txt", content: "chat-only fixture" } }], "toolUse");
+      if (calls === 2) return message([{ type: "toolCall", id: "chat-read", name: "read", arguments: { path: "chat-fixture.txt" } }], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      expect(JSON.stringify(context.messages.at(-1))).toContain("chat-only fixture");
+      return message([{ type: "text", text: "The fixture is written and verified." }]);
+    }) }) });
+    expect(await session.send(input)).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(await readFile(join(input.workspace, "chat-fixture.txt"), "utf8")).toBe("chat-only fixture");
+    expect(events.filter(event => event.type === "tool_end").map(event => [event.mode, event.toolName])).toEqual([["chat", "write"], ["chat", "read"]]);
+    await expect(readFile(join(input.workspace, "state", "blackboard.md"))).rejects.toThrow();
+  });
+
+  it("never hands private chat history to the two-agent runner", async () => {
+    const input = await chatRequest();
+    const contexts: Context[] = [];
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream("PRIVATE_CHAT_REPLY", contexts) }) });
+    await session.send(input);
+    const redteam: Context[] = [];
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream('{"summary":"public board only"}', redteam) }) });
+    for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
+    expect(redteam.every(context => context.messages.length === 1)).toBe(true);
+    for (const privateText of [input.text, "PRIVATE_CHAT_REPLY"]) expect(JSON.stringify(redteam)).not.toContain(privateText);
+  });
+
+  it.each(["reset", "model", "workspace"])("starts a fresh transcript after %s changes", async kind => {
+    const input = await chatRequest();
+    const seen: Context[] = [];
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream("old private answer", seen) }) });
+    await session.send(input);
+    const next = { ...input, text: "new task" };
+    if (kind === "reset") session.reset();
+    if (kind === "model") next.model = { ...input.model, model: "different-model" };
+    if (kind === "workspace") next.workspace = (await chatRequest()).workspace;
+    await session.send(next);
+    expect(seen.map(context => context.messages.length)).toEqual([1, 1]);
+    expect(JSON.stringify(seen[1])).not.toContain(input.text);
+    expect(JSON.stringify(seen[1])).not.toContain("old private answer");
+  });
+
+  it("rejects pre-cancelled messages before model resolution", async () => {
+    const resolver = vi.fn();
+    const session = new ChatSession({ resolveModel: resolver });
+    await expect(session.send({ ...await chatRequest(), signal: AbortSignal.abort() })).rejects.toBeInstanceOf(RuntimeRunError);
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it.each(["abort", "reset", "timeout"])("propagates %s to the active Pi reply and permits a later fresh request", async kind => {
+    const input = await chatRequest();
+    const control = new AbortController();
+    input.signal = control.signal;
+    if (kind === "timeout") input.limits.stepTimeoutSeconds = 0.005;
+    let didAbort = false;
+    let calls = 0;
+    let session: ChatSession;
+    session = new ChatSession({ resolveModel: async () => ({ model, streamFn: (_model, _context, options) => {
+      if (++calls > 1) return stream("After cancellation")(_model, _context, options);
+      const events = new AssistantMessageEventStream();
+      options?.signal?.addEventListener("abort", () => {
+        didAbort = true;
+        events.push({ type: "error", reason: "aborted", error: message([], "aborted") });
+        events.end();
+      }, { once: true });
+      queueMicrotask(() => {
+        if (kind === "abort") control.abort();
+        if (kind === "reset") session.reset();
+      });
+      return events;
+    } }) });
+    const failure = await session.send(input).catch(error => error);
+    expect(failure).toBeInstanceOf(RuntimeRunError);
+    if (kind === "timeout") expect(failure.message).toContain("timed out");
+    expect(didAbort).toBe(true);
+    session.reset();
+    expect(await session.send({ ...input, signal: new AbortController().signal, limits: { ...input.limits, stepTimeoutSeconds: 60 } })).toEqual({ input: 13, output: 4, cost: 0.02 });
+  });
+
+  it("rejects simultaneous chat sends without injecting them into the active history", async () => {
+    const input = await chatRequest();
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const seen: Context[] = [];
+    const session = new ChatSession({ resolveModel: async () => { await waiting; return { model, streamFn: stream("done", seen) }; } });
+    const active = session.send(input);
+    await expect(session.send({ ...input, text: "MUST_NOT_ENTER_HISTORY" })).rejects.toThrow("already running");
+    release();
+    await active;
+    expect(JSON.stringify(seen)).not.toContain("MUST_NOT_ENTER_HISTORY");
+  });
+
+  it.each(["turns", "tokens", "cost"])("settles chat tool loops at the %s reply budget and keeps partial usage", async budget => {
+    const input = await chatRequest();
+    if (budget === "turns") input.limits.maxTurnsPerRun = 1;
+    if (budget === "tokens") input.limits.maxTokens = 15;
+    if (budget === "cost") input.limits.maxCost = 0.01;
+    await writeFile(join(input.workspace, "fixture.txt"), "fixture");
+    let calls = 0;
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return message([{ type: "toolCall", id: "chat-bounded-read", name: "read", arguments: { path: "fixture.txt" } }], "toolUse");
+    }) }) });
+    const error = await session.send(input).catch(error => error);
+    expect(error).toBeInstanceOf(RuntimeRunError);
+    expect(error.message).toContain("budget reached");
+    expect(error.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(calls).toBe(1);
+  });
+
+  it("redacts refreshed credentials across streaming chunks and user input", async () => {
+    const input = await chatRequest("Check credential-secret");
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    const secrets = ["credential-secret"];
+    const session = new ChatSession({ resolveModel: async () => ({ model, secrets, streamFn: (_model, context) => {
+      expect(JSON.stringify(context)).not.toContain("credential-secret");
+      secrets.push("refreshed-credential-secret");
+      const result = message([{ type: "text", text: "credential-secret refreshed-credential-secret" }]);
+      const output = new AssistantMessageEventStream();
+      queueMicrotask(() => {
+        output.push({ type: "start", partial: result });
+        for (const delta of ["credential-", "secret refreshed-cred", "ential-secret"]) output.push({ type: "text_delta", contentIndex: 0, delta, partial: result });
+        output.push({ type: "done", reason: "stop", message: result });
+        output.end();
+      });
+      return output;
+    } }) });
+    await session.send(input);
+    const rendered = events.filter(event => event.type === "text").map(event => event.text).join("");
+    expect(rendered).toBe("[MODEL_CREDENTIAL_REDACTED] [MODEL_CREDENTIAL_REDACTED]");
+  });
+
+  it("redacts explicit credential resolver failures and keeps provider-failure usage", async () => {
+    vi.stubEnv("CHAT_TEST_TOKEN", "chat-explicit-test-key");
+    const input = await chatRequest();
+    input.model.apiKeyEnv = "CHAT_TEST_TOKEN";
+    const broken = new ChatSession({ resolveModel: async () => { throw new Error("invalid chat-explicit-test-key"); } });
+    const resolutionError = await broken.send(input).catch(error => error);
+    expect(resolutionError.message).toBe("invalid [MODEL_CREDENTIAL_REDACTED]");
+    expect(resolutionError.usage).toEqual({ input: 0, output: 0, cost: 0 });
+    const failed = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(() => ({ ...message([], "error"), errorMessage: "Provider rejected chat-explicit-test-key" })) }) });
+    const providerError = await failed.send(input).catch(error => error);
+    expect(providerError.message).toBe("Provider rejected [MODEL_CREDENTIAL_REDACTED]");
+    expect(providerError.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
   });
 });

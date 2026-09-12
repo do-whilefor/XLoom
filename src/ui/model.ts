@@ -1,5 +1,10 @@
 import { stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { AgentHandoff, BoardSnapshot, LoopEvent, RuntimeEvent } from "../types.js";
+import type { AgentHandoff, BoardSnapshot, LoopEvent, RuntimeEvent, Usage } from "../types.js";
+import type { AuthInteraction } from "@earendil-works/pi-ai";
+
+export type ModelRole = "all" | "chat" | "decide" | "execute";
+export type SettingsCommand = "model" | "apikey" | "login" | "logout";
+export interface SessionInfo { mode: "chat" | "run"; busy: boolean; model: string; status?: string; usage?: Usage }
 
 export interface UiController {
   snapshot(): BoardSnapshot;
@@ -10,13 +15,27 @@ export interface UiController {
   hint(content: string): void;
   requestMetacog(): void;
   waitForIdle?(): Promise<void>;
+  chat?(text: string): Promise<void>;
+  runGoal?(goal: string): Promise<void>;
+  resetChat?(): void;
+  getSessionInfo?(): SessionInfo;
+  getModels?(): Promise<{ provider: string; model: string; name: string }[]>;
+  getProviders?(): Promise<{ id: string; name: string; authTypes: string[] }[]>;
+  selectModel?(provider: string, model: string, role?: ModelRole, signal?: AbortSignal): Promise<void>;
+  saveApiKey?(provider: string, key: string, signal?: AbortSignal): Promise<void>;
+  login?(provider: string, interaction: AuthInteraction): Promise<void>;
+  logout?(provider: string, signal?: AbortSignal): Promise<void>;
 }
 
 export const HELP = [
+  "普通输入：和模型聊天，可使用 read / write / edit / powershell；/new 清空聊天",
+  "/run 目标  新建双 Agent 任务（不读取聊天历史）",
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
   "/hint 内容  写入黑板    /meta  请求元认知    /board  查看黑板",
   "/help  帮助    /exit 或 /quit  退出",
-  "普通输入仅作为黑板 Hint；两个 Agent 不共享聊天历史。",
+  "/model [all|chat|decide|execute]  搜索切换模型；默认应用所有角色",
+  "/apikey [provider]  私密输入 API Key    /login [provider]  订阅登录    /logout [provider]  移除本地凭据",
+  "普通聊天与黑板隔离；补充任务信息请显式使用 /hint。设置期间 Esc 取消。",
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
@@ -44,9 +63,11 @@ export function fitLines(value: string, width: number): string[] {
   return wrapTextWithAnsi(clean, width).map((line) => truncateToWidth(line, width, ""));
 }
 
-export function statusLine(board: BoardSnapshot): string {
+export function statusLine(board: BoardSnapshot, session?: SessionInfo): string {
+  if (session?.mode === "chat") return `chat · ${session.status ?? (session.busy ? "running" : "idle")} · ${compact(session.model, 120)}` +
+    (session.usage ? ` · ${(session.usage.input + session.usage.output).toLocaleString("en-US")} tokens · $${session.usage.cost.toFixed(3)}` : "");
   const tokens = board.usage.input + board.usage.output;
-  return `${board.status} · r${board.revision} · step ${board.completedSteps}` +
+  return `${session ? "run · " : ""}${board.status} · r${board.revision} · step ${board.completedSteps}` +
     ` · ${tokens.toLocaleString("en-US")} tokens · $${board.usage.cost.toFixed(3)}` +
     (board.outcome ? ` · ${board.outcome}` : "");
 }
@@ -90,7 +111,7 @@ export class EventFeed {
   }
 
   runtime(event: RuntimeEvent): void {
-    const label = event.mode === "metacog" ? "Decide · Meta" : event.mode === "decide" ? "Decide" : "Execute";
+    const label = event.mode === "chat" ? "Assistant" : event.mode === "metacog" ? "Decide · Meta" : event.mode === "decide" ? "Decide" : "Execute";
     if (event.type === "text") {
       const last = this.entries.at(-1);
       if (last?.label === label && last.key === "stream") {
@@ -127,6 +148,14 @@ export interface CommandActions {
   start(): void;
   quit(): void;
   print(label: string, text: string): void;
+  chat?(text: string): void;
+  run?(goal: string): void;
+  settings?(command: SettingsCommand, argument: string): void;
+}
+
+/** Credential commands and accidental inline credentials never enter editor history. */
+export function recordCommandHistory(input: string): boolean {
+  return !/^\/(?:apikey|login)\b/i.test(input.trim());
 }
 
 /** Synchronous dispatch keeps input responsive while the loop runs. */
@@ -134,17 +163,38 @@ export function dispatchCommand(input: string, controller: UiController, actions
   const value = input.trim();
   if (!value) return;
   if (!value.startsWith("/")) {
-    controller.hint(value);
-    actions.print("You → Blackboard", value);
+    if (actions.chat && controller.chat) actions.chat(value);
+    else actions.print("xloom", "当前演示未连接聊天模型；使用 run 启动真实 TUI。任务补充请使用 /hint。");
     return;
   }
   const [command, ...rest] = value.split(/\s+/);
   const argument = value.slice(command!.length).trim();
-  if (rest.length && command !== "/hint") {
-    actions.print("xloom", `命令 ${command} 不接受参数。使用 /hint 写入补充信息。`);
+  if (rest.length && !["/hint", "/run", "/model", "/apikey", "/login", "/logout"].includes(command!)) {
+    actions.print("xloom", `命令 ${command} 不接受参数。`);
     return;
   }
   switch (command) {
+    case "/run":
+      if (!argument) actions.print("xloom", "用法：/run 目标和目标范围");
+      else if (actions.run && controller.runGoal) actions.run(argument);
+      else actions.print("xloom", "当前演示不支持新建真实任务。请使用 run 启动真实 TUI。");
+      break;
+    case "/new":
+      if (controller.resetChat) { controller.resetChat(); actions.print("xloom", "已清空普通聊天；任务黑板保留。"); }
+      else actions.print("xloom", "当前演示没有普通聊天会话。");
+      break;
+    case "/model":
+      if (argument && !["all", "chat", "decide", "execute"].includes(argument)) actions.print("xloom", "用法：/model [all|chat|decide|execute]");
+      else if (actions.settings) actions.settings("model", argument);
+      else actions.print("xloom", "当前模式不支持模型设置。");
+      break;
+    case "/apikey":
+    case "/login":
+    case "/logout":
+      if (rest.length > 1) actions.print("xloom", "只填写 provider；API Key 和登录码请在私密输入框中输入，不要放在命令里。");
+      else if (actions.settings) actions.settings(command.slice(1) as SettingsCommand, argument);
+      else actions.print("xloom", "当前模式不支持凭据设置。");
+      break;
     case "/start": actions.start(); break;
     case "/pause": controller.pause(); actions.print("xloom", "已请求暂停；正在取消当前运行。"); break;
     case "/stop": controller.stop(); actions.print("xloom", "已请求停止；黑板与证据保留。"); break;

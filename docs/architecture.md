@@ -1,8 +1,18 @@
 # MVP 架构与后续接口
 
+## 聊天与任务入口
+
+`AppController` 负责应用级模式、模型设置和当前任务指针。普通文字只交给独立 `ChatSession`，使用 Pi Agent 的持续消息历史与四工具，自然语言回复，不使用红队 JSON 契约。`/new`、切换模型或凭据会清空聊天；聊天历史只保存在当前进程内。
+
+`/run 目标` 创建 `.xloom/tasks/<id>` 下的新黑板，由原 `LoopController` 运行；不带入聊天、旧 Hint 或旧任务范围。`/start` 恢复当前选中任务。新任务不删除旧数据，工具 cwd 始终是用户项目目录。应用锁防止同一工作区并发开启聊天/任务应用；单个 App 中也不并发运行聊天、红队 Loop 与凭据变更。旧根黑板仍可恢复。
+
+SettingsService 只复用 Pi ModelRuntime 的本地目录、持久 API Key 和 OAuth/订阅登录。TUI 使用搜索式选择器和临时认证弹窗，Key、登录码与认证 URL 不进主 Feed 或输入历史。配置仅保存非秘密模型参数，凭据写进 Pi 原 auth.json。模型、Key、登录、退出操作支持取消信号；已经提交的凭据变更不能由取消自动回滚。
+
 ## 两个角色，三个运行模式
 
 `decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。运行时将 `metacog` 映射到 Decide 的模型，加载简短的复核指令。每次调用均创建新的 Pi Agent；没有共享 `messages`、session continuation 或让一个 Agent 总结另一方聊天的通路。
+
+三个红队运行模式现在都挂载 read / write / edit / powershell。Decide 可使用工具减少信息缺口，但结果仍受 Decision 契约限制；新增权威事实/证据由 Execute 提交，不能用 Decide 的私有工具历史作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，避免与另一个任务混淆。
 
 一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 完成一个 Step，提交证据/事实/线索 → Controller 归档证据并事务提交 → fresh Decide 重排下一步。达到触发条件时，使用 fresh Decide 进行元认知；提议完成时再独立复核，控制器检查最终状态所需证据关联。
 
@@ -17,6 +27,9 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 | 模块 | 当前职责 | 可替换方向 |
 | --- | --- | --- |
 | `types.ts` / `schema.ts` | 版本化配置、FGS、运行与结果契约 | 迁移器、更多有类型的证据/关系 |
+| `app.ts` / `workspace.ts` | 聊天/任务路由、任务指针、单工作区锁、非秘密模型设置 | 会话选择与任务管理，不共享历史 |
+| `runtime/chat.ts` | 独立普通聊天 Pi Agent、四工具、取消与用量 | 可选聊天持久化，不注入红队黑板 |
+| `runtime/settings.ts` | Pi 目录、持久凭据与 OAuth callbacks | 复用 Pi 新增的供应商登录能力 |
 | `loop/context.ts` | `ContextProjector`：角色视图、依赖保留、历史尾部与省略说明 | 按预算投影、更细粒度的任务上下文策略 |
 | `loop/policy.ts` | `LoopPolicy`：ready Step 选取、执行后的复核触发 | 调整排序与复核频率，不改变完成条件 |
 | `runtime/prompts.ts` | 短角色指令、输出协议、序列化公开视图及触发原因 | 契约版本演进 |
@@ -71,11 +84,11 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 使用 Pi 公开 ModelRuntime，不复制供应商实现或限制自定义 API 为三种。读取 Pi 用户目录的 auth.json、models.json 及缓存目录，由 Pi 处理已有 OAuth 登录刷新、环境/API Key 认证、供应商特有 headers 和流式请求。`models` CLI 仅列本地内置/缓存/自定义目录；运行时按需发现动态目录，遵守 PI_OFFLINE。模型身份与凭据不进入共享黑板提示词；执行期间刷新产生的凭据也加入日志/流式文本过滤。
 
-本层不会加载 Pi CLI 聊天、扩展、Skills、MCP 或额外工具。仅靠 JavaScript 扩展注册的第三方 provider 不在自动加载范围。兼容性随固定 Pi 依赖版本而定，真实账户与模型契约仍需实测。
+本层不会加载 Pi CLI 聊天、扩展、Skills、MCP 或额外工具。仅靠 JavaScript 扩展注册的第三方 provider 不在自动加载范围。兼容性随固定 Pi 依赖版本而定，真实账户与模型契约仍需实测。OpenCode Go 官方端点另合并 `x-opencode-session`，复用 Pi 会话 ID 或同一 resolver 的稳定备用 ID；不修改其他提供方、其他主机或 Pi 内层。
 
 ## 验证层次
 
-Schema / Store 测试覆盖字段与图一致性；Controller 测试用合成 Runner 验证调度、取消、预算和恢复；Context / Policy 测试覆盖依赖闭包、省略说明、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、工具数量、独立上下文、凭据过滤及 Windows 进程树终止；UI 测试使用可控终端检查布局、交接显示与生命周期；CLI 演示不访问真实目标。
+Schema / Store 测试覆盖字段与图一致性；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证调度、取消、预算和恢复；Context / Policy 测试覆盖依赖闭包、省略说明、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、聊天历史、各模式四工具、独立上下文、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
 
 外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
 

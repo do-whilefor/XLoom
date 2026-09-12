@@ -2,7 +2,7 @@
 
 基于 Pi 的 Windows 双 Agent 安全研究 Loop，当前为 **0.1 MVP**。
 
-两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划与审查，Execute 执行一个有界步骤；元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
+默认以普通聊天打开，模型可以使用四工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、工具核验与审查，Execute 执行一个有界步骤；元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。普通聊天不是第三个红队角色，聊天历史不会注入任务。
 
 ## 快速开始
 
@@ -16,23 +16,20 @@ npm run check
 # 不连接模型、不访问外部目标的合成闭环演示
 npm start -- demo --headless
 
-# 创建配置；用户输入的目标即授权，不增加二次授权确认
-npm start -- init --goal "验证我提供的测试站点的对象归属和租户隔离边界"
-# 编辑 xloom.json：目标、身份说明、业务上下文、模型和预算
-# 可复用 Pi 已有登录；也可使用供应商环境变量
-npm start -- models --provider anthropic
-$env:ANTHROPIC_API_KEY = "填写你的模型服务密钥"
-npm start -- doctor
-npm start
+# 打开普通聊天 TUI；首次自动生成不含凭据的 xloom.json
+npm start -- run
+# 在 TUI 中使用 /model 选择模型、/apikey 设置 Key 或 /login 登录
+# 普通文字聊天；/run 加实际目标启动双 Agent；/hint 补充任务信息
 ```
 
-TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提供完整配置样例；`init` 不会覆盖已有文件。运行时不会自动加载项目或用户目录中的 AGENTS.md、Skills、MCP、扩展或 Pi CLI 会话。
+打开 TUI 不会自动请求模型。`xloom.example.json` 提供配置样例；显式 `init --goal "目标"` 仍支持旧的预配置任务工作流，且不会覆盖已有文件。运行时不会自动加载项目或用户目录中的 AGENTS.md、Skills、MCP、扩展或 Pi CLI 会话。
 
 构建后也可使用 `node dist/cli.js`，或 `npm link` 后使用 `xloom`。
 
 ## 本版功能
 
-- Pi `0.84.4` 的真实 Agent 内核与四个原生工具工厂，Execute 仅有 `read / write / edit / powershell`；工具顺序执行。Decide / 元认知不挂载工具。
+- Pi `0.84.4` 的真实 Agent 内核与四个原生工具工厂，普通聊天、Decide、Execute 和元认知均只有 `read / write / edit / powershell`；工具顺序执行。
+- 普通聊天保留当前进程内的独立会话；`/new` 清空聊天，切换模型或凭据也会清空，避免把旧聊天转发到新端点。聊天不写入黑板，不持久化聊天记录。
 - 本地 Controller 串行调度；每次 Decide、每个 Execute Step、每次元认知都重新创建 Pi Agent，消息数组从空开始。
 - FGS 黑板：Fact / Goal / Step，附带 Finding / Evidence / Hint。控制器验证提案后统一提交，Agent 不直接写权威黑板。
 - 按角色投影黑板：Decide / 元认知查看目标、待办和未关闭线索；Execute 查看当前 Step 及相关依赖。共享的是任务事实与证据，不是双方聊天。
@@ -46,8 +43,15 @@ TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提�
 
 | 输入 | 行为 |
 | --- | --- |
-| `/start` | 启动或恢复，重新规划，不重放中断步骤 |
-| 普通文字、`/hint 文字` | 只写入黑板 Hint；下一个规划边界读取 |
+| 普通文字 | 普通聊天，可调用四工具；即使有已暂停任务，也不会自动作为 Hint |
+| `/run 目标` | 新建独立双 Agent 任务并开始执行；旧任务与证据保留，不带入聊天历史 |
+| `/start` | 恢复当前任务或启动 `init` 的显式目标，重新规划，不重放中断步骤 |
+| `/hint 文字` | 显式写入当前任务黑板；下一个规划边界读取 |
+| `/new` | 清空普通聊天上下文，不删除任务或证据 |
+| `/model [all\|chat\|decide\|execute]` | 搜索选择 Pi 模型；默认应用全部角色，可分别选择 |
+| `/apikey [provider]` | 打开遮蔽输入框，把 Key 保存到 Pi 凭据文件；不接受行内 Key |
+| `/login [provider]` | 使用 Pi 已支持的 OAuth／订阅登录流程；不支持登录的供应商使用 `/apikey` |
+| `/logout [provider]` | 确认后删除该供应商的 Pi 本地凭据；不撤销远端 Key，环境变量认证仍可能生效 |
 | `/meta` | 在安全的运行边界调用 Decide 元认知；空闲时启动 |
 | `/pause`、Esc | 取消当前调用并暂停，保留状态 |
 | `/stop` | 停止，保留状态和证据 |
@@ -66,11 +70,13 @@ TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提�
 
 界面只保留标题、会话区、输入框和状态栏，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
 
+设置在临时弹窗中完成，Key、登录码和认证 URL 不进入聊天 Feed 或输入历史。Esc 取消设置／登录；取消不能撤销已经保存的凭据。OAuth 链接在弹窗内提供，Ctrl+L 复制完整登录地址到浏览器，应用不自动打开外部窗口。模型或任务运行期间先 `/pause` 并等待取消完成，再改模式、模型或凭据；不并发运行聊天与红队任务。
+
 应用收到 Ctrl+V 后会直接插入剪贴板文本，不将换行解释为 Enter。终端自己的粘贴功能则需要支持并透传 bracketed paste（括号粘贴）协议；缺少该协议的旧控制台/PTY 通道可能把换行转成回车提交。此时应使用应用的 Ctrl+V，或换用支持该协议的终端。自动测试使用模拟剪贴板，不会读取或覆盖用户当前的系统剪贴板。
 
 Ctrl+C 不再用于复制或暂停。复制仍可拖选，或使用 Ctrl+Shift+C / Ctrl+Insert；暂停用 Esc 或 `/pause`。清空输入不会提交内容、修改黑板或中断运行，尚未完成的旧粘贴也不会重新填回被清空的输入框。
 
-底部状态栏示例 `idle · r0 · step 0 · 0 tokens · $0.000`：`idle` 表示空闲、尚未开始运行；`r0` 是黑板 revision（版本号）0，每次保存状态、Hint 或执行结果等都会递增，不是 Agent 轮数；`step 0` 表示已结算 0 个 Execute 步骤，没有 `/24` 上限。步骤计数包含已返回并提交结果的无进展/受阻步骤，不等于成功次数、模型调用次数或漏洞数。tokens 为累计模型用量，美元数为估算费用。
+底部显示当前 `chat` / `run` 模式、模型和状态。聊天显示独立聊天用量；红队模式的 `r0` 是黑板 revision（版本号）0，每次保存状态、Hint 或执行结果等都会递增，不是 Agent 轮数。`step 0` 表示已结算 0 个 Execute 步骤，没有 `/24` 上限。步骤计数包含已返回并提交结果的无进展/受阻步骤，不等于成功次数、模型调用次数或漏洞数。tokens 为模型用量，美元数为估算费用。
 
 ```powershell
 npm start -- run --headless
@@ -81,13 +87,15 @@ npm start -- models --provider anthropic
 npm start -- run --workspace "D:\Work\my-research"
 ```
 
-`status` / `report` 只读数据库，不调用模型、不启动 Loop。报告输出到标准输出。`--headless` 会立即启动，适合明确要运行的终端任务；非交互环境不会隐式启动 TUI 或模型。
+`status` / `report` 只读当前选中任务，不调用模型、不启动 Loop。报告输出到标准输出。`--headless` 会立即启动／恢复已配置任务，适合明确要运行的终端任务；没有实际 Goal 的聊天配置不能用它启动研究。非交互环境不会隐式启动 TUI 或模型。
 
 ## 模型选择与 Goal 完成
 
-两个角色可以配置不同的 provider / model；元认知始终复用 `models.decide`。模型目录、供应商适配和认证直接使用当前依赖 Pi `0.84.4` 的 `ModelRuntime`，不维护 xloom 模型白名单。`npm start -- models` 列出 Pi 本地内置、缓存及自定义目录，不调用模型；可用 `--provider` 筛选，再将输出的 provider / model 填入 `xloom.json` 的对应角色。默认模型不代表账户已获调用权限。
+`models.chat`、`models.decide`、`models.execute` 可以配置不同模型；旧配置没有 chat 时回退到 execute，元认知始终复用 decide。模型目录、供应商适配和认证直接使用当前依赖 Pi `0.84.4` 的 `ModelRuntime`，不维护 xloom 模型白名单。`npm start -- models` 列出 Pi 本地内置、缓存及自定义目录，不调用模型；TUI `/model` 也会保留当前配置的内联模型别名。默认模型不代表账户已获调用权限。
 
-复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 和已有 OAuth 登录/刷新。初次 OAuth 登录仍在 Pi 中完成，本版不另做登录 UI。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
+复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 与 OAuth 登录/刷新。TUI `/apikey` 和 `/login` 直接使用 Pi 的持久登录接口，只修改选中供应商的凭据，不把密钥写进 xloom.json。此文件与 Pi 共用，不是操作系统密钥库。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。成功设置同供应商凭据后会清除对应角色的显式环境变量覆盖，让新凭据生效。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
+
+OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `opencode-go` 的官方 HTTPS `/zen/go` 端点合并此请求头，值复用 Pi 当前会话 ID，不修改 Pi 内层。目录与服务端可能存在版本差：例如 `deepseek-flash` 是线上可用别名，可按用户端点配置 `api: anthropic-messages`、`baseUrl: https://opencode.ai/zen/go`；是否可用仍以真实请求与账户权限为准，不把它自动替换成另一个型号。
 
 在 Pi `models.json` 中已配置的模型，仅填 provider / model 即可。也保留以下单角色端点覆盖写法：
 
@@ -123,10 +131,17 @@ Token / 费用在模型回合结束后累计，正在进行的调用可能超出
 ```text
 workspace/
   xloom.json                      用户配置（默认不进 Git）
-  state/blackboard.md              自动生成的可读投影，不是输入或权威状态
+  state/blackboard.md              旧工作流的可读黑板投影
   .xloom/
+    session.lock                  单工作区应用锁
+    current-task.json             TUI 当前选中的任务 ID
+    tasks/<task-id>/              每次 /run 的独立任务
+      blackboard.sqlite           该任务权威状态与审计
+      blackboard.md               该任务可读投影
+      evidence/                   该任务归档证据
+      runs/                       该任务各次调用产物与私有日志
     controller.lock               防止同时运行两个本地控制器
-    blackboard.sqlite             权威状态、追加审计事件、运行生命周期
+    blackboard.sqlite             旧工作流的权威状态（不会自动删除）
     evidence/<sha256>.bin          原始证据的归档副本
     runs/<run-id>/
       input.json                  该次独立调用的输入
@@ -135,7 +150,7 @@ workspace/
       artifacts/                  Execute 写入的原始证据
 ```
 
-黑板投影中的 `tested` 使用 Jase 的 `target / finding_status / rating / evidence / next` 字段。已有非 xloom 生成的 `state/blackboard.md` 会被保留并提示，不会覆盖。
+黑板投影中的 `tested` 使用 Jase 的 `target / finding_status / rating / evidence / next` 字段。已有非 xloom 生成的 `state/blackboard.md` 会被保留并提示，不会覆盖。新 `/run` 只建立新任务目录，不复制旧任务范围、Hint 或聊天；四工具的工作目录仍是用户打开的项目，不会变成任务数据目录。重启默认进入聊天，可用 `/start` 恢复上次选中任务。
 
 证据单文件最多 10 MiB，单次结果最多 50 MiB；黑板保存归档引用、哈希和每份最多 4096 字节的原始片段，大正文留在文件中。角色视图将片段进一步限制到最多 2,000 个字符，并显式标注截断；片段不完整时应安排 Execute 进一步查阅，不应据此确认影响。
 
@@ -151,7 +166,7 @@ Decide / 元认知保留全部 Goal、待执行 Step、未关闭 Finding 和 Hin
 
 ## 明确的边界
 
-这是上下文隔离，不是操作系统沙箱。Execute 的原生文件和 PowerShell 工具拥有当前用户权限；没有权限 Hook、审批系统或额外隔离层。程序不向另一角色注入聊天历史，提示词也禁止读取其他 run 的聊天/日志，但不声称能用提示词阻止越权读文件。
+这是上下文隔离，不是操作系统沙箱。聊天、Decide 和 Execute 的原生文件和 PowerShell 工具拥有当前用户权限；没有权限 Hook、审批系统或额外隔离层。程序不向另一角色注入聊天历史，提示词也禁止读取其他 run 的聊天/日志和凭据，但不声称能用提示词阻止越权读文件。Decide 可直接用工具核验；需要纳入权威 Fact / Evidence 的新观察仍交给 Execute 按既有证据契约提交，避免绕过证据链。
 
 引用、文件哈希、JSON 校验只能保证结构和证据完整性，**不能独立证明请求确实发生或漏洞成立**。真实性、可复现性、实际影响和缺失输入的判断仍依赖模型对原始证据的审查及用户复核。`NEED_INPUT` 不能用一般停滞代替；预算/错误/空计划只进入操作暂停或错误状态。
 

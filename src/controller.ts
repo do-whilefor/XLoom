@@ -97,7 +97,7 @@ export class LoopController {
       let needsCompletionReview = false;
       let hintsChanged = false;
       try {
-        const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger,
+        const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
           signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
         request.context = this.projectContext(request);
         this.emit({ type: "handoff", handoff: { role: mode === "execute" ? "execute" : "decide", mode, runId, revision: snapshot.revision, stepId: claimedStep?.id, trigger } });

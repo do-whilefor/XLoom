@@ -1,8 +1,9 @@
 import chalk from "chalk";
 import { Editor, getKeybindings, isKeyRelease, isKeyRepeat, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
-import { compact, dispatchCommand, EventFeed, fitLines, plainText, statusLine, type UiController } from "./model.js";
+import { compact, dispatchCommand, EventFeed, fitLines, plainText, recordCommandHistory, statusLine, type UiController } from "./model.js";
 import { createSystemClipboard, type Clipboard } from "./clipboard.js";
+import { SettingsDialogs } from "./settings-dialog.js";
 
 export type { UiController } from "./model.js";
 
@@ -73,6 +74,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const feed = new EventFeed();
   let snapshot = controller.snapshot();
   let active: Promise<void> | undefined;
+  let setting: Promise<void> | undefined;
   let closing = false;
   let exitArmedAt: number | undefined;
   let draftGeneration = 0;
@@ -85,15 +87,28 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     feed.add(label, text, error);
     tui.requestRender();
   };
+  const dialogs = new SettingsDialogs(controller, tui, clipboard, print);
   const quit = (): void => {
     if (closing) return;
     closing = true;
+    dialogs.cancel();
     try { controller.stop(); }
     catch (error) { print("xloom", error instanceof Error ? error.message : String(error), true); }
     finally { resolveExit(); }
   };
+  const perform = (operation: () => Promise<void>): void => {
+    if (active || setting || controller.getSessionInfo?.().busy) throw new Error("当前操作仍在运行；请先 /pause，等待取消完成后再提交。");
+    const pending = operation();
+    active = pending.catch((error: unknown) => {
+      print("xloom", error instanceof Error ? error.message : String(error), true);
+    }).finally(() => {
+      active = undefined;
+      snapshot = controller.snapshot();
+      tui.requestRender();
+    });
+  };
   const start = (): void => {
-    if (active || closing) return;
+    if (active || closing || setting) return;
     exitArmedAt = undefined;
     print("xloom", "Loop 启动。Esc 暂停；/hint 可随时补充黑板。");
     active = Promise.resolve().then(() => closing ? undefined : controller.start()).catch((error: unknown) => {
@@ -124,6 +139,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     tui.requestRender();
   };
   function requestPaste(): void {
+    if (dialogs.isOpen) { dialogs.paste(); return; }
     if (closing || pastePending || tui.hasOverlay()) return;
     // Prevent an Enter racing a clipboard read from submitting an incomplete draft.
     editor.disableSubmit = true;
@@ -148,12 +164,21 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (closing) return;
     exitArmedAt = undefined;
     try {
-      dispatchCommand(text, controller, { start, quit, print });
-      editor.addToHistory(text);
+      dispatchCommand(text, controller, {
+        start, quit, print,
+        chat: value => perform(() => { print("You", value); return controller.chat!(value); }),
+        run: goal => perform(() => { print("You → Task", goal); return controller.runGoal!(goal); }),
+        settings: (command, argument) => {
+          if (active || setting || controller.getSessionInfo?.().busy) throw new Error("当前操作仍在运行，请先取消或 /pause 再修改设置。");
+          setting = dialogs.open(command, argument).finally(() => { setting = undefined; tui.requestRender(); });
+          void setting.catch(() => { print("xloom", "无法打开设置。", true); });
+        },
+      });
+      if (recordCommandHistory(text)) editor.addToHistory(text);
       editor.setText("");
       tui.scrollToBottom();
     } catch (error) {
-      editor.setText(text);
+      editor.setText(recordCommandHistory(text) ? text : "");
       print("xloom", error instanceof Error ? error.message : String(error), true);
     }
     tui.requestRender();
@@ -163,7 +188,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
-    { component: new StatusView(() => ` ${statusLine(snapshot)}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
+    { component: new StatusView(() => ` ${statusLine(snapshot, controller.getSessionInfo?.())}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
   ]));
   tui.setFocus(input);
 
@@ -232,7 +257,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const signalHandler = (): void => { quit(); };
   process.once("SIGTERM", signalHandler);
   process.once("SIGINT", signalHandler);
-  feed.add("xloom", snapshot.config.goal);
+  if (!controller.getSessionInfo || controller.getSessionInfo().mode === "run") feed.add("xloom", snapshot.config.goal);
   if (snapshot.reason && snapshot.status !== "idle") feed.add("恢复状态", snapshot.reason);
   try {
     tui.start();
@@ -240,10 +265,13 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     await exitRequested;
     // Keep the terminal alive until cancellation has finished, then restore it.
     if (active) await active;
+    if (setting) await setting;
     await controller.waitForIdle?.();
+    await dialogs.waitForIdle();
     await Promise.allSettled([...clipboardTasks]);
   } finally {
     closing = true;
+    dialogs.cancel();
     unsubscribe();
     removeInput();
     process.removeListener("SIGTERM", signalHandler);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Editor, TuiAltScreen, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
 import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import { ResponsiveEditor, runTui } from "../src/ui/index.js";
-import { dispatchCommand, EventFeed, fitLines, formatBoard, plainText, statusLine, type UiController } from "../src/ui/model.js";
+import { dispatchCommand, EventFeed, fitLines, formatBoard, plainText, recordCommandHistory, statusLine, type UiController } from "../src/ui/model.js";
 
 function snapshot(): BoardSnapshot {
   return {
@@ -133,13 +133,47 @@ describe("TUI formatting", () => {
 });
 
 describe("TUI command routing", () => {
-  it("sends plain input and /hint to blackboard, never to an agent session", () => {
+  it("sends only explicit /hint to blackboard and ordinary input to isolated chat", () => {
     const { controller } = fakeController();
-    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
-    dispatchCommand("账户 A 属于组织甲", controller, actions);
+    const chat = vi.fn(async () => {});
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), chat: vi.fn() };
+    dispatchCommand("账户 A 属于组织甲", { ...controller, chat }, actions);
     dispatchCommand("/hint  账户 B\n属于组织乙", controller, actions);
-    expect(controller.hint.mock.calls).toEqual([["账户 A 属于组织甲"], ["账户 B\n属于组织乙"]]);
+    expect(controller.hint.mock.calls).toEqual([["账户 B\n属于组织乙"]]);
+    expect(actions.chat).toHaveBeenCalledWith("账户 A 属于组织甲");
     expect(controller.start).not.toHaveBeenCalled();
+  });
+
+  it("does not turn demo chat into implicit blackboard hints", () => {
+    const { controller } = fakeController();
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), chat: vi.fn() };
+    dispatchCommand("ordinary text", controller, actions);
+    expect(actions.chat).not.toHaveBeenCalled();
+    expect(controller.hint).not.toHaveBeenCalled();
+    expect(actions.print).toHaveBeenCalledWith("xloom", expect.stringContaining("未连接聊天模型"));
+  });
+
+  it("routes task/chat resets and settings without sending arguments to an Agent", () => {
+    const { controller } = fakeController();
+    const resetChat = vi.fn();
+    const app = { ...controller, runGoal: vi.fn(async () => {}), resetChat };
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), run: vi.fn(), settings: vi.fn() };
+    for (const command of ["/run https://localhost 对比账户", "/new", "/model", "/model decide", "/apikey", "/apikey opencode-go", "/login anthropic", "/logout anthropic"]) dispatchCommand(command, app, actions);
+    expect(actions.run).toHaveBeenCalledWith("https://localhost 对比账户");
+    expect(resetChat).toHaveBeenCalledOnce();
+    expect(actions.settings.mock.calls).toEqual([["model", ""], ["model", "decide"], ["apikey", ""], ["apikey", "opencode-go"], ["login", "anthropic"], ["logout", "anthropic"]]);
+    expect(controller.hint).not.toHaveBeenCalled();
+  });
+
+  it("rejects inline secrets and invalid model roles without echoing or recording secrets", () => {
+    const { controller } = fakeController();
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), settings: vi.fn() };
+    for (const command of ["/apikey anthropic PRIVATE_KEY", "/login anthropic PRIVATE_CODE", "/model invalid", "/run"]) dispatchCommand(command, controller, actions);
+    expect(actions.settings).not.toHaveBeenCalled();
+    expect(JSON.stringify(actions.print.mock.calls)).not.toMatch(/PRIVATE_KEY|PRIVATE_CODE/);
+    expect(recordCommandHistory("/apikey anthropic PRIVATE_KEY")).toBe(false);
+    expect(recordCommandHistory(" /login anthropic")).toBe(false);
+    expect(recordCommandHistory("/model decide")).toBe(true);
   });
 
   it("routes all lifecycle and inspection commands", () => {
@@ -213,7 +247,7 @@ describe("TUI lifecycle", () => {
     const session = runTui(controller, terminal);
     terminal.submit("/start");
     await vi.waitFor(() => expect(controller.start).toHaveBeenCalledOnce());
-    terminal.submit("补充身份对比");
+    terminal.submit("/hint 补充身份对比");
     expect(controller.hint).toHaveBeenCalledWith("补充身份对比");
     terminal.input("\x03");
     expect(controller.pause).not.toHaveBeenCalled();
