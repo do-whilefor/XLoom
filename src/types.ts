@@ -33,7 +33,7 @@ export interface ProjectConfig {
   scope: string;
   context: string;
   models: { decide: ModelConfig; execute: ModelConfig; chat?: ModelConfig };
-  limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number; stepTimeoutSeconds: number; metacogEvery: number };
+  limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number | null; stepTimeoutSeconds: number; metacogEvery: number };
 }
 export interface Goal { id: string; description: string; parentId: string | null; status: "active" | "satisfied" | "abandoned"; factIds: string[] }
 export interface Fact { id: string; description: string; stepId: string | null; evidenceIds: string[]; supersedes?: string }

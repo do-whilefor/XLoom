@@ -20,7 +20,7 @@ describe("project configuration", () => {
   it("uses user input as scope without extra authorization settings", () => {
     const config = defaultConfig("测试本地 Web 靶场");
     expect(config.scope).toBe(config.goal);
-    expect(config.limits).toEqual({ maxNoProgress: 3, maxMinutes: null, maxTokens: null, maxCost: null, maxTurnsPerRun: 12, stepTimeoutSeconds: 180, metacogEvery: 3 });
+    expect(config.limits).toEqual({ maxNoProgress: 3, maxMinutes: null, maxTokens: null, maxCost: null, maxTurnsPerRun: null, stepTimeoutSeconds: 180, metacogEvery: 3 });
     expect(config.models.decide.model).toBe("claude-sonnet-4-6");
     expect(config.models.decide).not.toHaveProperty("apiKeyEnv");
     expect(config.models.execute).not.toBe(config.models.decide);
@@ -48,10 +48,20 @@ describe("project configuration", () => {
     expect(parsed.limits).toMatchObject({ maxTokens: 50000, maxCost: 2, maxMinutes: 15 });
   });
 
-  it.each(["maxTokens", "maxCost", "maxMinutes"])("supports opting out of %s, not invalid numerical budgets", (field) => {
+  it.each(["maxTokens", "maxCost", "maxMinutes", "maxTurnsPerRun"])("supports opting out of %s, not invalid numerical budgets", (field) => {
     const config = defaultConfig("target");
     for (const value of [null, 5]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(true);
     for (const value of [0, -1, NaN, Infinity]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(false);
+  });
+
+  it("loads omitted or null turn caps as unlimited while preserving explicit legacy caps", () => {
+    const config = defaultConfig("target");
+    const file = configPath();
+    for (const limits of [{}, { maxTurnsPerRun: null, maxTokens: null }, { maxTurnsPerRun: 12 }]) {
+      writeFileSync(file, JSON.stringify({ ...config, limits }));
+      expect(loadConfig(file).limits.maxTurnsPerRun).toBe(limits.maxTurnsPerRun ?? null);
+      expect(loadConfig(file).limits.maxTokens).toBeNull();
+    }
   });
 
   it.each(["google-generative-ai", "bedrock-converse-stream", "azure-openai-responses", "future-pi-api"])("delegates API support for %s to Pi instead of a local allowlist", (api) => {

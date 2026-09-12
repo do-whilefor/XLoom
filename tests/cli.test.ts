@@ -88,6 +88,7 @@ describe("command-line entry points", () => {
     expect(config.scope).toBe(config.goal);
     expect(config.limits).not.toHaveProperty("maxSteps");
     expect(config.limits.maxTokens).toBeNull();
+    expect(config.limits.maxTurnsPerRun).toBeNull();
     const original = readFileSync(file);
     const repeated = cli(["init", "--goal", "Must not replace the original goal"], root);
     expect(repeated.status).toBe(1);

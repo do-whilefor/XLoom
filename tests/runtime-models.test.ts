@@ -100,7 +100,8 @@ describe("Pi model resolution", () => {
     const requestSignal = signal();
     const stream = await result.streamFn(result.model, { messages: [] }, { signal: requestSignal, reasoning: "high" });
     expect(await stream.result()).toEqual(message);
-    expect(providerStream).toHaveBeenCalledWith(expect.objectContaining({ id: selection.model }), { messages: [] }, expect.objectContaining({ apiKey: "after-rotation", signal: requestSignal, reasoning: "high", maxTokens: result.model.maxTokens }));
+    expect(providerStream).toHaveBeenCalledWith(expect.objectContaining({ id: selection.model }), { messages: [] }, expect.objectContaining({ apiKey: "after-rotation", signal: requestSignal, reasoning: "high" }));
+    expect(providerStream.mock.calls[0]?.[2]).not.toHaveProperty("maxTokens");
     expect(result.secrets).toBe(liveSecrets);
     expect(liveSecrets).toEqual(expect.arrayContaining(["before-rotation", "after-rotation", "scoped-secret"]));
     expect(liveSecrets).not.toContain("region-not-a-secret");
@@ -113,6 +114,19 @@ describe("Pi model resolution", () => {
     const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(fakeStream);
     result.streamFn(result.model, { messages: [] });
     expect(stream).toHaveBeenCalledWith(result.model, { messages: [] }, expect.objectContaining({ apiKey: undefined }));
+  });
+
+  it.each([undefined, 2048])("only sends an application output-token override when explicitly set (%s)", async maxTokens => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "synthetic-key");
+    const result = await resolveModel({ ...selection, ...(maxTokens === undefined ? {} : { maxTokens }) }, signal());
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    result.streamFn(result.model, { messages: [] });
+    if (maxTokens === undefined) expect(stream.mock.calls[0]?.[2]).not.toHaveProperty("maxTokens");
+    else expect(stream.mock.calls[0]?.[2]?.maxTokens).toBe(maxTokens);
+    // Pi's finite capacity metadata is still valid; unlimited task usage does
+    // not imply a physically infinite model context or response.
+    expect(result.model.maxTokens).toBeGreaterThan(0);
+    expect(result.model.contextWindow).toBeGreaterThan(0);
   });
 
   it("adds the active Agent session header to OpenCode Go while preserving unrelated headers", async () => {

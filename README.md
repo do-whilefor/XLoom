@@ -128,8 +128,6 @@ OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `ope
   "api": "openai-completions",
   "baseUrl": "https://your-endpoint.example/v1",
   "apiKeyEnv": "XLOOM_MODEL_KEY",
-  "contextWindow": 128000,
-  "maxTokens": 8192,
   "thinking": "off"
 }
 ```
@@ -140,13 +138,15 @@ OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `ope
 
 `maxNoProgress: 3` 是元认知触发阈值，不再强制暂停；有新执行计划就继续。LLM 无法给出可执行步骤或有效结论时，保留未完成状态并暂停；确实缺少必要输入时为 `NEED_INPUT`，补充后可恢复。没有隐藏的 24 步停机点。
 
-新配置的累计 `maxMinutes`、`maxTokens`、`maxCost` 默认 `null`（不设累计上限）；可由用户显式设正数作为资源暂停条件，不是 Goal 完成条件。不设预算的长任务会持续消耗模型用量，用户可随时 `/pause` 或 `/stop`。每次独立运行仍默认最多 12 个模型回合、180 秒，用于识别失控的单次工具循环或超时，触发时保留故障/中断状态，绝不伪造完成。
+新配置的 `maxTurnsPerRun`、累计 `maxMinutes`、`maxTokens`、`maxCost` 默认 `null`。应用默认不按回合数或累计输入/输出 token 停机；token 计量照常保留，用户可随时 `/pause` 或 `/stop`。这些字段仍可显式设正数作为资源暂停条件，不是 Goal 完成条件。独立的 `stepTimeoutSeconds` 仍默认 180 秒，适用于整次运行，超时仍会取消并保留中断状态。
 
-12 回合包含最后一个无工具的结果整理回合：最多前 11 回合使用工具，第 12 回合读取本次已有结果并提交最终回复或 JSON。每回合可以调用多个工具，失败调用同样消耗回合。提前正常回答就直接结束；`maxTurnsPerRun: 1` 表示只有无工具回复。Token、费用或时间已耗尽及用户取消时不追加收尾请求。收尾仍调用工具、格式不正确或供应商报错时保留失败状态，错误说明包含实际触发的上限和值。
+`maxTurnsPerRun: null` 不预留“最后一轮”，工具始终可用，直到模型正常提交、用户取消、发生错误或触及其他显式限制。仅在用户配置有限回合数时，最后一轮才禁用工具并整理已有结果；例如显式设 12 时为最多 11 个工具回合加 1 个收尾回合，设 1 时只有无工具回复。每回合可以调用多个工具，失败调用同样计数。提前正常回答直接结束，已触及资源限制或取消时不追加收尾请求。
+
+累计 token 预算与单次响应容量是不同概念。未指定 `models.<role>.maxTokens` 时，xloom 不向 Pi 额外传入输出 token 上限；单次响应容量与上下文窗口由 Pi 模型元数据及供应商 API 决定，不代表无限长度。模型配置里的 `contextWindow` / `maxTokens` 是可选覆盖，需填写端点真实支持的值。未知自定义模型仍需要 Pi 的有限容量元数据，不能用 `Infinity` 冒充无限上下文。
 
 PowerShell 的 `command` 是 JSON 解码一次后的原始源码，反斜线不能转义 PowerShell 引号；例如单个双引号可写成单引号字符串 `'"'`。工具先用同一 PowerShell 解释器做 AST 语法检查，错误返回源码行列及修复提示，通过后原样执行一次。预检和执行共用工具超时，临时源码在结束时清理；程序不自动改写命令或重放副作用。外部脚本及动态生成的源码仍可能在运行时出错。
 
-兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略，不必调大；旧文件中已有的时间、Token、费用上限仍按显式配置保留。如不需要资源暂停，将这三个字段设为 `null` 或删除并重启；任务证据、步骤计数不会清空。
+兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略；旧文件中已有的回合、累计时间、Token、费用上限仍按显式配置保留。取消回合和累计 token 上限可将 `limits.maxTurnsPerRun`、`limits.maxTokens` 设为 `null` 或删除并重启；去掉各角色的 `models.<role>.maxTokens` 则取消应用输出覆盖。任务证据和 token 计量不会清空。
 
 Token / 费用在模型回合结束后累计，正在进行的调用可能超出软上限；超时由取消信号处理。自定义端点价格可能未知，费用上限不能视为准确账单硬限额。暂停时间不计入运行时间；进程被强制结束时，最后一次调用的 token 统计可能不完整。
 
@@ -200,6 +200,6 @@ Decide / 元认知保留全部 Goal、待执行 Step、未关闭 Finding 和 Hin
 
 ## 扩展位置
 
-详见 [架构说明](docs/architecture.md)。MVP 扩展边界是 `ContextProjector`（角色视图）、`LoopPolicy`（选步及执行后复核）、`AgentRunner`（执行后端）、结果契约、黑板 Store 和 `LoopEvent`（含角色交接）。通过构造参数和 TypeScript 接口扩展，不增加运行时插件系统。运行适配层通过 Pi 的下一回合上下文接口预留无工具收尾回合，通过 PowerShell operations 接口做语法预检，不修改 Pi 依赖源码。
+详见 [架构说明](docs/architecture.md)。MVP 扩展边界是 `ContextProjector`（角色视图）、`LoopPolicy`（选步及执行后复核）、`AgentRunner`（执行后端）、结果契约、黑板 Store 和 `LoopEvent`（含角色交接）。通过构造参数和 TypeScript 接口扩展，不增加运行时插件系统。运行适配层仅在显式配置有限回合数时通过 Pi 的下一回合上下文接口预留收尾回合，通过 PowerShell operations 接口做语法预检，不修改 Pi 依赖源码。
 
 设计参考 Cairn / Cairn_Y 的黑板协作与 FGS；Jase 体现在外层的边界建模、改变变量、影响闭环与完成复核，独立实现，不复用 Cairn 的 AGPL 源码。Pi 依赖使用 MIT 许可证；保留各依赖原有许可。

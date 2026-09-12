@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { executeTools } from "../src/runtime/index.js";
 
 const directories: string[] = [];
-afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => {
+  // Windows can briefly retain a terminated shell's working-directory handle.
+  for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
 async function workspace() { const directory = await mkdtemp(join(tmpdir(), "xloom-windows-test-")); directories.push(directory); return directory; }
 
 describe.runIf(process.platform === "win32")("Windows Pi built-ins", () => {

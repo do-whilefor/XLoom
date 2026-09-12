@@ -142,7 +142,10 @@ export const resolveModel: ModelResolver = async (config, signal) => {
         ...Object.fromEntries(Object.entries(options?.headers ?? {}).filter(([key]) => key.toLowerCase() !== "x-opencode-session")),
         "x-opencode-session": options?.sessionId || fallbackSessionId,
       } } : {}),
-      apiKey: explicitKey, maxTokens: model.maxTokens,
+      // Leave per-response sizing to Pi/provider defaults unless the user
+      // explicitly configures an override. Model capacity is not a run budget.
+      apiKey: explicitKey,
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     }),
   };
 };

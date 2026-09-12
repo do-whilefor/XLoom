@@ -14,7 +14,7 @@
     "maxMinutes": null,
     "maxTokens": null,
     "maxCost": null,
-    "maxTurnsPerRun": 12,
+    "maxTurnsPerRun": null,
     "stepTimeoutSeconds": 180,
     "metacogEvery": 3
   }

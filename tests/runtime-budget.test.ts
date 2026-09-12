@@ -86,6 +86,29 @@ async function harness(kind: Kind, response: (context: Context, call: number) =>
 }
 
 describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn in %s", kind => {
+  it("keeps tools available beyond the old twelve-turn cap with unlimited input/output usage", async () => {
+    const test = await harness(kind, (context, call) => {
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.systemPrompt).not.toContain("final allowed model turn");
+      return call <= 14 ? write(`fixture-${call}.txt`, fixture, `write-${call}`) : answer(kind);
+    }, { maxTurnsPerRun: null, maxTokens: null, maxCost: null });
+    test.input.snapshot.usage = { input: 1_000_000_000, output: 1_000_000_000, cost: 0 };
+    expect(await test.run()).toEqual({ input: once.input * 15, output: once.output * 15, cost: expect.closeTo(once.cost * 15) });
+    expect(test.seen).toHaveLength(15);
+    expect(test.events.filter(event => event.type === "tool_end" && !event.isError)).toHaveLength(14);
+    expect(await readFile(join(test.workspace, "fixture-14.txt"), "utf8")).toBe(fixture);
+  });
+
+  it("still honors cancellation when the model-turn cap is disabled", async () => {
+    const test = await harness(kind, () => write(), { maxTurnsPerRun: null, maxTokens: null });
+    test.input.onEvent = event => { if (event.type === "tool_end") test.abort.abort(); };
+    const error = await test.run().catch(error => error);
+    expect(error).toBeInstanceOf(RuntimeRunError);
+    expect(error.usage).toEqual(once);
+    expect(test.seen).toHaveLength(1);
+    expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe(fixture);
+  });
+
   it("preserves the first tool result and performs one write before the final tool-free turn", async () => {
     const test = await harness(kind, (context, call) => {
       if (call === 1) {
