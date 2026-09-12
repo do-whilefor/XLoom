@@ -23,7 +23,8 @@ const help = `xloom — local two-agent research loop (Windows MVP)
 
 Options: --workspace PATH  --config PATH  --help
 TUI: plain text chats; /run GOAL starts a separate two-agent task
-     /model /apikey /login /logout /new /start /pause /stop /hint /meta /board /details /help /exit
+     /model /apikey /new /start /pause /stop /hint /meta /board /help /exit
+     Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
 Chat and both agents have read/write/edit/powershell with the current user's OS permissions.
 `;
@@ -80,7 +81,7 @@ async function main(): Promise<void> {
     if (!existsSync(configPath)) saveNewConfig(configPath, defaultConfig(CHAT_GOAL));
     const [{ AppController }, { startTui }] = await Promise.all([import("./app.js"), import("./ui/index.js")]);
     const app = new AppController(workspace, configPath, loadConfig(configPath));
-    try { await startTui(app); } finally { await app.close(); }
+    try { await startTui(app, workspace); } finally { await app.close(); }
     return;
   }
   const config = demo ? defaultConfig("DEMO: validate only the offline synthetic protocol fixture", "Local synthetic fixture; no external target") : loadConfig(configPath);
@@ -115,7 +116,7 @@ async function main(): Promise<void> {
       if (board.status === "error") process.exitCode = 1;
     } else {
       const { startTui } = await import("./ui/index.js");
-      await startTui(controller);
+      await startTui(controller, workspace);
     }
   } finally { await controller.waitForIdle(); store.close(); sessionLock.close(); }
 }

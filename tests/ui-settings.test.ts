@@ -4,7 +4,7 @@ import { visibleWidth, type Editor, type Terminal, type TuiAltScreen } from "@ea
 import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import { runTui } from "../src/ui/index.js";
 import { EventFeed, plainText, statusLine, type UiController } from "../src/ui/model.js";
-import { SettingsPanel } from "../src/ui/settings-dialog.js";
+import { SettingsDialogs, SettingsPanel } from "../src/ui/settings-dialog.js";
 
 class MemoryTerminal implements Terminal {
   output = "";
@@ -75,6 +75,22 @@ function launch(options: { now?: () => number; restoredReason?: string } = {}) {
   return { ...controls, board, info, controller, terminal, clipboard, submit, close, settled, session, listeners };
 }
 
+// Auth remains a supported Pi adapter. Test its dialog directly now that the
+// TUI no longer exposes login/logout slash commands.
+function launchAuthDialogs() {
+  const app = launch();
+  const print = vi.fn();
+  const dialogs = new SettingsDialogs(app.controller, app.tui, app.clipboard, print);
+  const pending = new Set<Promise<void>>();
+  const openAuth = (command: "login" | "logout", provider: string): void => {
+    const task = dialogs.open(command, provider);
+    pending.add(task);
+    void task.finally(() => pending.delete(task));
+  };
+  cleanup.push(async () => { dialogs.cancel(); await Promise.allSettled([...pending]); await dialogs.waitForIdle(); });
+  return { ...app, openAuth, print };
+}
+
 describe("ordinary chat and dual-agent task UI", () => {
   it("renders live tokens in a narrow footer and replaces pending tokens with committed usage once", async () => {
     const app = launch();
@@ -141,6 +157,29 @@ describe("ordinary chat and dual-agent task UI", () => {
     expect(plainText(app.terminal.output)).toContain("/pause");
   });
 
+  it("keeps removed commands from opening settings, changing details, or exiting", async () => {
+    const app = launch();
+    for (const listener of app.listeners) {
+      listener({ type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "removed", text: "REMOVED_COMMAND_THOUGHT" } });
+      listener({ type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "removed", text: "" } });
+    }
+    for (const command of ["/login", "/logout", "/login anthropic", "/logout anthropic", "/details", "/quit"]) app.submit(command);
+    await app.settled();
+    app.tui.renderNow(true);
+    expect(app.controller.getProviders).not.toHaveBeenCalled();
+    expect(app.controller.login).not.toHaveBeenCalled();
+    expect(app.controller.logout).not.toHaveBeenCalled();
+    expect(app.controller.chat).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.tui.hasOverlay()).toBe(false);
+    expect(app.terminal.stopped).toBe(false);
+    expect(plainText(app.terminal.output)).not.toContain("REMOVED_COMMAND_THOUGHT");
+    app.terminal.input("\x0f");
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toContain("REMOVED_COMMAND_THOUGHT");
+  });
+
   it("aborts active chat on exit and waits until cancellation settles", async () => {
     const app = launch();
     let release!: () => void;
@@ -200,18 +239,60 @@ describe("Claude-style response timeline", () => {
     emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "click", text: "CLICK_THOUGHT" } });
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "click", text: "" } });
     screen(app);
-    // Empty chat: fixed title is row 1; the first thought header is row 2.
-    app.terminal.input("\x1b[<0;5;2M");
-    app.terminal.input("\x1b[<0;5;2m");
+    // Empty chat: the three-line header precedes the first thought on row 4.
+    app.terminal.input("\x1b[<0;5;4M");
+    app.terminal.input("\x1b[<0;5;4m");
     expect(screen(app)).toContain("CLICK_THOUGHT");
     expect(app.clipboard.writeText).not.toHaveBeenCalled();
     expect(app.controller.chat).not.toHaveBeenCalled();
     // Moving while held is selection, not a toggle.
-    app.terminal.input("\x1b[<0;5;2M");
-    app.terminal.input("\x1b[<32;10;2M");
-    app.terminal.input("\x1b[<0;10;2m");
+    app.terminal.input("\x1b[<0;5;4M");
+    app.terminal.input("\x1b[<32;10;4M");
+    app.terminal.input("\x1b[<0;10;4m");
     await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
     expect(screen(app)).toContain("CLICK_THOUGHT");
+  });
+
+  it("collapses only the clicked expanded group and preserves drag-copy on its tool output", async () => {
+    const app = launch();
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "body", text: "FIRST_THOUGHT" } });
+    emit(app, { type: "runtime", runtime: { type: "tool_start", mode: "chat", toolName: "read", toolCallId: "body-read", text: '{"path":"fixture.txt"}' } });
+    emit(app, { type: "runtime", runtime: { type: "tool_end", mode: "chat", toolName: "read", toolCallId: "body-read", text: "TOOL_RESULT\nSECOND_OUTPUT_LINE" } });
+    emit(app, { type: "runtime", runtime: { type: "text", mode: "chat", text: "First result." } });
+    emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "other", text: "OTHER_THOUGHT" } });
+    emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "other", text: "" } });
+    app.terminal.input("\x0f");
+    const renderedRow = (text: string): number => {
+      screen(app);
+      // Inspect physical row writes, so headers, wrapping and scrolling are reflected.
+      const rows = [...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)];
+      const row = rows.find(match => plainText(match[2]!).includes(text));
+      expect(row, `Rendered row containing ${text}`).toBeDefined();
+      return Number(row![1]);
+    };
+    const click = (text: string): void => {
+      const row = renderedRow(text);
+      app.terminal.input(`\x1b[<0;6;${row}M`);
+      app.terminal.input(`\x1b[<0;6;${row}m`);
+    };
+    const row = renderedRow("TOOL_RESULT");
+    app.terminal.input(`\x1b[<0;5;${row}M`);
+    app.terminal.input(`\x1b[<32;14;${row}M`);
+    app.terminal.input(`\x1b[<0;14;${row}m`);
+    await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
+    expect(app.clipboard.writeText.mock.calls[0]?.[0]).toContain("TOOL_RESUL");
+    expect(app.clipboard.writeText.mock.calls[0]?.[0]).not.toContain("xloom-thinking:");
+    expect(screen(app)).toContain("SECOND_OUTPUT_LINE");
+    app.clipboard.writeText.mockClear();
+    click("SECOND_OUTPUT_LINE");
+    expect(screen(app)).not.toContain("FIRST_THOUGHT");
+    expect(screen(app)).not.toContain("SECOND_OUTPUT_LINE");
+    expect(screen(app)).toContain("OTHER_THOUGHT");
+    click("OTHER_THOUGHT");
+    expect(screen(app)).not.toContain("OTHER_THOUGHT");
+    expect(app.clipboard.writeText).not.toHaveBeenCalled();
+    expect(app.controller.chat).not.toHaveBeenCalled();
+    expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
   it("renders provider timeouts as failures, not successful or fabricated thinking", async () => {
@@ -254,7 +335,7 @@ describe("Claude-style response timeline", () => {
     screen(app);
     expect(app.tui.viewportTop).toBeGreaterThan(0);
     // Header + 40 one-line notices + blank group separator + thought header.
-    const row = 43 - app.tui.viewportTop;
+    const row = 45 - app.tui.viewportTop;
     app.terminal.input(`\x1b[<0;5;${row}M`);
     app.terminal.input(`\x1b[<0;5;${row}m`);
     expect(screen(app)).toContain("SCROLLED_THOUGHT");
@@ -384,7 +465,7 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it.each(["apikey", "model", "logout"] as const)("passes cancellation through an in-flight %s commit", async command => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let signal: AbortSignal | undefined;
     const wait = (value?: AbortSignal): Promise<void> => {
       signal = value;
@@ -393,7 +474,8 @@ describe("Pi-style model and credential dialogs", () => {
     app.controller.saveApiKey.mockImplementation((_provider, _key, value) => wait(value));
     app.controller.selectModel.mockImplementation((_provider, _model, _role, value) => wait(value));
     app.controller.logout.mockImplementation((_provider, value) => wait(value));
-    app.submit(command === "model" ? "/model" : `/${command} anthropic`);
+    if (command === "logout") app.openAuth("logout", "anthropic");
+    else app.submit(command === "model" ? "/model" : "/apikey anthropic");
     await app.settled();
     if (command === "apikey") app.terminal.input("PRIVATE_KEY_IN_FLIGHT");
     app.terminal.input("\r");
@@ -403,7 +485,8 @@ describe("Pi-style model and credential dialogs", () => {
     expect(signal?.aborted).toBe(true);
     app.tui.renderNow(true);
     expect(plainText(app.terminal.output)).not.toContain("PRIVATE_KEY_IN_FLIGHT");
-    expect(plainText(app.terminal.output)).toContain("设置已取消");
+    if (command === "logout") expect(app.print).toHaveBeenCalledWith("xloom", "设置已取消。", false);
+    else expect(plainText(app.terminal.output)).toContain("设置已取消");
   });
 
   it("does not save an old draft when Enter races a private clipboard read", async () => {
@@ -426,10 +509,10 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("honors cancellation while a provider catalog is loading before starting login", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let resolve!: (providers: Awaited<ReturnType<typeof app.controller.getProviders>>) => void;
     app.controller.getProviders.mockImplementation(() => new Promise(done => { resolve = done; }));
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     app.terminal.input("\x1b");
     resolve([{ id: "anthropic", name: "Anthropic", authTypes: ["oauth"] }]);
     await vi.waitFor(() => expect(app.tui.hasOverlay()).toBe(false));
@@ -437,13 +520,13 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("uses Pi auth interactions and hides login codes from feed/history", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let code = "";
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       interaction.notify({ type: "auth_url", url: "https://auth.example/login?state=PRIVATE_AUTH_STATE", instructions: "请打开此登录链接" });
       code = await interaction.prompt({ type: "manual_code", message: "登录码" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("PRIVATE_LOGIN_CODE");
     app.tui.renderNow(true);
@@ -459,7 +542,7 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it.each(["auth_url", "device_code", "info"] as const)("copies exact raw %s login URLs without wrapping or terminal-control content", async type => {
-    const app = launch();
+    const app = launchAuthDialogs();
     const url = `https://auth.example/login?state=${"a".repeat(180)}&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback`;
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       interaction.notify(type === "auth_url" ? { type, url, instructions: "Browser opened automatically\x1b[2J" }
@@ -467,7 +550,7 @@ describe("Pi-style model and credential dialogs", () => {
           : { type, message: "Login", links: [{ url, label: "Browser" }] });
       await interaction.prompt({ type: "manual_code", message: "Paste code" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.tui.renderNow(true);
     expect(plainText(app.terminal.output)).toContain("本界面不自动打开浏览器");
@@ -479,12 +562,12 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it.each(["javascript:alert(1)", "https://auth.example/?state=secret\x1b[2J", "https://auth.example/\nsecret"])("does not copy an unsafe or control-bearing auth URL %j", async url => {
-    const app = launch();
+    const app = launchAuthDialogs();
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       interaction.notify({ type: "auth_url", url });
       await interaction.prompt({ type: "manual_code", message: "Code" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("\x0c");
     await app.settled();
@@ -493,22 +576,22 @@ describe("Pi-style model and credential dialogs", () => {
     expect(plainText(app.terminal.output)).not.toContain("Ctrl+L");
   });
 
-  it("filters /login providers to OAuth and rejects API-only providers", async () => {
-    const app = launch();
-    app.submit("/login opencode-go");
+  it("filters auth providers to OAuth and rejects API-only providers", async () => {
+    const app = launchAuthDialogs();
+    app.openAuth("login", "opencode-go");
     await vi.waitFor(() => expect(app.tui.hasOverlay()).toBe(false));
     expect(app.controller.login).not.toHaveBeenCalled();
     app.tui.renderNow(true);
-    expect(plainText(app.terminal.output)).toContain("不支持此认证方式");
+    expect(app.print).toHaveBeenCalledWith("xloom", expect.stringContaining("不支持此认证方式"), true);
   });
 
   it("allows an empty OAuth text prompt for the default GitHub Copilot domain", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let domain: string | undefined;
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       domain = await interaction.prompt({ type: "text", message: "GitHub Enterprise URL/domain (blank for github.com)" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("\r");
     await vi.waitFor(() => expect(app.tui.hasOverlay()).toBe(false));
@@ -516,12 +599,12 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("shows non-secret OAuth text only in the current dialog, never in chat/history", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let domain = "";
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       domain = await interaction.prompt({ type: "text", message: "GitHub Enterprise URL/domain (blank for github.com)" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("github.example.test");
     app.tui.renderNow(true);
@@ -538,12 +621,12 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it.each(["secret", "manual_code"] as const)("continues to require non-empty, masked OAuth %s input", async type => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let entered: string | undefined;
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       entered = await interaction.prompt({ type, message: "Enter credential" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("\r");
     await app.settled();
@@ -558,7 +641,7 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("supports Pi login option selectors and keeps device-code notifications transient", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let selected = "";
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       interaction.notify({ type: "device_code", userCode: "DEVICE-CODE", verificationUri: "https://auth.example/device" });
@@ -566,7 +649,7 @@ describe("Pi-style model and credential dialogs", () => {
         { id: "personal", label: "Personal" }, { id: "business", label: "Business" },
       ] });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await app.settled();
     app.terminal.input("\x1b[B");
     app.terminal.input("\r");
@@ -578,27 +661,30 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("propagates Escape cancellation to the OAuth flow", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     let signal: AbortSignal | undefined;
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       signal = interaction.signal;
       await interaction.prompt({ type: "secret", message: "Enter secret" });
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await vi.waitFor(() => expect(signal).toBeDefined());
     app.terminal.input("\x1b");
     await vi.waitFor(() => expect(app.tui.hasOverlay()).toBe(false));
     expect(signal?.aborted).toBe(true);
   });
 
-  it("aborts pending login during terminal exit and restores terminal", async () => {
+  it("aborts pending API key save during terminal exit and restores terminal", async () => {
     const app = launch();
     let signal: AbortSignal | undefined;
-    app.controller.login.mockImplementation(async (_provider, interaction) => {
-      signal = interaction.signal;
-      await interaction.prompt({ type: "manual_code", message: "Paste code" });
+    app.controller.saveApiKey.mockImplementation(async (_provider, _key, operationSignal) => {
+      signal = operationSignal;
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
     });
-    app.submit("/login anthropic");
+    app.submit("/apikey anthropic");
+    await app.settled();
+    app.terminal.input("PRIVATE_PENDING_KEY");
+    app.terminal.input("\r");
     await vi.waitFor(() => expect(signal).toBeDefined());
     process.emit("SIGTERM");
     await app.session;
@@ -607,14 +693,14 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("handles callback-cancelled auth prompts without cancelling the whole flow", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     const promptAbort = new AbortController();
     let signal: AbortSignal | undefined;
     app.controller.login.mockImplementation(async (_provider, interaction) => {
       signal = interaction.signal;
       await interaction.prompt({ type: "manual_code", message: "Code", signal: promptAbort.signal }).catch(() => {});
     });
-    app.submit("/login anthropic");
+    app.openAuth("login", "anthropic");
     await vi.waitFor(() => expect(signal).toBeDefined());
     promptAbort.abort();
     await vi.waitFor(() => expect(app.tui.hasOverlay()).toBe(false));
@@ -622,9 +708,9 @@ describe("Pi-style model and credential dialogs", () => {
   });
 
   it("requires confirmation for logout and keeps provider error details private", async () => {
-    const app = launch();
+    const app = launchAuthDialogs();
     app.controller.logout.mockRejectedValue(new Error("PRIVATE_PROVIDER_ERROR"));
-    app.submit("/logout anthropic");
+    app.openAuth("logout", "anthropic");
     await app.settled();
     expect(app.controller.logout).not.toHaveBeenCalled();
     app.terminal.input("\r");

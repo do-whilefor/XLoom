@@ -5,7 +5,7 @@ import { retainToolOutput } from "./tool-output.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
-export interface SessionInfo { mode: "chat" | "run"; busy: boolean; model: string; status?: string; usage?: Usage }
+export interface SessionInfo { mode: "chat" | "run"; busy: boolean; model: string; status?: string; usage?: Usage; workspace?: string; contextWindow?: number; authLabel?: string; modelName?: string }
 
 export interface UiController {
   snapshot(): BoardSnapshot;
@@ -33,14 +33,14 @@ export const HELP = [
   "/run 目标  新建双 Agent 任务（不读取聊天历史）",
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
   "/hint 内容  写入黑板    /meta  请求元认知    /board  查看黑板",
-  "/help  帮助    /exit 或 /quit  退出",
+  "/help  帮助    /exit  退出",
   "/model [all|chat|decide|execute]  搜索切换模型；默认应用所有角色",
-  "/apikey [provider]  私密输入 API Key    /login [provider]  订阅登录    /logout [provider]  移除本地凭据",
+  "/apikey [provider]  私密输入 API Key",
   "普通聊天与黑板隔离；补充任务信息请显式使用 /hint。设置期间 Esc 取消。",
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
   "输入 / 显示命令候选；↑/↓ 选择，Tab / Enter 补全，再按 Enter 执行；Esc 关闭候选",
-  "/details 或 Ctrl+O 展开 / 收起工具详情和协议输出；默认只显示工具摘要与已提交结果",
-  "点击活动摘要展开思考和工具详情；Ctrl+T 切换最近一组（思考内容需模型返回）",
+  "Ctrl+O 展开 / 收起工具详情和协议输出；默认只显示工具摘要与已提交结果",
+  "点击活动摘要展开思考和工具详情，再点击摘要或展开内容收起；Ctrl+T 切换最近一组（思考内容需模型返回）",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
   "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
@@ -108,6 +108,7 @@ export interface FeedEntry {
   workStatus?: "running" | "done" | "error" | "paused" | "stopped";
   tokens?: number;
   messageId?: string;
+  final?: boolean;
 }
 
 export function formatRunError(error: unknown): string {
@@ -195,8 +196,15 @@ export class EventFeed {
     this.add("xloom", text, error);
   }
 
-  result(mode: Mode, summary: string, outcome?: string): void {
-    this.add(roleLabel(mode), `${outcome ? `${outcome}\n\n` : ""}${summary}`);
+  result(mode: Mode | "chat", summary: string, outcome?: string, final = false): void {
+    this.endThinking();
+    if (!final) {
+      this.add(roleLabel(mode), `${outcome ? `${outcome}\n\n` : ""}${summary}`);
+      return;
+    }
+    this.breakStream();
+    // A terminal report is the answer, not a bounded tool/protocol preview.
+    this.append({ kind: "message", label: roleLabel(mode), text: plainText(summary), final: true });
   }
 
   handoff(event: AgentHandoff): void {
@@ -299,7 +307,6 @@ export interface CommandActions {
   chat?(text: string): void;
   run?(goal: string): void;
   settings?(command: SettingsCommand, argument: string): void;
-  details?(): void;
 }
 
 /** Credential commands and accidental inline credentials never enter editor history. */
@@ -318,7 +325,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
   }
   const [command, ...rest] = value.split(/\s+/);
   const argument = value.slice(command!.length).trim();
-  if (rest.length && !["/hint", "/run", "/model", "/apikey", "/login", "/logout"].includes(command!)) {
+  if (rest.length && !["/hint", "/run", "/model", "/apikey"].includes(command!)) {
     actions.print("xloom", `命令 ${command} 不接受参数。`);
     return;
   }
@@ -338,9 +345,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else actions.print("xloom", "当前模式不支持模型设置。");
       break;
     case "/apikey":
-    case "/login":
-    case "/logout":
-      if (rest.length > 1) actions.print("xloom", "只填写 provider；API Key 和登录码请在私密输入框中输入，不要放在命令里。");
+      if (rest.length > 1) actions.print("xloom", "只填写 provider；API Key 请在私密输入框中输入，不要放在命令里。");
       else if (actions.settings) actions.settings(command.slice(1) as SettingsCommand, argument);
       else actions.print("xloom", "当前模式不支持凭据设置。");
       break;
@@ -353,10 +358,8 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else { controller.hint(argument); actions.print("You → Blackboard", argument); }
       break;
     case "/board": actions.print("Blackboard", formatBoard(controller.snapshot())); break;
-    case "/details": actions.details?.(); break;
     case "/help": actions.print("xloom", HELP); break;
-    case "/exit":
-    case "/quit": actions.quit(); break;
+    case "/exit": actions.quit(); break;
     default: actions.print("xloom", `未知命令 ${compact(command ?? "")}。使用 /help 查看命令。`);
   }
 }

@@ -11,8 +11,6 @@ export const COMMANDS = [
   { name: "/run", argumentHint: "<目标>", description: "启动独立的双 Agent 任务" },
   { name: "/model", argumentHint: "[角色]", description: "选择聊天或 Agent 使用的模型" },
   { name: "/apikey", argumentHint: "[供应商]", description: "在私密输入框中设置 API Key" },
-  { name: "/login", argumentHint: "[供应商]", description: "登录 Pi 支持的供应商" },
-  { name: "/logout", argumentHint: "[供应商]", description: "移除供应商的本地凭据" },
   { name: "/new", description: "清空普通聊天，保留任务黑板" },
   { name: "/start", description: "开始或恢复当前任务" },
   { name: "/pause", description: "暂停当前运行" },
@@ -20,10 +18,8 @@ export const COMMANDS = [
   { name: "/hint", argumentHint: "<信息>", description: "向任务黑板补充信息" },
   { name: "/meta", description: "请求 Decide 进行元认知复核" },
   { name: "/board", description: "查看当前任务黑板" },
-  { name: "/details", description: "展开或收起工具详情" },
   { name: "/help", description: "查看命令与快捷键" },
   { name: "/exit", description: "退出 xloom" },
-  { name: "/quit", description: "退出 xloom（/exit 的别名）" },
 ] as const satisfies readonly CommandDefinition[];
 
 const MODEL_ROLES = [

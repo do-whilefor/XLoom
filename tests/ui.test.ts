@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Editor, TuiAltScreen, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
 import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import { ResponsiveEditor, runTui } from "../src/ui/index.js";
-import { dispatchCommand, EventFeed, fitLines, formatBoard, formatRunError, plainText, recordCommandHistory, statusLine, type UiController } from "../src/ui/model.js";
+import { dispatchCommand, EventFeed, fitLines, formatBoard, formatRunError, HELP, plainText, recordCommandHistory, statusLine, type UiController } from "../src/ui/model.js";
 
 function snapshot(): BoardSnapshot {
   return {
@@ -163,6 +163,21 @@ describe("TUI formatting", () => {
     expect(feed.entries.map(entry => entry.kind)).toEqual(["protocol", "message", "protocol", "message", "message"]);
     expect(feed.entries[1]!.text).toBe("已提交下一步");
     expect(feed.entries[3]!.text).toContain("NEED_INPUT");
+  });
+
+  it("keeps a complete terminal report after checkpoints and before the unfinished work footer", () => {
+    const feed = new EventFeed();
+    feed.beginWork();
+    feed.result("execute", "阶段证据已提交");
+    feed.runtime({ type: "thinking_start", mode: "execute", blockId: "interrupted", text: "" });
+    const report = `**任务未完成**\n\n已确认第一项结果。\n\n${"保留原始证据与待验证条件。\n".repeat(1000)}\n第二项尚未完成；可用 /start 继续。\x1b[2J`;
+    feed.result("execute", report, undefined, true);
+    feed.finishWork("paused");
+    expect(feed.entries[0]).not.toHaveProperty("final");
+    expect(feed.entries.at(-2)).toMatchObject({ kind: "message", final: true, text: plainText(report) });
+    expect(feed.entries.at(-2)!.text.length).toBeGreaterThan(9000);
+    expect(feed.entries.at(-1)).toMatchObject({ kind: "work", workStatus: "paused" });
+    expect(feed.entries.find(entry => entry.kind === "thinking")!.endedAt).toBeTypeOf("number");
   });
 
   it("keeps editor CJK and IME focus safe on narrow terminals", () => {
@@ -390,10 +405,10 @@ describe("TUI command routing", () => {
     const resetChat = vi.fn();
     const app = { ...controller, runGoal: vi.fn(async () => {}), resetChat };
     const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), run: vi.fn(), settings: vi.fn() };
-    for (const command of ["/run https://localhost 对比账户", "/new", "/model", "/model decide", "/apikey", "/apikey opencode-go", "/login anthropic", "/logout anthropic"]) dispatchCommand(command, app, actions);
+    for (const command of ["/run https://localhost 对比账户", "/new", "/model", "/model decide", "/apikey", "/apikey opencode-go"]) dispatchCommand(command, app, actions);
     expect(actions.run).toHaveBeenCalledWith("https://localhost 对比账户");
     expect(resetChat).toHaveBeenCalledOnce();
-    expect(actions.settings.mock.calls).toEqual([["model", ""], ["model", "decide"], ["apikey", ""], ["apikey", "opencode-go"], ["login", "anthropic"], ["logout", "anthropic"]]);
+    expect(actions.settings.mock.calls).toEqual([["model", ""], ["model", "decide"], ["apikey", ""], ["apikey", "opencode-go"]]);
     expect(controller.hint).not.toHaveBeenCalled();
   });
 
@@ -410,15 +425,28 @@ describe("TUI command routing", () => {
 
   it("routes all lifecycle and inspection commands", () => {
     const { controller } = fakeController();
-    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), details: vi.fn() };
-    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/details", "/help", "/quit", "/exit"]) dispatchCommand(command, controller, actions);
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
+    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/help", "/exit"]) dispatchCommand(command, controller, actions);
     expect(actions.start).toHaveBeenCalledOnce();
     expect(controller.pause).toHaveBeenCalledOnce();
     expect(controller.stop).toHaveBeenCalledOnce();
     expect(controller.requestMetacog).toHaveBeenCalledOnce();
-    expect(actions.quit).toHaveBeenCalledTimes(2);
-    expect(actions.details).toHaveBeenCalledOnce();
+    expect(actions.quit).toHaveBeenCalledOnce();
     expect(actions.print.mock.calls.some(([label]) => label === "Blackboard")).toBe(true);
+  });
+
+  it.each(["/login", "/logout", "/details", "/quit"])("rejects removed command %s without side effects", command => {
+    const { controller } = fakeController();
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), settings: vi.fn(), chat: vi.fn() };
+    dispatchCommand(command, controller, actions);
+    dispatchCommand(`${command} anthropic`, controller, actions);
+    expect(actions.settings).not.toHaveBeenCalled();
+    expect(actions.quit).not.toHaveBeenCalled();
+    expect(actions.chat).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
+    expect(actions.print).toHaveBeenCalledWith("xloom", expect.stringContaining(`未知命令 ${command}`));
+    expect(HELP).not.toContain(command);
+    expect(HELP).toContain("Ctrl+O");
   });
 
   it("does not silently treat unknown commands as agent instructions", () => {
@@ -465,7 +493,7 @@ describe("TUI lifecycle", () => {
     const session = runTui(controller, terminal);
     terminal.submit("/start");
     terminal.submit("/start");
-    terminal.submit("/quit");
+    terminal.submit("/exit");
     await session;
     expect(controller.start).not.toHaveBeenCalled();
     expect(controller.stop).toHaveBeenCalledOnce();
@@ -505,10 +533,10 @@ describe("TUI lifecycle", () => {
     terminal.input("\x1b");
     expect(controller.pause).toHaveBeenCalledOnce();
     terminal.submit("/board");
-    terminal.submit("/quit");
+    terminal.submit("/exit");
     await session;
     expect(terminal.stopped).toBe(true);
-    expect(plainText(terminal.output)).toContain("xloom");
+    expect(plainText(terminal.output)).toContain("Xloom");
     expect(listeners.size).toBe(0);
   });
 });
