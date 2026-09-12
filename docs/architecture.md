@@ -6,6 +6,8 @@
 
 一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 完成一个 Step，提交证据/事实/线索 → Controller 归档证据并事务提交 → fresh Decide 重排下一步。达到触发条件时，使用 fresh Decide 进行元认知；提议完成时再独立复核，控制器检查最终状态所需证据关联。
 
+Pi 内层负责一次 Agent 调用中的模型响应、四工具调用与继续执行，本版不修改它。xloom 外层只负责在独立调用之间组织黑板、选步、触发复核和判定是否接受完成提议。没有第三个审查 Agent，也没有两个共享会话的持久进程。
+
 Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可执行的新计划便继续。根 Goal 必须由 metacog 在同一次结果中标记 satisfied 并给出最终结论，引用支持全局完成判断的事实；正常 Decide 的根 Goal 更新或完成提议只触发独立复核，不提前关闭根目标。复核期间有新 Hint，则再次使用新黑板复核。
 
 角色提示词保持短小。JSON 协议是控制器的数据接口描述，不把 Jase 全套文档灌进系统提示词。工作区文件与目标内容都是数据，不是可信指令。
@@ -15,16 +17,30 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 | 模块 | 当前职责 | 可替换方向 |
 | --- | --- | --- |
 | `types.ts` / `schema.ts` | 版本化配置、FGS、运行与结果契约 | 迁移器、更多有类型的证据/关系 |
-| `runtime/prompts.ts` | 黑板投影及短角色指令 | 基于目标的上下文切片、压缩策略 |
+| `loop/context.ts` | `ContextProjector`：角色视图、依赖保留、历史尾部与省略说明 | 按预算投影、更细粒度的任务上下文策略 |
+| `loop/policy.ts` | `LoopPolicy`：ready Step 选取、执行后的复核触发 | 调整排序与复核频率，不改变完成条件 |
+| `runtime/prompts.ts` | 短角色指令、输出协议、序列化公开视图及触发原因 | 契约版本演进 |
 | `runtime/pi-runner.ts` | fresh Pi Agent、四工具、事件/usage/取消 | 不改变 `AgentRunner` 的其他执行后端 |
 | `runtime/models.ts` | Pi ModelRuntime 模型目录、认证和流式适配 | 随 Pi 升级扩展供应商，不维护独立模型名单 |
 | `store.ts` | SQLite 权威状态、关联检查、归档与可读投影 | 存储迁移、证据分层或远程存储 |
-| `controller.ts` | 串行调度、预算、元认知触发、生命周期 | 调度策略、更多触发器；不增加 Agent 角色 |
-| `ui/` | LoopEvent → TUI；用户输入 → Hint/操作命令 | 其他终端或展示层 |
+| `controller.ts` | 串行调度、预算、调用策略/投影、生命周期与完成复核不变量 | 构造参数注入策略；不增加 Agent 角色 |
+| `ui/` | LoopEvent → TUI（含角色交接）；用户输入 → Hint/操作命令 | 其他终端或展示层 |
 | `report.ts` | 已存状态的 Markdown 输出 | 报告模板与人工审阅流程 |
 | `demo.ts` | 明确标注的离线协议 fixture | 端到端回归基准 |
 
 当前不引入通用插件/Hook 框架；这些文件和 TypeScript 接口就是 MVP 的扩展接缝。
+
+## 角色视图与外层复核
+
+默认 `ContextProjector` 显式选取字段，不序列化模型配置、凭据、Step 的运行锁字段、Evidence 的 runId 或任何聊天历史。Decide / 元认知始终保留全部 Goal、ready/claimed Step、非 closed Finding 和全部 Hint；无关历史只取最近 8 个已结算 Step、12 个 Fact、8 个 closed Finding、8 份 Evidence。Execute 主要保留当前 Step、祖先 Goal 和直接相关 Finding。
+
+两种视图都补齐已选 Fact 的证据及双向 supersedes 链，避免只看到旧事实。已选记录的历史 Step 来源以 `stepOrigins` 提供，不递归带入全部历史计划。必需依赖不受历史尾部数量限制；单份证据片段最多 2,000 字符，截断有标记。`projection` 明确提供省略数量、不可用引用和阅读提示；缺失内容不是负面证据，关键细节不足时安排 Execute 查阅当前任务黑板或原始证据，不读取另一调用的聊天。投影不改写持久黑板，也不是硬 Token 预算或知识库。
+
+失败 Step 可带公开 `recovery`，只提供历史产物目录和 `evidenceStatus: unverified`，不暴露聊天日志入口。新 Decide 可将检查该目录作为新 Step；恢复引用本身不能充当证据。这样既保留写入后失败的检查路径，也不自动重放旧操作。
+
+默认 `LoopPolicy` 按优先级降序、ID 顺序选择 ready Step。执行结果提交后，按受阻 → 新增/更新技术命中证据 → 新事实修正 → 停滞 → 周期复核的优先顺序选择触发原因，交给 fresh Decide 元认知；普通执行结果则进入 fresh Decide 规划。策略只调度，不能直接评级、关闭 Goal 或伪造完成。
+
+手动 `/meta`、新 Hint、空计划和完成前复核由 Controller 保留为流程不变量。`LoopController` 第三个可选参数接收 `policy` 与 `projectContext`；默认行为无需配置。`handoff` 事件携带两个角色之一、运行模式、黑板版本、Step 和触发原因，供 TUI / headless 显示；触发原因也写入 `run_started` 审计。TUI 不增加常驻介绍或底部帮助行。
 
 ## 黑板不变量
 
@@ -59,6 +75,8 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 ## 验证层次
 
-Schema / Store 测试覆盖字段与图一致性；Controller 测试用合成 Runner 验证调度、取消、预算和恢复；Runtime 测试覆盖真实 Pi API、工具数量、独立上下文、凭据过滤及 Windows 进程树终止；UI 测试使用可控终端检查布局与生命周期；CLI 演示不访问真实目标。
+Schema / Store 测试覆盖字段与图一致性；Controller 测试用合成 Runner 验证调度、取消、预算和恢复；Context / Policy 测试覆盖依赖闭包、省略说明、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、工具数量、独立上下文、凭据过滤及 Windows 进程树终止；UI 测试使用可控终端检查布局、交接显示与生命周期；CLI 演示不访问真实目标。
 
-下一阶段应优先补真实模型契约成功率、针对自有测试环境的动态端到端验收、长黑板投影策略和真实终端人工体验。只有这一步完成，才适合评价红队任务成功率，而不只评价软件能否走通 Loop。
+外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
+
+下一阶段应优先补真实模型契约成功率、针对自有测试环境的动态端到端验收、大型活动黑板的预算控制和真实终端人工体验。只有这一步完成，才适合评价红队任务成功率，而不只评价软件能否走通 Loop。

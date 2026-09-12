@@ -1,5 +1,5 @@
 import { stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { BoardSnapshot, LoopEvent, RuntimeEvent } from "../types.js";
+import type { AgentHandoff, BoardSnapshot, LoopEvent, RuntimeEvent } from "../types.js";
 
 export interface UiController {
   snapshot(): BoardSnapshot;
@@ -81,6 +81,12 @@ export class EventFeed {
   add(label: string, text: string, error = false): void {
     this.entries.push({ label, text: plainText(text).slice(0, 9000), error });
     this.trim();
+  }
+
+  handoff(event: AgentHandoff): void {
+    this.breakStream();
+    const label = event.mode === "metacog" ? "Decide · Meta" : event.role === "execute" ? "Execute" : "Decide";
+    this.add(label, `r${event.revision} · ${event.trigger.kind}${event.stepId ? ` · ${event.stepId}` : ""}\n${event.trigger.reason}`);
   }
 
   runtime(event: RuntimeEvent): void {

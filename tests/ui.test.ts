@@ -54,6 +54,20 @@ class MemoryTerminal implements Terminal {
 }
 
 describe("TUI formatting", () => {
+  it("renders agent handoffs without treating metacognition as a third role", () => {
+    const feed = new EventFeed();
+    for (const mode of ["decide", "execute", "metacog"] as const) feed.handoff({
+      role: mode === "execute" ? "execute" : "decide", mode, runId: "run-private-id", revision: 3,
+      stepId: mode === "execute" ? "S1" : undefined,
+      trigger: { kind: "planned", reason: "Inspect the committed blackboard\x1b[2J" },
+    });
+    expect(feed.entries.map(entry => entry.label)).toEqual(["Decide", "Execute", "Decide · Meta"]);
+    expect(feed.entries[1]?.text).toContain("S1");
+    expect(feed.entries[0]?.text).toContain("r3 · planned");
+    expect(JSON.stringify(feed.entries)).not.toContain("run-private-id");
+    expect(feed.entries.every(entry => !entry.text.includes("\x1b"))).toBe(true);
+  });
+
   it.each([0, 1, 2, 4, 12, 30, 80])("fits Chinese, emoji and long tokens into %i columns", (width) => {
     const lines = fitLines("双 Agent 元认知 🧪 · token_abcdefghijklmnopqrstuvwxyz\n第二行", width);
     expect(lines.length).toBeGreaterThan(0);

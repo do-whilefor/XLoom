@@ -99,6 +99,10 @@ async function main(): Promise<void> {
       process.on("SIGTERM", interrupt);
       const unsubscribe = controller.subscribe(event => {
         if (event.type === "state" && event.snapshot) process.stdout.write(`[${event.snapshot.status}] ${event.snapshot.reason}\n`);
+        else if (event.type === "handoff" && event.handoff) {
+          const { role, mode, revision, trigger } = event.handoff;
+          process.stdout.write(`[${mode === "metacog" ? "Decide · Meta" : role === "execute" ? "Execute" : "Decide"}] r${revision} · ${trigger.kind}\n`);
+        }
         else if (event.type === "notice" && event.message) process.stdout.write(`${event.message}\n`);
         else if (event.runtime && event.runtime.type !== "text" && event.runtime.type !== "tool_update") process.stdout.write(`[${event.runtime.mode}] ${event.runtime.type}${event.runtime.toolName ? ` ${event.runtime.toolName}` : ""}\n`);
       });

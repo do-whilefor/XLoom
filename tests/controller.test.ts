@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
-import { LoopController } from "../src/controller.js";
+import { LoopController, type LoopControllerOptions } from "../src/controller.js";
+import { projectContext } from "../src/loop/context.js";
+import { defaultLoopPolicy } from "../src/loop/policy.js";
 import { projectConfigSchema } from "../src/schema.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent, ProjectConfig, RunRequest, RunResult, Usage } from "../src/types.js";
@@ -18,7 +20,7 @@ const plan = (description = "Compare synthetic fixture identities"): Decision =>
   steps: [{ goalId: "G0", from: [], description, successSignal: "Fixture artifact saved", evidencePlan: "Save synthetic response fixture", priority: 50 }],
 });
 
-function setup(handler: (request: RunRequest) => Promise<RunResult> | RunResult, limits: Partial<ProjectConfig["limits"]> & { maxSteps?: number } = {}) {
+function setup(handler: (request: RunRequest) => Promise<RunResult> | RunResult, limits: Partial<ProjectConfig["limits"]> & { maxSteps?: number } = {}, options: LoopControllerOptions = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "xloom-controller-test-"));
   roots.push(root);
   const defaults = defaultConfig("Exercise local loop protocol with synthetic fixtures only");
@@ -31,7 +33,7 @@ function setup(handler: (request: RunRequest) => Promise<RunResult> | RunResult,
     if (requests.length > 100) throw new Error("Synthetic test exceeded its expected run count");
     return handler(request);
   });
-  const controller = new LoopController(store, { run });
+  const controller = new LoopController(store, { run }, options);
   controllers.push(controller);
   const events: LoopEvent[] = [];
   controller.subscribe((event) => { events.push(event); });
@@ -76,6 +78,72 @@ afterEach(async () => {
 });
 
 describe("LoopController synthetic protocol flow", () => {
+  it("hands off exactly two logical roles with public context and persists each outer trigger", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      return result(request.snapshot.completedSteps ? closure(request) : plan());
+    });
+    await test.controller.start();
+    const handoffs = test.events.flatMap(event => event.handoff ? [event.handoff] : []);
+    expect(handoffs.map(event => event.role)).toEqual(["decide", "execute", "decide", "decide"]);
+    expect(handoffs.map(event => event.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+    expect(handoffs.map(event => event.trigger.kind)).toEqual(["start", "planned", "execution_result", "completion"]);
+    expect(test.requests.map(request => request.trigger)).toEqual(handoffs.map(event => event.trigger));
+    expect(test.requests.every(request => request.context && !JSON.stringify(request.context).includes('"models"'))).toBe(true);
+    expect(test.requests[1]!.context!.steps.map(step => step.id)).toContain(handoffs[1]!.stepId);
+    expect(test.store.events().filter(event => event.kind === "run_started").map(event => JSON.parse(event.payload).trigger)).toEqual(handoffs.map(event => event.trigger));
+    expect(test.controller.snapshot().status).toBe("completed");
+  });
+
+  it("reviews a technical hit before further execution without assigning its impact or rating", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") {
+        const output = fixtureExecution(request);
+        output.findings![0]!.status = "technical_hit";
+        return result(output);
+      }
+      if (!request.snapshot.completedSteps) return result(plan());
+      expect(request.mode).toBe("metacog");
+      expect(request.trigger?.kind).toBe("technical_hit");
+      expect(request.snapshot.findings[0]!).toMatchObject({ status: "technical_hit", rating: "unrated" });
+      // A synthetic fixture can be closed, but never becomes a real vulnerability.
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "metacog"]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED" });
+  });
+
+  it("supports code-level policy/context replacement without changing the Pi runner contract", async () => {
+    const projector = vi.fn(projectContext);
+    const selectStep = vi.fn(defaultLoopPolicy.selectStep);
+    const reviewAfterExecution = vi.fn(defaultLoopPolicy.reviewAfterExecution);
+    const test = setup(request => request.mode === "execute" ? result(fixtureExecution(request))
+      : result(request.snapshot.completedSteps ? closure(request) : plan()), {}, { projectContext: projector, policy: { selectStep, reviewAfterExecution } });
+    await test.controller.start();
+    expect(projector).toHaveBeenCalledTimes(4);
+    expect(selectStep).toHaveBeenCalledOnce();
+    expect(reviewAfterExecution).toHaveBeenCalledOnce();
+    expect(test.controller.snapshot().status).toBe("completed");
+  });
+
+  it("does not enter Pi if a handoff subscriber cancels the run", async () => {
+    const test = setup(() => result(plan()));
+    test.controller.subscribe(event => { if (event.type === "handoff") test.controller.pause(); });
+    await test.controller.start();
+    expect(test.run).not.toHaveBeenCalled();
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null });
+    expect(test.store.runs()[0]?.status).toBe("cancelled");
+  });
+
+  it("cleans up an active claim when context assembly fails instead of leaving a phantom run", async () => {
+    const test = setup(() => result(plan()), {}, { projectContext: () => { throw new Error("Context projection failed"); } });
+    await test.controller.start();
+    expect(test.run).not.toHaveBeenCalled();
+    expect(test.controller.snapshot()).toMatchObject({ status: "error", outcome: null });
+    expect(test.store.runs()[0]?.status).toBe("failed");
+  });
+
   it("commits FGS/evidence and requires a fresh metacognitive run before a terminal state", async () => {
     const test = setup((request) => {
       request.onEvent({ type: "text", mode: request.mode, text: `PRIVATE-STREAM-${request.mode}` });

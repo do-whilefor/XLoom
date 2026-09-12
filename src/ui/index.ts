@@ -170,6 +170,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const unsubscribe = controller.subscribe((event) => {
     if (event.snapshot) snapshot = event.snapshot;
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
+    else if (event.type === "handoff" && event.handoff) feed.handoff(event.handoff);
     else if (event.type === "notice" && event.message) print("xloom", event.message);
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {

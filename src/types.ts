@@ -1,6 +1,15 @@
 import type { Api } from "@earendil-works/pi-ai";
+import type { BlackboardContext } from "./loop/context.js";
 
 export type Mode = "decide" | "execute" | "metacog";
+export type AgentRole = "decide" | "execute";
+export interface OuterLoopTrigger {
+  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "hint" | "manual" | "completion" | "empty_plan";
+  reason: string;
+}
+export interface AgentHandoff {
+  role: AgentRole; mode: Mode; runId: string; revision: number; stepId?: string; trigger: OuterLoopTrigger;
+}
 export type RunStatus = "idle" | "running" | "paused" | "stopped" | "completed" | "error";
 export type Outcome = "VULN_FOUND" | "NOT_REPRODUCED" | "LOW_ROI" | "NEED_INPUT";
 export type FindingStatus = "lead" | "technical_hit" | "impact_verified" | "closed";
@@ -63,9 +72,12 @@ export interface Execution {
 }
 export interface RunRequest {
   id: string; mode: Mode; snapshot: BoardSnapshot; workspace: string; runDir: string; step?: Step;
+  /** Public, task-local view assembled by the outer loop; never another Agent's chat. */
+  context?: BlackboardContext;
+  trigger?: OuterLoopTrigger;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }
 export interface RunResult { output: unknown; usage: Usage }
 export interface AgentRunner { run(request: RunRequest): Promise<RunResult> }
 export interface RuntimeEvent { type: "text" | "tool_start" | "tool_update" | "tool_end" | "notice"; mode: Mode; text: string; toolName?: string; toolCallId?: string; isError?: boolean }
-export interface LoopEvent { type: "state" | "board" | "runtime" | "notice"; snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string }
+export interface LoopEvent { type: "state" | "board" | "runtime" | "notice" | "handoff"; snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff }

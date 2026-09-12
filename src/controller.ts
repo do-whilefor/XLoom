@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { BlackboardStore } from "./store.js";
 import { decisionSchema, usageSchema } from "./schema.js";
-import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, RunResult, Step, Usage } from "./types.js";
+import { projectContext, type ContextProjector } from "./loop/context.js";
+import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
+import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
+
+/** Code-level extension seams, not dynamically loaded plugins or Agent tools. */
+export interface LoopControllerOptions { policy?: LoopPolicy; projectContext?: ContextProjector }
 
 /** Local sequential scheduler, not an Agent. It alone commits all Agent proposals. */
 export class LoopController {
@@ -12,8 +17,13 @@ export class LoopController {
   private cancellation?: AbortController;
   private manualMeta = false;
   private interruptReason = "Interrupted by user";
+  private readonly policy: LoopPolicy;
+  private readonly projectContext: ContextProjector;
 
-  constructor(readonly store: BlackboardStore, private readonly runner: AgentRunner) {}
+  constructor(readonly store: BlackboardStore, private readonly runner: AgentRunner, options: LoopControllerOptions = {}) {
+    this.policy = options.policy ?? defaultLoopPolicy;
+    this.projectContext = options.projectContext ?? projectContext;
+  }
   snapshot(): BoardSnapshot { return this.store.snapshot(); }
   waitForIdle(): Promise<void> { return this.active ?? Promise.resolve(); }
   subscribe(listener: (event: LoopEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -60,18 +70,21 @@ export class LoopController {
 
   private async loop(): Promise<void> {
     let mode: Mode = this.manualMeta ? "metacog" : "decide";
+    let trigger: OuterLoopTrigger = this.manualMeta ? { kind: "manual", reason: "User requested a fresh metacognitive review." }
+      : this.snapshot().steps.length ? { kind: "resume", reason: "Resume from saved facts and inspect interrupted work; do not replay Steps blindly." }
+      : { kind: "start", reason: "Interpret the user-supplied origin and Goal, identify observable completion conditions, and choose a useful first Step." };
     this.manualMeta = false;
     while (this.snapshot().status === "running") {
       let snapshot = this.snapshot();
-      if (this.manualMeta) { mode = "metacog"; this.manualMeta = false; }
+      if (this.manualMeta) { mode = "metacog"; trigger = { kind: "manual", reason: "User requested a fresh metacognitive review." }; this.manualMeta = false; }
       const exhausted = this.budgetReason(snapshot);
       if (exhausted) { this.store.setStatus("paused", `${exhausted}; explicit resource limit reached, not Goal completion. Review configured limits in xloom.json before resuming.`); this.board("state"); return; }
-      const step: Step | undefined = mode === "execute" ? [...snapshot.steps].filter(item => item.status === "ready").sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))[0] : undefined;
-      if (mode === "execute" && !step) { mode = "metacog"; continue; }
+      const step: Step | undefined = mode === "execute" ? this.policy.selectStep(snapshot) : undefined;
+      if (mode === "execute" && !step) { mode = "metacog"; trigger = { kind: "empty_plan", reason: "No ready Step; identify missing work or justify Goal completion from evidence." }; continue; }
       const runId = `${mode}-${randomUUID()}`;
       const runDir = path.join(this.store.dataDir, "runs", runId);
       mkdirSync(path.join(runDir, "artifacts"), { recursive: true });
-      snapshot = this.store.beginRun(runId, mode, step?.id);
+      snapshot = this.store.beginRun(runId, mode, step?.id, trigger);
       const claimedStep = step ? snapshot.steps.find(item => item.id === step.id) : undefined;
       this.cancellation = new AbortController();
       const remainingMs = snapshot.config.limits.maxMinutes === null ? Infinity : snapshot.config.limits.maxMinutes * 60000 - (snapshot.elapsedMs ?? 0);
@@ -84,8 +97,12 @@ export class LoopController {
       let needsCompletionReview = false;
       let hintsChanged = false;
       try {
-        result = await this.runner.run({ id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep,
-          signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) });
+        const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger,
+          signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
+        request.context = this.projectContext(request);
+        this.emit({ type: "handoff", handoff: { role: mode === "execute" ? "execute" : "decide", mode, runId, revision: snapshot.revision, stepId: claimedStep?.id, trigger } });
+        cancellation.signal.throwIfAborted();
+        result = await this.runner.run(request);
         if (cancellation.signal.aborted) throw new Error(timedOut ? "Run time limit reached" : this.interruptReason);
         hintsChanged = this.snapshot().hints.length !== snapshot.hints.length;
         if (mode === "execute") this.store.applyExecution(runId, result.output, result.usage);
@@ -116,18 +133,23 @@ export class LoopController {
 
       const current = this.snapshot();
       if (current.status !== "running" || current.outcome) return;
-      if (hintsChanged) { mode = "metacog"; continue; }
-      if (needsCompletionReview) { mode = "metacog"; continue; }
+      if (hintsChanged) { mode = "metacog"; trigger = { kind: "hint", reason: "A new Hint arrived; reassess the plan and Goal against the latest blackboard." }; continue; }
+      if (needsCompletionReview) { mode = "metacog"; trigger = { kind: "completion", reason: "Independently check the whole Goal, evidence, pending work and blind spots before accepting completion." }; continue; }
       if (mode === "execute") {
-        const completed: Step | undefined = current.steps.find(item => item.id === step?.id);
-        const due = current.completedSteps - current.lastMetaStep >= current.config.limits.metacogEvery;
-        mode = due || current.noProgressCount >= current.config.limits.maxNoProgress || completed?.status === "blocked" ? "metacog" : "decide";
+        const review = this.policy.reviewAfterExecution(snapshot, current, step!.id);
+        mode = review ? "metacog" : "decide";
+        trigger = review ?? { kind: "execution_result", reason: "A Step result was committed. Compare it with the Goal and choose the next useful action." };
       } else if (mode === "metacog") {
         if (!current.steps.some(item => item.status === "ready")) {
           this.store.setStatus("paused", "Review produced no executable step or evidence-backed conclusion. Add a hint and resume."); this.board("state"); return;
         }
         mode = "execute";
-      } else mode = current.steps.some(item => item.status === "ready") ? "execute" : "metacog";
+        trigger = { kind: "planned", reason: "Execute the next ready Step from the reviewed blackboard plan." };
+      } else {
+        mode = current.steps.some(item => item.status === "ready") ? "execute" : "metacog";
+        trigger = mode === "execute" ? { kind: "planned", reason: "Execute the next ready Step; report observations and evidence, not a task-level conclusion." }
+          : { kind: "empty_plan", reason: "Planning produced no ready Step. Repair the plan or justify an evidence-backed conclusion." };
+      }
     }
   }
 }

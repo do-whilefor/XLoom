@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
-import type { BoardSnapshot, Decision, Evidence, Execution, Mode, Outcome, ProjectConfig, RunStatus, Usage } from "./types.js";
+import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Usage } from "./types.js";
 
 const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cost: 0 });
@@ -159,9 +159,9 @@ export class BlackboardStore {
     return this.mutate("hint", { content }, board => { board.hints.push({ id: id("H"), content: content.trim(), createdAt: new Date().toISOString() }); });
   }
 
-  beginRun(runId: string, mode: Mode, stepId?: string): BoardSnapshot {
+  beginRun(runId: string, mode: Mode, stepId?: string, trigger?: OuterLoopTrigger): BoardSnapshot {
     assert(/^[a-zA-Z0-9_-]{1,100}$/.test(runId), "Invalid run ID.");
-    return this.mutate("run_started", { runId, mode, stepId }, board => {
+    return this.mutate("run_started", { runId, mode, stepId, trigger }, board => {
       assert(board.status === "running", "Controller is not running.");
       assert(!this.runs().some(run => run.status === "running"), "A run is already active.");
       if (mode === "execute") {
