@@ -18,7 +18,7 @@ npm start -- demo --headless
 
 # 打开普通聊天 TUI；首次自动生成不含凭据的 xloom.json
 npm start -- run
-# 在 TUI 中使用 /model 选择模型、/apikey 设置 Key 或 /login 登录
+# 在 TUI 中使用 /model 选择模型、/apikey 设置 Key；也可复用 Pi 已保存的认证
 # 普通文字聊天；/run 加实际目标启动双 Agent；/hint 补充任务信息
 ```
 
@@ -52,16 +52,14 @@ npm start -- run
 | `/new` | 清空普通聊天上下文，不删除任务或证据 |
 | `/model [all\|chat\|decide\|execute]` | 搜索选择 Pi 模型；默认应用全部角色，可分别选择 |
 | `/apikey [provider]` | 打开遮蔽输入框，把 Key 保存到 Pi 凭据文件；不接受行内 Key |
-| `/login [provider]` | 使用 Pi 已支持的 OAuth／订阅登录流程；不支持登录的供应商使用 `/apikey` |
-| `/logout [provider]` | 确认后删除该供应商的 Pi 本地凭据；不撤销远端 Key，环境变量认证仍可能生效 |
 | `/meta` | 在安全的运行边界调用 Decide 元认知；空闲时启动 |
 | `/pause`、Esc | 取消当前调用并暂停，保留状态；候选打开时 Esc 先关闭候选，设置弹窗中则取消设置 |
 | `/stop` | 停止，保留状态和证据 |
 | `/board` | 查看简洁 FGS / Finding 视图 |
-| `/details`、Ctrl+O | 展开 / 收起工具输入输出、思考、交接原因、费用说明及原始协议；详情有长度限制，不影响原始运行日志 |
-| 点击活动汇总、Ctrl+T | 展开或收起该组思考和工具详情；Ctrl+T 切换最近一组，不修改模型思考配置 |
+| Ctrl+O | 展开 / 收起工具输入输出、思考、交接原因、费用说明及原始协议；详情有长度限制，不影响原始运行日志 |
+| 点击活动汇总、Ctrl+T | 展开或收起该组思考和工具详情；也可点击展开的正文收起，拖选仍复制；Ctrl+T 切换最近一组，不修改模型思考配置 |
 | `/help` | 查看命令与快捷键帮助 |
-| `/exit`、`/quit` | 退出 TUI；取消当前运行并等待清理，保留状态和证据 |
+| `/exit` | 退出 TUI；取消当前运行并等待清理，保留状态和证据 |
 | `/` | 输入框开头显示命令候选，继续输入按前缀筛选；↑/↓ 选择，Tab / Enter 补全，再按 Enter 执行；不会仅因选中而调用模型或退出 |
 | ↑ / ↓、Ctrl+P / Ctrl+N | 无候选时切换上一条 / 下一条已提交输入（当前 TUI 会话最多 100 条），返回最新时恢复未提交草稿 |
 | Alt+↑ / Alt+↓ | 在多行输入内移动光标 |
@@ -73,11 +71,15 @@ npm start -- run
 | 滚轮 / PageUp / PageDown | 滚动会话区；上翻后新输出不会强制拉回底部 |
 | End | 回到会话底部，恢复自动跟随新输出 |
 
-界面只保留标题、会话区、输入框和状态栏，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
+界面只保留三行头部、会话区、输入框和状态栏；终端高度不足时压缩头部以保留输入，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
 
 普通聊天继续流式显示自然语言；双 Agent 可在工具调用前给出简短进展，原始结果协议默认收起，只有控制器成功提交黑板后的摘要才显示为结果，工具成功不等于目标完成。工具错误仍直接可见；状态栏和耗时尾行保留 token、不显示费用。未知定价说明仅在详情中保留一次，配置的费用预算继续生效。`/` 列表只提供应用已有命令，不新增工具、MCP 或 Skills。候选中的 `/model` 也支持补全角色。
 
 ```text
+ ▀█▄ ▄█▀   Xloom v0.1.0
+   ███     deepseek-flash[1M] · API Key
+ ▄█▀ ▀█▄   D:\Users\Acer\Desktop\SRC\xloom
+
 Python 可用。现在跑测试并核对文档。
   ▸ Thought for 3s, read 1 file, ran 1 shell command
 测试完成，继续检查构建结果。
@@ -86,7 +88,7 @@ Python 可用。现在跑测试并核对文档。
   ✻ Working… 2m5s · 11,543 tokens
 ```
 
-以上是界面结构示例；实际正文来自模型，统计来自工具事件。没有模型思考内容时只汇总工具活动，不编造 `Thought for`。点击汇总或用 `/details` 查看输入输出。
+以上是界面结构示例。头部版本来自 package.json，模型随当前 Chat / Decide / Execute 角色变化，容量来自配置或 Pi 本地目录；未知容量不显示。认证显示 API Key / OAuth / Subscription 等已知状态，不把 API Key 等同于按量收费。工作目录取当前项目的真实路径。实际正文来自模型，统计来自工具事件。没有模型思考内容时只汇总工具活动，不编造 `Thought for`。点击汇总或用 Ctrl+O 查看输入输出，点击展开的内容可收起。
 
 思考只来自 Pi 转发的模型实际 `thinking` 内容，不解析正文中的伪思考标签，不展示签名或提供方已隐藏的内容，也不生成额外“解释思考”请求。`thinking: off` 或模型未返回思考时只显示 `Working…` 和最终回答；本次界面改动不会自动开启思考。`Thought for` 计量客户端观察到的思考流时间，不等同于服务端纯推理耗时；仅在最终消息才收到的思考显示 `Thought`，不虚构秒数。总 `Worked for` 包含本地等待、模型请求和工具执行时间；取消、超时和错误分别保留实际终态，不显示 done。鼠标点击使用应用内部链接回调，不打开浏览器；拖动仍可复制。
 
@@ -94,7 +96,7 @@ Python 可用。现在跑测试并核对文档。
 
 工具失败摘要优先展示实际退出状态和尾部异常；长失败输出保留头尾并标记中间省略。前面出现 HTTP 200 或其他正常输出，不代表整条脚本成功；失败标签取自工具实际返回状态。语法检查通过后仍可能发生运行时错误，例如循环输出应通过 `& { foreach (...) { ... } } 2>&1 | Out-File ...` 捕获，不能把 `2>&1` 作为独立命令。
 
-设置在临时弹窗中完成，Key、登录码和认证 URL 不进入聊天 Feed 或输入历史。Esc 取消设置／登录；取消不能撤销已经保存的凭据。OAuth 链接在弹窗内提供，Ctrl+L 复制完整登录地址到浏览器，应用不自动打开外部窗口。模型或任务运行期间先 `/pause` 并等待取消完成，再改模式、模型或凭据；不并发运行聊天与红队任务。
+模型选择和 API Key 设置在临时弹窗中完成，Key 不进入聊天 Feed 或输入历史。Esc 取消设置；取消不能撤销已经保存的凭据。OAuth 认证可复用 Pi 已保存的登录，Xloom 不再提供登录／登出命令。模型或任务运行期间先 `/pause` 并等待取消完成，再改模式、模型或凭据；不并发运行聊天与红队任务。
 
 应用收到 Ctrl+V 后会直接插入剪贴板文本，不将换行解释为 Enter。终端自己的粘贴功能则需要支持并透传 bracketed paste（括号粘贴）协议；缺少该协议的旧控制台/PTY 通道可能把换行转成回车提交。此时应使用应用的 Ctrl+V，或换用支持该协议的终端。自动测试使用模拟剪贴板，不会读取或覆盖用户当前的系统剪贴板。
 
@@ -117,7 +119,7 @@ npm start -- run --workspace "D:\Work\my-research"
 
 `models.chat`、`models.decide`、`models.execute` 可以配置不同模型；旧配置没有 chat 时回退到 execute，元认知始终复用 decide。模型目录、供应商适配和认证直接使用当前依赖 Pi `0.84.4` 的 `ModelRuntime`，不维护 xloom 模型白名单。`npm start -- models` 列出 Pi 本地内置、缓存及自定义目录，不调用模型；TUI `/model` 也会保留当前配置的内联模型别名。默认模型不代表账户已获调用权限。
 
-复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 与 OAuth 登录/刷新。TUI `/apikey` 和 `/login` 直接使用 Pi 的持久登录接口，只修改选中供应商的凭据，不把密钥写进 xloom.json。此文件与 Pi 共用，不是操作系统密钥库。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。成功设置同供应商凭据后会清除对应角色的显式环境变量覆盖，让新凭据生效。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
+复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 与 OAuth 登录/刷新。TUI `/apikey` 使用 Pi 的持久凭据接口，只修改选中供应商的凭据，不把密钥写进 xloom.json。此文件与 Pi 共用，不是操作系统密钥库。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。成功设置同供应商凭据后会清除对应角色的显式环境变量覆盖，让新凭据生效。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
 
 OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `opencode-go` 的官方 HTTPS `/zen/go` 端点合并此请求头，值复用 Pi 当前会话 ID，不修改 Pi 内层。目录与服务端可能存在版本差：例如 `deepseek-flash` 是线上可用别名，可按用户端点配置 `api: anthropic-messages`、`baseUrl: https://opencode.ai/zen/go`；是否可用仍以真实请求与账户权限为准，不把它自动替换成另一个型号。
 

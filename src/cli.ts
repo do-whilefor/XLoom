@@ -26,7 +26,8 @@ TUI: plain text chats; /run GOAL starts a separate two-agent task
      /model /apikey /new /start /pause /stop /hint /meta /board /help /exit
      Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
-Chat and both agents have read/write/edit/powershell with the current user's OS permissions.
+Chat and Execute have read/write/edit/powershell; Decide and metacog have read only.
+Tools run with the current user's OS permissions.
 `;
 
 async function main(): Promise<void> {

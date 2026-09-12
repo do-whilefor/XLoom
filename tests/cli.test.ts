@@ -72,6 +72,8 @@ describe("command-line entry points", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("local two-agent research loop");
     expect(result.stdout).toContain("read/write/edit/powershell");
+    expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell");
+    expect(result.stdout).toContain("Decide and metacog have read only");
     expect(result.stdout).toContain("--headless");
     expect(result.stdout).toContain("Ctrl+O");
     expect(result.stdout).toContain("/exit");
