@@ -19,7 +19,7 @@ const impactSchema = z.object({
 export const modelConfigSchema = z.object({
   provider: text(128),
   model: text(256),
-  api: z.enum(["openai-completions", "openai-responses", "anthropic-messages"]).optional(),
+  api: text(128).optional(),
   baseUrl: text(2_048).refine((value) => {
     try {
       const url = new URL(value);
@@ -35,15 +35,16 @@ export const modelConfigSchema = z.object({
 }).strict();
 
 export const limitsSchema = z.object({
-  maxSteps: positiveInt(10_000).default(24),
+  // Accept old configurations without keeping a task-completion counter limit.
+  maxSteps: positiveInt(10_000).optional(),
   maxNoProgress: positiveInt(1_000).default(3),
-  maxMinutes: z.number().finite().positive().max(10_080).default(30),
-  maxTokens: positiveInt(1_000_000_000).default(200_000),
-  maxCost: z.number().finite().positive().max(1_000_000).default(5),
+  maxMinutes: z.number().finite().positive().max(10_080).nullable().default(null),
+  maxTokens: positiveInt(1_000_000_000).nullable().default(null),
+  maxCost: z.number().finite().positive().max(1_000_000).nullable().default(null),
   maxTurnsPerRun: positiveInt(1_000).default(12),
   stepTimeoutSeconds: z.number().finite().positive().max(86_400).default(180),
   metacogEvery: positiveInt(1_000).default(3),
-}).strict();
+}).strict().transform(({ maxSteps: _legacyMaxSteps, ...limits }) => limits);
 
 export const projectConfigSchema = z.object({
   version: z.literal(1).default(1),

@@ -1,3 +1,5 @@
+import type { Api } from "@earendil-works/pi-ai";
+
 export type Mode = "decide" | "execute" | "metacog";
 export type RunStatus = "idle" | "running" | "paused" | "stopped" | "completed" | "error";
 export type Outcome = "VULN_FOUND" | "NOT_REPRODUCED" | "LOW_ROI" | "NEED_INPUT";
@@ -8,7 +10,7 @@ export type StepStatus = "ready" | "claimed" | "done" | "no_progress" | "blocked
 export interface ModelConfig {
   provider: string;
   model: string;
-  api?: "openai-completions" | "openai-responses" | "anthropic-messages";
+  api?: Api;
   baseUrl?: string;
   apiKeyEnv?: string;
   contextWindow?: number;
@@ -22,7 +24,7 @@ export interface ProjectConfig {
   scope: string;
   context: string;
   models: { decide: ModelConfig; execute: ModelConfig };
-  limits: { maxSteps: number; maxNoProgress: number; maxMinutes: number; maxTokens: number; maxCost: number; maxTurnsPerRun: number; stepTimeoutSeconds: number; metacogEvery: number };
+  limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number; stepTimeoutSeconds: number; metacogEvery: number };
 }
 export interface Goal { id: string; description: string; parentId: string | null; status: "active" | "satisfied" | "abandoned"; factIds: string[] }
 export interface Fact { id: string; description: string; stepId: string | null; evidenceIds: string[]; supersedes?: string }

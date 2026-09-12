@@ -19,6 +19,8 @@ npm start -- demo --headless
 # 创建配置；用户输入的目标即授权，不增加二次授权确认
 npm start -- init --goal "验证我提供的测试站点的对象归属和租户隔离边界"
 # 编辑 xloom.json：目标、身份说明、业务上下文、模型和预算
+# 可复用 Pi 已有登录；也可使用供应商环境变量
+npm start -- models --provider anthropic
 $env:ANTHROPIC_API_KEY = "填写你的模型服务密钥"
 npm start -- doctor
 npm start
@@ -34,7 +36,7 @@ TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提�
 - 本地 Controller 串行调度；每次 Decide、每个 Execute Step、每次元认知都重新创建 Pi Agent，消息数组从空开始。
 - FGS 黑板：Fact / Goal / Step，附带 Finding / Evidence / Hint。控制器验证提案后统一提交，Agent 不直接写权威黑板。
 - SQLite WAL 持久化、追加审计事件、步骤 claim、单控制器锁、暂停/停止/恢复。中断步骤标记失败，不会盲目重放。
-- 每 3 个步骤、停滞、执行受阻、完成前或 `/meta` 触发元认知；完成必须来自一次 fresh Decide review。
+- 每 3 个步骤、停滞、执行受阻、完成前或 `/meta` 触发元认知；完成必须来自一次 fresh Decide review，确认根 Goal 已满足并引用证据事实。步数只计数，不设任务上限。
 - 技术命中保持 `unrated`；只有证据关联、影响字段、PoC 和 Decide 审查符合规则后才允许 `impact_verified` 与评级。
 - 证据归档、SHA-256 校验、引用完整性检查、同一假设合并、无新证据的重复尝试不计进展。
 - 暖珊瑚色角色标签、滚动事件流、底部多行输入和状态栏；支持中文、窄终端、流式输出和工具摘要。
@@ -67,20 +69,26 @@ TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提�
 
 Ctrl+C 不再用于复制或暂停。复制仍可拖选，或使用 Ctrl+Shift+C / Ctrl+Insert；暂停用 Esc 或 `/pause`。清空输入不会提交内容、修改黑板或中断运行，尚未完成的旧粘贴也不会重新填回被清空的输入框。
 
-底部状态栏示例 `idle · r0 · step 0/24 · 0 tokens · $0.000`：`idle` 表示空闲、尚未开始运行；`r0` 是黑板 revision（版本号）0，每次保存状态、Hint 或执行结果等都会递增，不是 Agent 轮数；`step 0/24` 表示已结算 0 个 Execute 步骤、配置上限 24 个。步骤计数包含已返回并提交结果的无进展/受阻步骤，不等于成功次数、消息数或漏洞数。tokens 为累计模型用量，美元数为估算费用。
+底部状态栏示例 `idle · r0 · step 0 · 0 tokens · $0.000`：`idle` 表示空闲、尚未开始运行；`r0` 是黑板 revision（版本号）0，每次保存状态、Hint 或执行结果等都会递增，不是 Agent 轮数；`step 0` 表示已结算 0 个 Execute 步骤，没有 `/24` 上限。步骤计数包含已返回并提交结果的无进展/受阻步骤，不等于成功次数、模型调用次数或漏洞数。tokens 为累计模型用量，美元数为估算费用。
 
 ```powershell
 npm start -- run --headless
 npm start -- status
 npm start -- report
+npm start -- models
+npm start -- models --provider anthropic
 npm start -- run --workspace "D:\Work\my-research"
 ```
 
 `status` / `report` 只读数据库，不调用模型、不启动 Loop。报告输出到标准输出。`--headless` 会立即启动，适合明确要运行的终端任务；非交互环境不会隐式启动 TUI 或模型。
 
-## 配置与预算
+## 模型选择与 Goal 完成
 
-两个角色可以配置不同的 provider / model；元认知始终复用 `models.decide`。默认值来自 Pi 模型目录，实际账户能否调用需要用户验证；`doctor` 只检查本地环境和凭据解析，不发起模型请求。
+两个角色可以配置不同的 provider / model；元认知始终复用 `models.decide`。模型目录、供应商适配和认证直接使用当前依赖 Pi `0.84.4` 的 `ModelRuntime`，不维护 xloom 模型白名单。`npm start -- models` 列出 Pi 本地内置、缓存及自定义目录，不调用模型；可用 `--provider` 筛选，再将输出的 provider / model 填入 `xloom.json` 的对应角色。默认模型不代表账户已获调用权限。
+
+复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 和已有 OAuth 登录/刷新。初次 OAuth 登录仍在 Pi 中完成，本版不另做登录 UI。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
+
+在 Pi `models.json` 中已配置的模型，仅填 provider / model 即可。也保留以下单角色端点覆盖写法：
 
 接入兼容端点时，在相应模型配置中设置：
 
@@ -97,9 +105,15 @@ npm start -- run --workspace "D:\Work\my-research"
 }
 ```
 
-支持 `openai-completions`、`openai-responses`、`anthropic-messages`。Key 只从环境变量读取，不写进配置；无认证的本地兼容服务也需要设置一个非空占位 Key。兼容性以具体端点为准。
+`api` 由 Pi 的供应商/API 注册机制处理，不再限制为三种协议；自定义模型的细节、headers 和认证优先按 Pi `models.json` 配置。xloom 配置不接受明文 Key。实际支持范围与所依赖的 Pi 版本、账户、模型工具调用能力及端点实现有关；未知 API 仍由 Pi 报错。需要自定义 JavaScript 扩展才能注册的供应商不会自动加载，因为本项目不启用 Pi 扩展系统。
 
-默认上限：24 个执行步骤、连续 3 次无进展、累计运行 30 分钟、200000 tokens、估算 5 美元；每次运行最多 12 个模型回合、180 秒。步骤预算不会阻挡最终规划/元认知；token、时间和费用仍适用于它们。预算耗尽只暂停，不生成研究结论；修改 `xloom.json` 后重启以加载新预算。
+任务正常结束由 LLM 判断根 Goal 是否完成：Decide 读取黑板 → Execute 有界执行 → 持续规划；完成提议必须经过全新 Decide 元认知复核，使用 `updateGoals` 将根 Goal 标记 `satisfied` 并引用证据事实，同时提交最终结论。根 Goal 不能用 `abandoned` 代替完成，必须处理子目标及待执行步骤；发现单个漏洞不自动代表整个 Goal 完成。控制器只校验结构、引用及证据完整性，完成语义仍由 LLM 审查。
+
+`maxNoProgress: 3` 是元认知触发阈值，不再强制暂停；有新执行计划就继续。LLM 无法给出可执行步骤或有效结论时，保留未完成状态并暂停；确实缺少必要输入时为 `NEED_INPUT`，补充后可恢复。没有隐藏的 24 步停机点。
+
+新配置的累计 `maxMinutes`、`maxTokens`、`maxCost` 默认 `null`（不设累计上限）；可由用户显式设正数作为资源暂停条件，不是 Goal 完成条件。不设预算的长任务会持续消耗模型用量，用户可随时 `/pause` 或 `/stop`。每次独立运行仍默认最多 12 个模型回合、180 秒，用于识别失控的单次工具循环或超时，触发时保留故障/中断状态，绝不伪造完成。
+
+兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略，不必调大；旧文件中已有的时间、Token、费用上限仍按显式配置保留。如不需要资源暂停，将这三个字段设为 `null` 或删除并重启；任务证据、步骤计数不会清空。
 
 Token / 费用在模型回合结束后累计，正在进行的调用可能超出软上限；超时由取消信号处理。自定义端点价格可能未知，费用上限不能视为准确账单硬限额。暂停时间不计入运行时间；进程被强制结束时，最后一次调用的 token 统计可能不完整。
 
@@ -125,6 +139,8 @@ workspace/
 证据单文件最多 10 MiB，单次结果最多 50 MiB；Agent 输入只获得归档引用、哈希和每份最多 4096 字节的原始片段，大正文留在文件中。片段不完整时应安排 Execute 进一步查阅，不应据此确认影响。
 
 正常暂停会取消 Pi 调用及 PowerShell 子进程树；硬杀进程、断电或远端已经产生的效果不能回滚。重新打开时会保留失败/中断信息，由新 Decide 判断下一步，不自动再次执行原步骤。
+
+升级旧黑板时，若旧任务尚未完成却提前关闭了根 Goal，会恢复根 Goal 为 active；旧任务标记 completed 但根 Goal 没有 satisfied 的，会改为 paused 并提示重新复核。原结论记录进审计，证据、事实、线索和计数保留；迁移不会自动调用模型或重放步骤。
 
 `.xloom` 及报告可能含研究目标的敏感证据。默认不加入 Git、不自动上传、不全量脱敏目标证据；应由使用者管理本地文件和报告的访问权限。模型服务凭据会在运行日志/显示文本中尽量过滤，但这不是密钥保险库。
 

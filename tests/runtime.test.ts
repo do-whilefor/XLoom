@@ -22,7 +22,7 @@ async function request(mode: RunRequest["mode"] = "decide"): Promise<RunRequest>
     revision: 1, config: {
       version: 1, title: "Test", goal: "Inspect fixture", scope: "fixture", context: "Known context",
       models: { decide: { provider: "test", model: "decide", apiKeyEnv: "DO_NOT_EXPOSE_ENV_NAME" }, execute: { provider: "test", model: "execute" } },
-      limits: { maxSteps: 5, maxNoProgress: 2, maxMinutes: 5, maxTokens: 10000, maxCost: 10, maxTurnsPerRun: 3, stepTimeoutSeconds: 60, metacogEvery: 3 },
+      limits: { maxNoProgress: 2, maxMinutes: 5, maxTokens: 10000, maxCost: 10, maxTurnsPerRun: 3, stepTimeoutSeconds: 60, metacogEvery: 3 },
     }, status: "running", outcome: null, reason: "", goals: [], facts: [], steps: [], findings: [], evidence: [], hints: [],
     usage: { input: 0, output: 0, cost: 0 }, completedSteps: 0, noProgressCount: 0, lastMetaStep: 0, lastMetaRevision: 0,
   };
@@ -79,6 +79,8 @@ describe("Pi runtime isolation", () => {
     expect(prompt.userPrompt).toContain("Resolve pending Steps");
     expect(prompt.userPrompt).toContain("synthetic narrative");
     expect(prompt.userPrompt).toContain("Priority is an integer 0–1000");
+    expect(prompt.userPrompt).toContain("Never abandon the root Goal");
+    expect(prompt.userPrompt).toContain("whole Goal is met");
   });
 
   it("also redacts the other channel's explicitly configured model key", async () => {
@@ -134,6 +136,49 @@ describe("Pi runtime isolation", () => {
     const input = await request();
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => message([{ type: "text", text: '{"summary":"truncated"}' }], "length")) }) });
     await expect(runner.run(input)).rejects.toThrow("length");
+  });
+
+  it("includes credentials refreshed by Pi after initial resolution in streaming and saved output redaction", async () => {
+    const input = await request();
+    const secrets = ["old-model-credential"];
+    let rendered = "";
+    input.onEvent = event => { if (event.type === "text") rendered += event.text; };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, secrets, streamFn: () => {
+      secrets.push("new-refreshed-model-credential");
+      const events = new AssistantMessageEventStream();
+      const response = message([{ type: "text", text: '{"summary":"new-refreshed-model-credential old-model-credential"}' }]);
+      queueMicrotask(() => {
+        events.push({ type: "start", partial: response });
+        for (const delta of ['{"summary":"new-refreshed-', 'model-credential old-model-', 'credential"}']) {
+          events.push({ type: "text_delta", contentIndex: 0, delta, partial: response });
+        }
+        events.push({ type: "done", reason: "stop", message: response });
+        events.end();
+      });
+      return events;
+    } }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual({ summary: "[MODEL_CREDENTIAL_REDACTED] [MODEL_CREDENTIAL_REDACTED]" });
+    expect(rendered).toContain("MODEL_CREDENTIAL_REDACTED");
+    for (const secret of secrets) {
+      expect(rendered).not.toContain(secret);
+      expect(await readFile(join(input.runDir, "events.jsonl"), "utf8")).not.toContain(secret);
+      expect(await readFile(join(input.runDir, "output.json"), "utf8")).not.toContain(secret);
+    }
+  });
+
+  it("does not stop a Pi tool turn at disabled cumulative resource budgets", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTokens = null;
+    input.snapshot.config.limits.maxCost = null;
+    input.snapshot.usage = { input: 1_000_000, output: 100_000, cost: 100 };
+    await writeFile(join(input.workspace, "fixture.txt"), "synthetic fixture");
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => ++calls === 1
+      ? message([{ type: "toolCall", id: "read1", name: "read", arguments: { path: "fixture.txt" } }], "toolUse")
+      : message([{ type: "text", text: '{"summary":"tool result received","result":"done"}' }])) }) });
+    expect((await runner.run(input)).output).toEqual({ summary: "tool result received", result: "done" });
+    expect(calls).toBe(2);
   });
 
   it("rejects an already cancelled invocation before resolving the model", async () => {

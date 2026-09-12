@@ -32,7 +32,7 @@ function snapshot(): BoardSnapshot {
     lastMetaStep: 0, lastMetaRevision: 0, usage: { input: 100, output: 80, cost: 0.02 },
     config: { version: 1, title: "界面测试", goal: "验证 TUI 交互", scope: "localhost", context: "",
       models: { decide: { provider: "test", model: "test" }, execute: { provider: "test", model: "test" } },
-      limits: { maxSteps: 10, maxNoProgress: 3, maxMinutes: 10, maxTokens: 10000, maxCost: 1, maxTurnsPerRun: 5, stepTimeoutSeconds: 60, metacogEvery: 3 } },
+      limits: { maxNoProgress: 3, maxMinutes: 10, maxTokens: 10000, maxCost: 1, maxTurnsPerRun: 5, stepTimeoutSeconds: 60, metacogEvery: 3 } },
     goals: [], facts: [], steps: [], findings: [], evidence: [], hints: [],
   };
 }
@@ -78,6 +78,8 @@ describe("TUI layout and input history", () => {
     expect(screen).toContain("界面测试");
     expect(screen).toContain("idle");
     expect(screen).toContain("180 tokens");
+    expect(screen).toContain("step 1");
+    expect(screen).not.toMatch(/step \d+\//);
     expect(screen).not.toContain("双 Agent");
     expect(screen).not.toContain("黑板协作");
     expect(screen).not.toContain("输入 /start");

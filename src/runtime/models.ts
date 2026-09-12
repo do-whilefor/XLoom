@@ -1,71 +1,129 @@
-import type { Model, Api } from "@earendil-works/pi-ai";
+import type { Model, Api, AuthResult } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { ModelRuntime, type ModelRuntimeAuthOverrides } from "@earendil-works/pi-coding-agent";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { ModelConfig } from "../types.js";
 
 export interface ResolvedModel {
   model: Model<Api>;
   streamFn: StreamFn;
+  /** Live collection: Pi may refresh OAuth or resolve command-backed keys between turns. */
   secrets?: string[];
   costKnown?: boolean;
 }
 export type ModelResolver = (config: ModelConfig, signal: AbortSignal) => Promise<ResolvedModel>;
 
-export const resolveModel: ModelResolver = async (config, signal) => {
-  signal.throwIfAborted();
-  const models = builtinModels();
-  const registered = models.getModel(config.provider, config.model);
-  const explicitKey = config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined;
-  if (config.apiKeyEnv && !explicitKey) throw new Error(`Missing model credential environment variable: ${config.apiKeyEnv}`);
+function checkConfiguration(runtime: ModelRuntime): void {
+  // Pi's detailed validation errors can contain configured header/key literals.
+  if (runtime.getError()) throw new Error("Pi model configuration could not be loaded; check the Pi models.json and credential configuration.");
+}
 
-  if (!config.baseUrl && !config.api) {
-    if (!registered) throw new Error(`Unknown Pi model ${config.provider}/${config.model}; configure api and baseUrl for a custom model.`);
-    const auth = await models.getAuth(registered, { apiKey: explicitKey, signal });
-    if (!auth) throw new Error(`No environment credentials configured for ${config.provider}.`);
-    const model = { ...registered, contextWindow: config.contextWindow ?? registered.contextWindow, maxTokens: config.maxTokens ?? registered.maxTokens };
-    return {
-      model,
-      streamFn: (selected, context, options) => models.streamSimple(selected, context, { ...options, apiKey: explicitKey, maxTokens: model.maxTokens }),
-      secrets: [auth.auth.apiKey, ...Object.values(auth.auth.headers ?? {})].filter((value): value is string => typeof value === "string" && value.length > 0),
-      costKnown: true,
-    };
+async function createRuntime(signal?: AbortSignal): Promise<ModelRuntime> {
+  signal?.throwIfAborted();
+  // Pi owns auth.json, models.json, environment lookup, cached catalogs and OAuth refresh.
+  const runtime = await piOperation(() => ModelRuntime.create({ allowModelNetwork: false, signal }), signal,
+    "Pi model runtime could not be initialized; check the Pi configuration.");
+  signal?.throwIfAborted();
+  checkConfiguration(runtime);
+  return runtime;
+}
+
+/** Local catalogs only. Pi checks configured auth availability, without OAuth refresh or key commands. */
+export async function listModels(provider?: string, signal?: AbortSignal): Promise<readonly Model<Api>[]> {
+  const runtime = await createRuntime(signal);
+  return runtime.getModels(provider);
+}
+
+async function piOperation<T>(operation: () => Promise<T> | T, signal: AbortSignal | undefined, error: string): Promise<T> {
+  try { return await operation(); } catch {
+    signal?.throwIfAborted();
+    throw new Error(error);
   }
+}
 
-  const api = config.api ?? registered?.api;
-  const baseUrl = config.baseUrl ?? registered?.baseUrl;
-  if (!api || !baseUrl) throw new Error("Custom models require api and baseUrl.");
-  const url = new URL(baseUrl);
-  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search) {
+function validateBaseUrl(baseUrl: string): void {
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { throw new Error("Model baseUrl must be an HTTP(S) URL without credentials or query parameters."); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error("Model baseUrl must be an HTTP(S) URL without credentials or query parameters.");
   }
-  const auth = explicitKey ? undefined : registered ? await models.getAuth(registered, { signal }) : undefined;
-  const key = explicitKey ?? auth?.auth.apiKey;
-  if (!key) throw new Error("Custom models require apiKeyEnv (for a keyless local server, set it to a non-empty placeholder).");
-  const model: Model<Api> = {
-    ...(registered ?? {}), id: config.model, name: config.model, provider: config.provider, api, baseUrl,
-    reasoning: registered?.reasoning ?? (config.thinking !== undefined && config.thinking !== "off"), input: ["text"],
-    contextWindow: config.contextWindow ?? registered?.contextWindow ?? 128_000,
-    maxTokens: config.maxTokens ?? registered?.maxTokens ?? 8192,
-    cost: registered?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+}
+
+function trackCredentials(runtime: ModelRuntime, secrets: string[]): void {
+  const remember = (auth: AuthResult | undefined) => {
+    const values = [auth?.auth.apiKey, ...Object.values(auth?.auth.headers ?? {}),
+      ...Object.entries(auth?.env ?? {}).filter(([name]) => /key|token|secret|credential/i.test(name)).map(([, value]) => value)];
+    for (const value of values) {
+      if (typeof value !== "string" || !value.length) continue;
+      for (const secret of [value, /^Bearer\s+(.+)$/i.exec(value)?.[1]]) {
+        if (secret && !secrets.includes(secret)) secrets.push(secret);
+      }
+    }
+    return auth;
   };
-  let streamFn: StreamFn;
-  switch (api) {
-    case "openai-completions": {
-      const { streamSimple } = await import("@earendil-works/pi-ai/api/openai-completions");
-      streamFn = (selected, context, options) => streamSimple(selected as Model<"openai-completions">, context, { ...options, apiKey: key, maxTokens: model.maxTokens });
-      break;
-    }
-    case "openai-responses": {
-      const { streamSimple } = await import("@earendil-works/pi-ai/api/openai-responses");
-      streamFn = (selected, context, options) => streamSimple(selected as Model<"openai-responses">, context, { ...options, apiKey: key, maxTokens: model.maxTokens });
-      break;
-    }
-    case "anthropic-messages": {
-      const { streamSimple } = await import("@earendil-works/pi-ai/api/anthropic-messages");
-      streamFn = (selected, context, options) => streamSimple(selected as Model<"anthropic-messages">, context, { ...options, apiKey: key, maxTokens: model.maxTokens });
-      break;
-    }
-    default: throw new Error(`Custom API not supported in this MVP: ${api}`);
+  const original = runtime.getAuth.bind(runtime);
+  // Observe Pi's request-time auth; do not freeze a resolved token into stream options.
+  runtime.getAuth = async (providerOrModel: string | Model<Api>, overrides?: ModelRuntimeAuthOverrides) => {
+    const provider = typeof providerOrModel === "string" ? providerOrModel : providerOrModel.provider;
+    return remember(await piOperation(
+      () => typeof providerOrModel === "string" ? original(providerOrModel, overrides) : original(providerOrModel, overrides),
+      overrides?.signal, `Pi could not resolve credentials for ${provider}; check Pi login and provider configuration.`));
+  };
+}
+
+export const resolveModel: ModelResolver = async (config, signal) => {
+  signal.throwIfAborted();
+  const explicitKey = config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined;
+  if (config.apiKeyEnv && !explicitKey) throw new Error(`Missing model credential environment variable: ${config.apiKeyEnv}`);
+  if (config.baseUrl) validateBaseUrl(config.baseUrl);
+  if (config.api && !getApiProvider(config.api)) throw new Error(`No Pi API provider registered for api: ${config.api}`);
+  const runtime = await createRuntime(signal);
+  let registered = runtime.getModel(config.provider, config.model);
+
+  if (config.api || config.baseUrl) {
+    const api = config.api ?? registered?.api;
+    const baseUrl = config.baseUrl ?? registered?.baseUrl;
+    if (!api || !baseUrl) throw new Error("Custom models require api and baseUrl, or an existing Pi model supplying these defaults.");
+    // Legacy inline settings are an in-memory Pi provider overlay, not another API implementation.
+    await piOperation(() => runtime.registerProvider(config.provider, {
+      api, baseUrl,
+      models: [{
+        ...(registered ?? {}), id: config.model, name: registered?.name ?? config.model, api, baseUrl,
+        reasoning: registered?.reasoning ?? (config.thinking !== undefined && config.thinking !== "off"),
+        input: registered?.input ?? ["text"],
+        contextWindow: config.contextWindow ?? registered?.contextWindow ?? 128_000,
+        maxTokens: config.maxTokens ?? registered?.maxTokens ?? 16_384,
+        cost: registered?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }],
+    }), signal, `Pi could not configure the inline provider ${config.provider}.`);
+    await piOperation(() => runtime.refresh({ allowNetwork: false, signal }), signal, `Pi could not refresh the inline provider ${config.provider}.`);
+    signal.throwIfAborted();
+    checkConfiguration(runtime);
+    registered = runtime.getModel(config.provider, config.model);
+  } else if (!registered && runtime.getProvider(config.provider) && process.env.PI_OFFLINE === undefined) {
+    // Dynamic Pi providers may have no static catalog. Only that known provider may discover models.
+    if (explicitKey) await piOperation(() => runtime.setRuntimeApiKey(config.provider, explicitKey, { signal }), signal,
+      `Pi could not configure credentials for ${config.provider}.`);
+    const result = await piOperation(() => runtime.refresh({ providers: [config.provider], allowNetwork: true, signal }), signal,
+      `Pi could not refresh the model catalog for ${config.provider}.`);
+    signal.throwIfAborted();
+    if (result.errors.has(config.provider)) throw new Error(`Pi could not refresh the model catalog for ${config.provider}.`);
+    checkConfiguration(runtime);
+    registered = runtime.getModel(config.provider, config.model);
   }
-  return { model, streamFn, secrets: [key], costKnown: registered !== undefined && config.baseUrl === undefined };
+  if (!registered) throw new Error(`Unknown Pi model ${config.provider}/${config.model}; configure it in Pi models.json or supply api and baseUrl.`);
+
+  const secrets = explicitKey ? [explicitKey] : [];
+  trackCredentials(runtime, secrets);
+  const model: Model<Api> = { ...registered, contextWindow: config.contextWindow ?? registered.contextWindow, maxTokens: config.maxTokens ?? registered.maxTokens };
+  const auth = await runtime.getAuth(model, { apiKey: explicitKey, signal });
+  signal.throwIfAborted();
+  if (!auth) throw new Error(`No Pi credentials configured for ${config.provider}; use Pi login, its environment variables, or apiKeyEnv.`);
+  const builtin = builtinModels().getModel(config.provider, config.model);
+  const costKnown = !config.baseUrl && (builtin?.baseUrl === model.baseUrl || (!builtin && Object.values(model.cost).some((value) => typeof value === "number" && value > 0)));
+  return {
+    model, secrets, costKnown,
+    streamFn: (selected, context, options) => runtime.streamSimple(selected, context, { ...options, apiKey: explicitKey, maxTokens: model.maxTokens }),
+  };
 };

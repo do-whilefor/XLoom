@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
+import { LoopController } from "../src/controller.js";
 import { BlackboardStore } from "../src/store.js";
-import type { Decision, Execution, Impact, Mode, Usage } from "../src/types.js";
+import type { BoardSnapshot, Decision, Execution, Impact, Mode, Outcome, Usage } from "../src/types.js";
 
 const roots: string[] = [];
 const stores: BlackboardStore[] = [];
@@ -62,6 +64,24 @@ function produceHit(store: BlackboardStore) {
 function verifiedDecision(store: BlackboardStore, rating: "info" | "P3" | "P2" | "P1" = "P3"): Decision {
   const finding = store.snapshot().findings[0];
   return { summary: "Review fixture evidence", reviews: [{ findingId: finding.id, status: "impact_verified", rating, reason: "Structurally complete mock review; not a real vulnerability claim", impact, pocEvidenceId: finding.evidenceIds[0] }] };
+}
+
+function completeGoal(store: BlackboardStore, outcome: Exclude<Outcome, "NEED_INPUT"> = "VULN_FOUND"): Decision {
+  return {
+    summary: "Final fixture goal review",
+    updateGoals: [{ id: "G0", status: "satisfied", factIds: store.snapshot().facts.map(fact => fact.id), reason: "Archived fixture observations cover the original goal" }],
+    conclusion: { outcome, reason: "Fixture goal complete with archived evidence" },
+  };
+}
+
+function legacyFixture(store: BlackboardStore, change: (board: BoardSnapshot) => void): BoardSnapshot {
+  const board = store.snapshot();
+  change(board);
+  store.close();
+  const database = new DatabaseSync(path.join(store.dataDir, "blackboard.sqlite"));
+  try { database.prepare("UPDATE board SET value=? WHERE id=1").run(JSON.stringify(board)); }
+  finally { database.close(); }
+  return board;
 }
 
 afterEach(() => {
@@ -277,7 +297,7 @@ describe("evidence boundaries and integrity", () => {
     produceHit(store);
     const reviewed = runDecision(store, verifiedDecision(store));
     writeFileSync(path.join(store.workspace, reviewed.evidence[0].path), "tampered after review");
-    expect(() => runDecision(store, { summary: "Final review", conclusion: { outcome: "VULN_FOUND", reason: "Mock completion" } }, "metacog")).toThrow(/Evidence changed/);
+    expect(() => runDecision(store, completeGoal(store), "metacog")).toThrow(/Evidence changed/);
     expect(store.snapshot().outcome).toBeNull();
   });
 
@@ -290,7 +310,7 @@ describe("evidence boundaries and integrity", () => {
     };
     const reviewed = runDecision(store, review);
     writeFileSync(path.join(store.workspace, reviewed.evidence[0].path), "tampered after review");
-    expect(() => runDecision(store, { summary: "Final review", conclusion: { outcome, reason: "Mock completion" } }, "metacog")).toThrow(/Evidence changed/);
+    expect(() => runDecision(store, completeGoal(store, outcome), "metacog")).toThrow(/Evidence changed/);
     expect(store.snapshot().outcome).toBeNull();
   });
 });
@@ -379,11 +399,13 @@ describe("findings and outcome gates", () => {
     const store = openStore();
     produceHit(store);
     const decision = verifiedDecision(store);
+    decision.updateGoals = completeGoal(store).updateGoals;
     decision.conclusion = { outcome: "VULN_FOUND", reason: "Mock lifecycle complete; fixture test only" };
     const board = runDecision(store, decision, "metacog");
     expect(board).toMatchObject({ status: "completed", outcome: "VULN_FOUND", lastMetaStep: 1 });
     expect(board.lastMetaRevision).toBe(board.revision);
     expect(board.findings[0]).toMatchObject({ status: "impact_verified", rating: "P3", impact });
+    expect(board.goals[0]).toMatchObject({ status: "satisfied", factIds: board.facts.map(fact => fact.id) });
     expect(board.usage).toEqual({ input: 30, output: 15, cost: 0.003 });
     expect(store.events().map(event => event.kind)).toContain("execution");
   });
@@ -391,7 +413,7 @@ describe("findings and outcome gates", () => {
   it.each(["VULN_FOUND", "NOT_REPRODUCED", "LOW_ROI"] as const)("rejects %s when technical impact remains unreviewed", (outcome) => {
     const store = openStore();
     produceHit(store);
-    expect(() => runDecision(store, { summary: "Insufficient review", conclusion: { outcome, reason: "Not complete" } }, "metacog")).toThrow();
+    expect(() => runDecision(store, completeGoal(store, outcome), "metacog")).toThrow();
     expect(store.snapshot().outcome).toBeNull();
   });
 
@@ -408,6 +430,7 @@ describe("findings and outcome gates", () => {
     const store = openStore();
     produceHit(store);
     const decision = verifiedDecision(store, "info");
+    decision.updateGoals = completeGoal(store).updateGoals;
     decision.conclusion = { outcome: "LOW_ROI", reason: "Fixture shows test-only impact" };
     expect(runDecision(store, decision, "metacog")).toMatchObject({ outcome: "LOW_ROI", status: "completed" });
   });
@@ -417,6 +440,7 @@ describe("findings and outcome gates", () => {
     const board = produceHit(store);
     const closed = runDecision(store, {
       summary: "Fixture comparison refuted the hypothesis",
+      updateGoals: completeGoal(store).updateGoals,
       reviews: [{ findingId: board.findings[0].id, status: "closed", rating: "unrated", reason: "Counterexample in fixture responses; reopen on new object or identity" }],
       conclusion: { outcome: "NOT_REPRODUCED", reason: "Mock hypothesis closed with fixture evidence" },
     }, "metacog");
@@ -431,6 +455,7 @@ describe("findings and outcome gates", () => {
     store.applyExecution(runId, { summary: "Missing second fixture identity", result: "blocked", findings: [{ key: "ownership", title: "Ownership lead", target: "fixture object", status: "lead", factRefs: [], evidenceRefs: [], next: "Need user to provide a second authorized fixture account" }] }, usage);
     const board = runDecision(store, { summary: "Input genuinely unavailable", conclusion: { outcome: "NEED_INPUT", reason: "Second account required" } }, "metacog");
     expect(board).toMatchObject({ outcome: "NEED_INPUT", status: "paused" });
+    expect(board.goals[0]).toMatchObject({ status: "active", factIds: [] });
     expect(board.findings[0]).toMatchObject({ status: "lead", rating: "unrated" });
     expect(store.setStatus("running", "Second account supplied").outcome).toBeNull();
   });
@@ -448,7 +473,227 @@ describe("findings and outcome gates", () => {
   });
 });
 
+describe("root goal completion", () => {
+  it.each(["VULN_FOUND", "NOT_REPRODUCED", "LOW_ROI"] as const)("does not let an individual %s finding complete an active root goal", (outcome) => {
+    const store = openStore();
+    const hit = produceHit(store);
+    const review = outcome === "NOT_REPRODUCED" ? {
+      summary: "One fixture hypothesis closed",
+      reviews: [{ findingId: hit.findings[0].id, status: "closed" as const, rating: "unrated" as const, reason: "Fixture evidence refutes the hypothesis; reopen for a new identity" }],
+    } : verifiedDecision(store, outcome === "LOW_ROI" ? "info" : "P3");
+    runDecision(store, review);
+    expect(() => runDecision(store, { summary: "Premature task completion", conclusion: { outcome, reason: "One finding resolved" } }, "metacog")).toThrow(/root goal G0 to be satisfied/);
+    expect(store.snapshot()).toMatchObject({ status: "running", outcome: null, goals: [{ id: "G0", status: "active", factIds: [] }] });
+  });
+
+  it.each(["decide", "metacog"] as const)("does not allow %s to abandon the root goal", (mode) => {
+    const store = openStore();
+    expect(() => runDecision(store, { summary: "Stop without completing the goal", updateGoals: [{ id: "G0", status: "abandoned", factIds: [], reason: "Unfinished fixture work" }] }, mode)).toThrow(/root goal cannot be abandoned/);
+    expect(store.snapshot().goals[0].status).toBe("active");
+  });
+
+  it("does not allow ordinary Decide to satisfy the root, even with evidence and a proposed conclusion", () => {
+    const store = openStore();
+    produceHit(store);
+    expect(() => runDecision(store, { ...verifiedDecision(store), ...completeGoal(store) })).toThrow(/Root goal completion requires a fresh metacognitive review/);
+    expect(store.snapshot().goals[0].status).toBe("active");
+    expect(store.snapshot().findings[0].status).toBe("technical_hit");
+  });
+
+  it.each(["none", "NEED_INPUT"] as const)("does not satisfy the root when the same metacognitive review's conclusion is %s", (outcome) => {
+    const store = openStore();
+    produceHit(store);
+    const decision = completeGoal(store);
+    if (outcome === "none") delete decision.conclusion;
+    else decision.conclusion = { outcome, reason: "Need a second fixture identity" };
+    expect(() => runDecision(store, decision, "metacog")).toThrow(/final conclusion in the same review/);
+    expect(store.snapshot()).toMatchObject({ outcome: null, goals: [{ id: "G0", status: "active" }] });
+  });
+
+  it.each(["no facts", "unknown fact"])("requires root completion to reference evidence-backed facts: %s", (missing) => {
+    const store = openStore();
+    produceHit(store);
+    const decision = { ...verifiedDecision(store), ...completeGoal(store) };
+    decision.updateGoals![0].factIds = missing === "no facts" ? [] : ["missing-fact"];
+    expect(() => runDecision(store, decision, "metacog")).toThrow(missing === "no facts" ? /Satisfied goals require evidence-backed facts/ : /Unknown fact reference/);
+    expect(store.snapshot().outcome).toBeNull();
+    expect(store.snapshot().goals[0].status).toBe("active");
+  });
+
+  it("requires active child goals to be resolved before the root can be satisfied", () => {
+    const store = openStore();
+    produceHit(store);
+    runDecision(store, { summary: "Additional user-goal coverage", goals: [{ id: "G1", parentId: "G0", description: "A remaining fixture boundary" }] });
+    expect(() => runDecision(store, { ...verifiedDecision(store), ...completeGoal(store) }, "metacog")).toThrow(/Resolve active child goals first/);
+    expect(store.snapshot().goals.map(goal => goal.status)).toEqual(["active", "active"]);
+  });
+
+  it("does not satisfy the root while an Execute step remains ready", () => {
+    const store = openStore();
+    produceHit(store);
+    runDecision(store, { summary: "Remaining fixture validation", steps: [{ goalId: "G0", from: [], description: "Check another fixture object", successSignal: "Result archived", evidencePlan: "Save original comparison", priority: 20 }] });
+    expect(() => runDecision(store, { ...verifiedDecision(store), ...completeGoal(store) }, "metacog")).toThrow(/Resolve a goal's pending steps first/);
+    expect(store.snapshot().goals[0].status).toBe("active");
+    expect(store.snapshot().steps.some(step => step.status === "ready")).toBe(true);
+  });
+
+  it("rolls back root satisfaction together with an invalid terminal conclusion", () => {
+    const store = openStore();
+    produceHit(store);
+    expect(() => runDecision(store, completeGoal(store), "metacog")).toThrow(/VULN_FOUND requires verified impact/);
+    expect(store.snapshot()).toMatchObject({ outcome: null, goals: [{ id: "G0", status: "active", factIds: [] }] });
+    expect(store.runs().at(-1)?.status).toBe("running");
+  });
+
+  it("can resolve an evidence-backed child hierarchy and finish the root atomically", () => {
+    const store = openStore();
+    const hit = produceHit(store);
+    runDecision(store, { summary: "Model fixture goal hierarchy", goals: [
+      { id: "G1", parentId: "G0", description: "Fixture ownership coverage" },
+      { id: "G2", parentId: "G1", description: "Fixture identity comparison" },
+    ] });
+    const decision = { ...verifiedDecision(store), ...completeGoal(store) };
+    decision.updateGoals!.unshift(
+      { id: "G2", status: "satisfied", factIds: [hit.facts[0].id], reason: "Fixture identity comparison evidenced" },
+      { id: "G1", status: "satisfied", factIds: [hit.facts[0].id], reason: "Fixture ownership coverage evidenced" },
+    );
+    const board = runDecision(store, decision, "metacog");
+    expect(board).toMatchObject({ status: "completed", outcome: "VULN_FOUND" });
+    expect(board.goals.every(goal => goal.status === "satisfied")).toBe(true);
+  });
+
+  it.each(["changed", "missing"] as const)("verifies %s evidence referenced only by root-goal facts before final completion", (damage) => {
+    const store = openStore();
+    produceHit(store);
+    runDecision(store, verifiedDecision(store));
+    const { runId, artifacts } = claimStep(store, "Check remaining fixture coverage");
+    writeFileSync(path.join(artifacts, "coverage.txt"), "Original fixture goal coverage observation");
+    const board = store.applyExecution(runId, {
+      summary: "Remaining fixture coverage recorded", result: "done",
+      evidence: [{ ref: "coverage-e", path: "coverage.txt", description: "Fixture coverage evidence independent of the finding" }],
+      facts: [{ ref: "coverage-f", description: "Remaining fixture coverage observed", evidenceRefs: ["coverage-e"] }],
+    }, usage);
+    const evidence = board.evidence.find(item => !board.findings[0].evidenceIds.includes(item.id))!;
+    const archived = path.join(store.workspace, evidence.path);
+    if (damage === "changed") writeFileSync(archived, "tampered coverage evidence");
+    else rmSync(archived);
+    const decision = completeGoal(store);
+    const rootFact = board.facts.find(fact => fact.evidenceIds.includes(evidence.id))!;
+    decision.updateGoals![0].factIds = [rootFact.id];
+    expect(() => runDecision(store, decision, "metacog")).toThrow(damage === "changed" ? /Evidence changed/ : /ENOENT/);
+    expect(store.snapshot()).toMatchObject({ outcome: null, goals: [{ id: "G0", status: "active", factIds: [] }] });
+    expect(store.snapshot().findings[0].status).toBe("impact_verified");
+  });
+
+  it("keeps the whole unfinished goal tree active when input is missing", () => {
+    const store = openStore();
+    produceHit(store);
+    runDecision(store, { summary: "Missing fixture account blocks remaining coverage", goals: [{ id: "G1", parentId: "G0", description: "Await second fixture account" }] });
+    const board = runDecision(store, { summary: "Missing fixture identity", conclusion: { outcome: "NEED_INPUT", reason: "User must supply second fixture account" } }, "metacog");
+    expect(board).toMatchObject({ status: "paused", outcome: "NEED_INPUT" });
+    expect(board.goals.every(goal => goal.status === "active")).toBe(true);
+    expect(board.findings[0]).toMatchObject({ status: "technical_hit", rating: "unrated" });
+  });
+});
+
 describe("single controller and restart recovery", () => {
+  it.each(["satisfied", "abandoned"] as const)("reopens a legacy %s root once without losing state or replaying steps", (rootStatus) => {
+    const store = openStore();
+    produceHit(store);
+    store.setStatus("paused", "Original legacy pause reason");
+    const previous = legacyFixture(store, board => {
+      board.goals[0].status = rootStatus;
+      board.goals[0].factIds = board.facts.map(fact => fact.id);
+    });
+    const recovered = openStore(store.workspace);
+    const board = recovered.snapshot();
+    expect(board).toMatchObject({ status: "paused", outcome: null, completedSteps: previous.completedSteps, noProgressCount: previous.noProgressCount });
+    expect(board.goals[0]).toEqual({ ...previous.goals[0], status: "active" });
+    for (const field of ["steps", "evidence", "facts", "findings", "usage", "elapsedMs"] as const) expect(board[field]).toEqual(previous[field]);
+    expect(board.reason).toMatch(/Legacy inactive root Goal reopened/);
+    const events = recovered.events().filter(event => event.kind === "legacy_goal_recovered");
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0].payload)).toEqual({ prior: { status: previous.status, outcome: previous.outcome, rootStatus, reason: previous.reason } });
+    const runs = recovered.runs();
+    recovered.close();
+    const reopened = openStore(store.workspace);
+    expect(reopened.snapshot()).toEqual(board);
+    expect(reopened.events().filter(event => event.kind === "legacy_goal_recovered")).toHaveLength(1);
+    expect(reopened.runs()).toEqual(runs);
+  });
+
+  it("allows /start to plan again after reopening an abandoned legacy root", async () => {
+    const store = openStore();
+    legacyFixture(store, board => { board.goals[0].status = "abandoned"; board.status = "paused"; });
+    const recovered = openStore(store.workspace);
+    const modes: Mode[] = [];
+    const controller = new LoopController(recovered, {
+      async run(request) {
+        modes.push(request.mode);
+        expect(request.snapshot.goals[0].status).toBe("active");
+        return {
+          output: request.mode === "decide" ? { summary: "Fresh planning accepted", goals: [{ id: "G-resumed", parentId: "G0", description: "Reassess remaining fixture work" }] } : { summary: "Fixture stops before execution" },
+          usage,
+        };
+      },
+    });
+    await controller.start();
+    expect(modes).toEqual(["decide", "metacog"]);
+    expect(recovered.snapshot().goals).toContainEqual({ id: "G-resumed", parentId: "G0", description: "Reassess remaining fixture work", status: "active", factIds: [] });
+    expect(recovered.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 0 });
+  });
+
+  it.each(["active", "abandoned"] as const)("requires fresh review of legacy completion with a %s root and never starts execution on open", (rootStatus) => {
+    const store = openStore();
+    produceHit(store);
+    runDecision(store, verifiedDecision(store));
+    const previous = legacyFixture(store, board => {
+      board.status = "completed";
+      board.outcome = "VULN_FOUND";
+      board.reason = "Legacy finding-only completion";
+      board.goals[0].status = rootStatus;
+    });
+    const recovered = openStore(store.workspace);
+    const board = recovered.snapshot();
+    expect(board).toMatchObject({ status: "paused", outcome: null, completedSteps: previous.completedSteps, goals: [{ id: "G0", status: "active" }] });
+    expect(board.reason).toMatch(/Legacy completion requires a fresh Goal review/);
+    expect(board.reason).toContain("/start");
+    expect(board.findings).toEqual(previous.findings);
+    expect(board.facts).toEqual(previous.facts);
+    expect(board.evidence).toEqual(previous.evidence);
+    expect(board.steps).toEqual(previous.steps);
+    expect(recovered.runs().every(run => run.status === "completed")).toBe(true);
+    expect(recovered.runs()).toHaveLength(3);
+    const event = recovered.events().find(event => event.kind === "legacy_goal_recovered")!;
+    expect(JSON.parse(event.payload)).toEqual({ prior: { status: "completed", outcome: "VULN_FOUND", rootStatus, reason: previous.reason } });
+    recovered.close();
+    expect(openStore(store.workspace).snapshot()).toEqual(board);
+  });
+
+  it("preserves an already valid completed and satisfied root unchanged", () => {
+    const store = openStore();
+    produceHit(store);
+    const completed = runDecision(store, { ...verifiedDecision(store), ...completeGoal(store) }, "metacog");
+    const events = store.events();
+    store.close();
+    const reopened = openStore(store.workspace);
+    expect(reopened.snapshot()).toEqual(completed);
+    expect(reopened.events()).toEqual(events);
+  });
+
+  it.each(["missing", "not a root"])("does not guess a legacy repair when G0 is %s", (form) => {
+    const store = openStore();
+    const previous = legacyFixture(store, board => {
+      board.status = "completed";
+      board.outcome = "VULN_FOUND";
+      if (form === "missing") board.goals = [];
+      else board.goals[0].parentId = "unknown-parent";
+    });
+    const reopened = openStore(store.workspace);
+    expect(reopened.snapshot()).toEqual(previous);
+    expect(reopened.events().some(event => event.kind === "legacy_goal_recovered")).toBe(false);
+  });
+
   it("refuses a second writer, preserving the first lock and database", () => {
     const store = openStore();
     const lock = path.join(store.dataDir, "controller.lock");

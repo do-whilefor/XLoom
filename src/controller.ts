@@ -50,12 +50,11 @@ export class LoopController {
     this.board("state");
   }
 
-  private budgetReason(board: BoardSnapshot, mode: Mode): string | undefined {
+  private budgetReason(board: BoardSnapshot): string | undefined {
     const { limits } = board.config;
-    if (mode === "execute" && board.completedSteps >= limits.maxSteps) return "Step budget exhausted";
-    if (board.usage.input + board.usage.output >= limits.maxTokens) return "Token budget exhausted";
-    if (board.usage.cost >= limits.maxCost) return "Estimated cost budget exhausted";
-    if ((board.elapsedMs ?? 0) >= limits.maxMinutes * 60000) return "Time budget exhausted";
+    if (limits.maxTokens !== null && board.usage.input + board.usage.output >= limits.maxTokens) return "Token budget exhausted";
+    if (limits.maxCost !== null && board.usage.cost >= limits.maxCost) return "Estimated cost budget exhausted";
+    if (limits.maxMinutes !== null && (board.elapsedMs ?? 0) >= limits.maxMinutes * 60000) return "Time budget exhausted";
     return undefined;
   }
 
@@ -65,8 +64,8 @@ export class LoopController {
     while (this.snapshot().status === "running") {
       let snapshot = this.snapshot();
       if (this.manualMeta) { mode = "metacog"; this.manualMeta = false; }
-      const exhausted = this.budgetReason(snapshot, mode);
-      if (exhausted) { this.store.setStatus("paused", `${exhausted}; no research conclusion was fabricated. Adjust limits in xloom.json before resuming.`); this.board("state"); return; }
+      const exhausted = this.budgetReason(snapshot);
+      if (exhausted) { this.store.setStatus("paused", `${exhausted}; explicit resource limit reached, not Goal completion. Review configured limits in xloom.json before resuming.`); this.board("state"); return; }
       const step: Step | undefined = mode === "execute" ? [...snapshot.steps].filter(item => item.status === "ready").sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))[0] : undefined;
       if (mode === "execute" && !step) { mode = "metacog"; continue; }
       const runId = `${mode}-${randomUUID()}`;
@@ -75,7 +74,7 @@ export class LoopController {
       snapshot = this.store.beginRun(runId, mode, step?.id);
       const claimedStep = step ? snapshot.steps.find(item => item.id === step.id) : undefined;
       this.cancellation = new AbortController();
-      const remainingMs = snapshot.config.limits.maxMinutes * 60000 - (snapshot.elapsedMs ?? 0);
+      const remainingMs = snapshot.config.limits.maxMinutes === null ? Infinity : snapshot.config.limits.maxMinutes * 60000 - (snapshot.elapsedMs ?? 0);
       const timeoutMs = Math.max(1, Math.min(snapshot.config.limits.stepTimeoutSeconds * 1000, remainingMs));
       const cancellation = this.cancellation;
       let timedOut = false;
@@ -92,9 +91,12 @@ export class LoopController {
         if (mode === "execute") this.store.applyExecution(runId, result.output, result.usage);
         else {
           const decision = decisionSchema.parse(result.output);
-          if (decision.conclusion && (mode !== "metacog" || hintsChanged)) {
+          const rootIds = new Set(snapshot.goals.filter(goal => goal.parentId === null).map(goal => goal.id));
+          const completesRoot = decision.updateGoals?.some(goal => rootIds.has(goal.id));
+          if ((decision.conclusion || completesRoot) && (mode !== "metacog" || hintsChanged)) {
             needsCompletionReview = true;
             delete decision.conclusion;
+            if (decision.updateGoals) decision.updateGoals = decision.updateGoals.filter(goal => !rootIds.has(goal.id));
             this.notice(hintsChanged ? "New hint arrived during planning; conclusion deferred for a fresh review." : "Completion proposed; starting a fresh metacognitive review before concluding.");
           }
           this.store.applyDecision(runId, decision, result.usage);
@@ -121,9 +123,6 @@ export class LoopController {
         const due = current.completedSteps - current.lastMetaStep >= current.config.limits.metacogEvery;
         mode = due || current.noProgressCount >= current.config.limits.maxNoProgress || completed?.status === "blocked" ? "metacog" : "decide";
       } else if (mode === "metacog") {
-        if (current.noProgressCount >= current.config.limits.maxNoProgress) {
-          this.store.setStatus("paused", "No-progress threshold reached; metacognitive review saved. Inspect the plan and /start to continue."); this.board("state"); return;
-        }
         if (!current.steps.some(item => item.status === "ready")) {
           this.store.setStatus("paused", "Review produced no executable step or evidence-backed conclusion. Add a hint and resume."); this.board("state"); return;
         }

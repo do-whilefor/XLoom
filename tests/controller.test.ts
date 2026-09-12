@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { LoopController } from "../src/controller.js";
+import { projectConfigSchema } from "../src/schema.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent, ProjectConfig, RunRequest, RunResult, Usage } from "../src/types.js";
 
@@ -17,15 +18,19 @@ const plan = (description = "Compare synthetic fixture identities"): Decision =>
   steps: [{ goalId: "G0", from: [], description, successSignal: "Fixture artifact saved", evidencePlan: "Save synthetic response fixture", priority: 50 }],
 });
 
-function setup(handler: (request: RunRequest) => Promise<RunResult> | RunResult, limits: Partial<ProjectConfig["limits"]> = {}) {
+function setup(handler: (request: RunRequest) => Promise<RunResult> | RunResult, limits: Partial<ProjectConfig["limits"]> & { maxSteps?: number } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "xloom-controller-test-"));
   roots.push(root);
-  const config = defaultConfig("Exercise local loop protocol with synthetic fixtures only");
-  Object.assign(config.limits, limits);
+  const defaults = defaultConfig("Exercise local loop protocol with synthetic fixtures only");
+  const config = projectConfigSchema.parse({ ...defaults, limits: { ...defaults.limits, ...limits } });
   const store = new BlackboardStore(root, config);
   stores.push(store);
   const requests: RunRequest[] = [];
-  const run = vi.fn(async (request: RunRequest) => { requests.push(request); return handler(request); });
+  const run = vi.fn(async (request: RunRequest) => {
+    requests.push(request);
+    if (requests.length > 100) throw new Error("Synthetic test exceeded its expected run count");
+    return handler(request);
+  });
   const controller = new LoopController(store, { run });
   controllers.push(controller);
   const events: LoopEvent[] = [];
@@ -47,6 +52,7 @@ function fixtureExecution(request: RunRequest): Execution {
 function closure(request: RunRequest): Decision {
   return {
     summary: "Synthetic terminal-state validation, not a real vulnerability conclusion",
+    updateGoals: [{ id: "G0", status: "satisfied", factIds: [request.snapshot.facts[0]!.id], reason: "The synthetic fixture goal and its evidence were reviewed" }],
     reviews: [{ findingId: request.snapshot.findings[0]!.id, status: "closed", rating: "unrated", reason: "Fixture only: expected labels match; reopen this synthetic case when fixture expectations change" }],
     conclusion: { outcome: "NOT_REPRODUCED", reason: "Synthetic protocol test completed; no live target was tested" },
   };
@@ -102,17 +108,19 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.controller.snapshot().status).toBe("completed");
   });
 
-  it("allows completion review at the exact Step budget without executing an extra step", async () => {
+  it("ignores a legacy 24-Step cap and continues until the model reviews the final goal at Step 27", async () => {
     const test = setup((request) => {
       if (request.mode === "execute") return result(fixtureExecution(request));
-      if (!request.snapshot.completedSteps) return result(plan());
-      if (request.mode === "metacog") return result(closure(request));
-      return result({ summary: "Propose fixture conclusion", conclusion: { outcome: "NOT_REPRODUCED", reason: "Synthetic only" } });
-    }, { maxSteps: 1 });
+      if (request.mode === "metacog" && request.snapshot.completedSteps === 27) return result(closure(request));
+      return result(plan(`Synthetic goal check ${request.snapshot.completedSteps + 1}`));
+    }, { maxSteps: 24 });
     await test.controller.start();
-    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1 });
-    expect(test.requests.filter((r) => r.mode === "execute")).toHaveLength(1);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 27 });
+    expect(test.controller.snapshot().config.limits).not.toHaveProperty("maxSteps");
+    expect(test.requests.filter((r) => r.mode === "execute")).toHaveLength(27);
+    expect(test.requests.find((request) => request.mode === "execute" && request.snapshot.completedSteps === 24)?.snapshot.goals[0]?.status).toBe("active");
     expect(test.requests.at(-1)?.mode).toBe("metacog");
+    expect(test.controller.snapshot().goals[0]).toMatchObject({ id: "G0", status: "satisfied" });
   });
 
   it("runs metacognition after repeated no-progress outputs then pauses without NEED_INPUT", async () => {
@@ -125,7 +133,76 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.requests.map((r) => r.mode)).toEqual(["decide", "execute", "decide", "execute", "metacog"]);
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, noProgressCount: 2, completedSteps: 2, lastMetaStep: 2 });
     expect(test.controller.snapshot().steps.every((step) => step.status === "no_progress")).toBe(true);
-    expect(test.controller.snapshot().reason).toContain("No-progress");
+    expect(test.controller.snapshot().reason).toContain("no executable step");
+  });
+
+  it("uses stagnation to replan through metacognition and continues when the new plan is executable", async () => {
+    const test = setup((request) => {
+      if (request.mode === "execute") return result(request.snapshot.completedSteps < 2
+        ? { summary: "No synthetic state change", result: "no_progress" }
+        : fixtureExecution(request));
+      if (request.snapshot.completedSteps >= 3) return result(closure(request));
+      if (request.mode === "metacog") {
+        expect(request.snapshot.noProgressCount).toBe(2);
+        return result(plan("Change the synthetic identity and entry point after stagnation"));
+      }
+      return result(plan(`Synthetic initial attempt ${request.snapshot.completedSteps + 1}`));
+    }, { maxNoProgress: 2, metacogEvery: 9 });
+    await test.controller.start();
+    expect(test.requests.map((request) => request.mode)).toEqual(["decide", "execute", "decide", "execute", "metacog", "execute", "decide", "metacog"]);
+    expect(test.requests[5]?.step?.description).toContain("Change the synthetic identity");
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 3, noProgressCount: 0 });
+    expect(test.events.filter((event) => event.snapshot?.status === "paused")).toHaveLength(0);
+  });
+
+  it("lets fresh metacognition reject an early goal-completion proposal and execute its replacement plan", async () => {
+    let reviews = 0;
+    const test = setup((request) => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (!request.snapshot.completedSteps) return result(plan());
+      if (request.mode === "decide") return result({
+        summary: "Premature synthetic completion proposal",
+        updateGoals: closure(request).updateGoals,
+        conclusion: closure(request).conclusion,
+      });
+      expect(request.snapshot.goals[0]?.status).toBe("active");
+      if (++reviews === 1) return result(plan("Check a missing synthetic entry point before completing the goal"));
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.map((request) => request.mode)).toEqual(["decide", "execute", "decide", "metacog", "execute", "decide", "metacog"]);
+    expect(reviews).toBe(2);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", completedSteps: 2 });
+    expect(test.controller.snapshot().goals[0]?.status).toBe("satisfied");
+  });
+
+  it("cannot turn a closed individual finding into completion while the root goal remains active", async () => {
+    const test = setup((request) => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (!request.snapshot.completedSteps) return result(plan());
+      const decision = closure(request);
+      delete decision.updateGoals;
+      return result(decision);
+    }, { metacogEvery: 1 });
+    await test.controller.start();
+    expect(test.controller.snapshot()).toMatchObject({ status: "error", outcome: null, completedSteps: 1 });
+    expect(test.controller.snapshot().goals[0]?.status).toBe("active");
+    expect(test.controller.snapshot().findings[0]?.status).toBe("lead");
+    expect(test.controller.snapshot().reason).toMatch(/root goal.*G0.*satisfied/i);
+  });
+
+  it("defers a root-only completion update from ordinary Decide to a fresh metacognitive review", async () => {
+    const test = setup((request) => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (!request.snapshot.completedSteps) return result(plan());
+      if (request.mode === "decide") return result({ summary: "Premature root-only proposal", updateGoals: closure(request).updateGoals });
+      expect(request.snapshot.goals[0]?.status).toBe("active");
+      expect(request.snapshot.outcome).toBeNull();
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.map((request) => request.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED" });
   });
 
   it("reviews an empty plan once then pauses without inventing missing inputs", async () => {
@@ -206,9 +283,11 @@ describe("LoopController interruption and fresh boundaries", () => {
       if (request.mode === "decide") {
         controller.hint("New synthetic fixture expectation arrived during Decide");
         expect(request.snapshot.hints).toHaveLength(0);
-        return result({ summary: "Propose fixture completion", conclusion: { outcome: "NOT_REPRODUCED", reason: "Synthetic completion" } });
+        return result(closure(request));
       }
       expect(request.snapshot.hints[0]!.content).toContain("New synthetic");
+      expect(request.snapshot.goals[0]?.status).toBe("active");
+      expect(request.snapshot.outcome).toBeNull();
       return result(closure(request));
     });
     controller = test.controller;
@@ -225,7 +304,11 @@ describe("LoopController interruption and fresh boundaries", () => {
       if (request.mode === "execute") return result(fixtureExecution(request));
       if (request.mode === "decide") return result(plan());
       if (++reviews === 1) controller.hint("Fixture changed while metacognition was in flight");
-      else expect(request.snapshot.hints).toHaveLength(1);
+      else {
+        expect(request.snapshot.hints).toHaveLength(1);
+        expect(request.snapshot.goals[0]?.status).toBe("active");
+        expect(request.snapshot.outcome).toBeNull();
+      }
       return result(closure(request));
     }, { metacogEvery: 1 });
     controller = test.controller;
@@ -255,23 +338,44 @@ describe("LoopController interruption and fresh boundaries", () => {
     expect(new Set(test.requests.map((r) => r.snapshot.revision)).size).toBe(4);
   });
 
-  it("honors a queued manual meta review even when the Step budget blocks more execution", async () => {
+  it("honors a queued manual review and continues the pending plan without a Step cap", async () => {
     let controller!: LoopController;
     const test = setup((request) => {
-      if (request.mode === "execute") return result({ summary: "No fixture change", result: "no_progress" });
-      if (request.mode === "metacog") return result({ summary: "Review Step budget boundary" });
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (request.snapshot.completedSteps === 2) return result(closure(request));
+      if (request.mode === "metacog") return result({ summary: "Manual review accepts the pending synthetic plan" });
       if (request.snapshot.completedSteps) controller.requestMetacog();
       return result(plan(`Synthetic attempt ${request.snapshot.completedSteps + 1}`));
-    }, { maxSteps: 1, maxNoProgress: 5, metacogEvery: 9 });
+    }, { maxNoProgress: 5, metacogEvery: 9 });
     controller = test.controller;
     await controller.start();
-    expect(test.requests.map((r) => r.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
-    expect(controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 1 });
-    expect(controller.snapshot().reason).toContain("Step budget");
+    expect(test.requests.map((r) => r.mode)).toEqual(["decide", "execute", "decide", "metacog", "execute", "decide", "metacog"]);
+    expect(controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 2 });
   });
 });
 
 describe("LoopController budgets and errors", () => {
+  it("leaves optional budgets disabled by default and can complete beyond the former time, token and cost defaults", async () => {
+    let time = Date.now();
+    const now = vi.spyOn(Date, "now").mockImplementation(() => time);
+    try {
+      const test = setup((request) => {
+        time += 31 * 60_000;
+        const usage = { input: 300_000, output: 20_000, cost: 6 };
+        if (request.mode === "execute") return result(fixtureExecution(request), usage);
+        return result(request.snapshot.completedSteps ? closure(request) : plan(), usage);
+      }, { stepTimeoutSeconds: 3600 });
+      expect(test.controller.snapshot().config.limits).toMatchObject({ maxMinutes: null, maxTokens: null, maxCost: null });
+      await test.controller.start();
+      const board = test.controller.snapshot();
+      expect(test.requests.map((request) => request.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+      expect(board).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1, usage: { input: 1_200_000, output: 80_000, cost: 24 } });
+      expect(board.elapsedMs).toBeGreaterThan(30 * 60_000);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it.each(["decide", "execute"] as const)("cleans up malformed usage from %s without committing proposals and can resume in-process", async (invalidMode) => {
     let invalidSent = false;
     const invalidUsage = { input: 4, output: 1, cost: "unknown" } as unknown as Usage;
@@ -306,6 +410,7 @@ describe("LoopController budgets and errors", () => {
     expect(test.run).toHaveBeenCalledOnce();
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 0 });
     expect(test.controller.snapshot().reason).toContain(reason);
+    expect(test.controller.snapshot().goals[0]?.status).toBe("active");
     expect(test.controller.snapshot().steps[0]!.attempts).toBe(0);
   });
 
@@ -315,6 +420,7 @@ describe("LoopController budgets and errors", () => {
     expect(test.run).toHaveBeenCalledOnce();
     expect(test.requests[0]!.signal.aborted).toBe(true);
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, usage: { input: 7, output: 2, cost: 0.0004 } });
+    expect(test.controller.snapshot().goals[0]?.status).toBe("active");
   });
 
   it("records schema failures without leaking partial proposals or fabricating a result", async () => {

@@ -53,6 +53,7 @@ export class BlackboardStore {
         assert(previous.config.goal === config.goal && previous.config.scope === config.scope,
           "Existing blackboard belongs to a different goal/scope. Use a new workspace for a new task.");
         this.recover();
+        this.recoverLegacyGoal();
         if (JSON.stringify(this.snapshot().config) !== JSON.stringify(config)) this.mutate("config_updated", {}, board => { board.config = config; });
       }
       this.project();
@@ -130,6 +131,22 @@ export class BlackboardStore {
     });
   }
 
+  private recoverLegacyGoal(): void {
+    const previous = this.snapshot();
+    const root = previous.goals.find(goal => goal.id === "G0" && goal.parentId === null);
+    if (!root || (previous.status === "completed" ? root.status === "satisfied" : root.status === "active")) return;
+    this.mutate("legacy_goal_recovered", { prior: { status: previous.status, outcome: previous.outcome, rootStatus: root.status, reason: previous.reason } }, board => {
+      board.goals.find(goal => goal.id === "G0" && goal.parentId === null)!.status = "active";
+      if (board.status === "completed") {
+        board.status = "paused";
+        board.outcome = null;
+        board.reason = "Legacy completion requires a fresh Goal review. State and evidence retained; no Step was replayed. Use /start to review the whole Goal.";
+      } else {
+        board.reason = "Legacy inactive root Goal reopened for fresh planning. State and evidence retained; no Step was replayed. Use /start to continue.";
+      }
+    });
+  }
+
   setStatus(status: RunStatus, reason: string): BoardSnapshot {
     return this.mutate("status", { status, reason }, board => {
       board.status = status; board.reason = reason;
@@ -198,6 +215,11 @@ export class BlackboardStore {
       for (const update of decision.updateGoals ?? []) {
         const goal = board.goals.find(item => item.id === update.id);
         assert(goal?.status === "active", "Unknown or inactive goal.");
+        if (goal.id === "G0") {
+          assert(update.status === "satisfied", "The root goal cannot be abandoned; unfinished work must remain active.");
+          assert(run.mode === "metacog", "Root goal completion requires a fresh metacognitive review.");
+          assert(decision.conclusion && decision.conclusion.outcome !== "NEED_INPUT", "Root goal completion requires a final conclusion in the same review; missing input is not completion.");
+        }
         factsExist(update.factIds);
         if (update.status === "satisfied") assert(update.factIds.length > 0, "Satisfied goals require evidence-backed facts.");
         assert(!board.steps.some(step => step.goalId === goal.id && ["ready", "claimed"].includes(step.status)), "Resolve a goal's pending steps first.");
@@ -343,6 +365,15 @@ export class BlackboardStore {
     }
     assert(!board.steps.some(step => ["ready", "claimed"].includes(step.status)), "Pending steps must be completed or explicitly abandoned before conclusion.");
     assert(board.completedSteps > 0, "Cannot conclude before execution.");
+    const root = board.goals.find(goal => goal.id === "G0" && goal.parentId === null);
+    assert(root?.status === "satisfied", "Final completion requires the root goal G0 to be satisfied, not just an individual finding.");
+    assert(!board.goals.some(goal => goal.id !== "G0" && goal.status === "active"), "Resolve all active child goals before final completion.");
+    assert(root.factIds.length > 0, "Root goal completion requires evidence-backed facts.");
+    for (const factId of root.factIds) {
+      const fact = board.facts.find(item => item.id === factId);
+      assert(fact && fact.evidenceIds.length > 0, "Root goal completion requires valid evidence-backed facts.");
+      for (const evidenceId of fact.evidenceIds) this.verifyEvidence(board.evidence.find(item => item.id === evidenceId)!);
+    }
     if (outcome === "VULN_FOUND") {
       const reportable = board.findings.filter(item => item.status === "impact_verified" && ["P1", "P2", "P3"].includes(item.rating));
       assert(reportable.length > 0, "VULN_FOUND requires verified impact and a reproducible PoC.");

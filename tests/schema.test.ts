@@ -20,8 +20,9 @@ describe("project configuration", () => {
   it("uses user input as scope without extra authorization settings", () => {
     const config = defaultConfig("测试本地 Web 靶场");
     expect(config.scope).toBe(config.goal);
-    expect(config.limits).toEqual({ maxSteps: 24, maxNoProgress: 3, maxMinutes: 30, maxTokens: 200_000, maxCost: 5, maxTurnsPerRun: 12, stepTimeoutSeconds: 180, metacogEvery: 3 });
+    expect(config.limits).toEqual({ maxNoProgress: 3, maxMinutes: null, maxTokens: null, maxCost: null, maxTurnsPerRun: 12, stepTimeoutSeconds: 180, metacogEvery: 3 });
     expect(config.models.decide.model).toBe("claude-sonnet-4-6");
+    expect(config.models.decide).not.toHaveProperty("apiKeyEnv");
     expect(config.models.execute).not.toBe(config.models.decide);
     expect(config).not.toHaveProperty("authorization");
   });
@@ -35,8 +36,26 @@ describe("project configuration", () => {
 
   it.each([0, -1, 1.5, NaN, Infinity, 10_001])("rejects invalid maxSteps %s", (maxSteps) => {
     const config = defaultConfig("target");
-    config.limits.maxSteps = maxSteps;
+    Object.assign(config.limits, { maxSteps });
     expect(projectConfigSchema.safeParse(config).success).toBe(false);
+  });
+
+  it("accepts legacy maxSteps but removes it, without discarding explicit resource limits", () => {
+    const config = defaultConfig("target");
+    Object.assign(config.limits, { maxSteps: 24, maxTokens: 50000, maxCost: 2, maxMinutes: 15 });
+    const parsed = projectConfigSchema.parse(config);
+    expect(parsed.limits).not.toHaveProperty("maxSteps");
+    expect(parsed.limits).toMatchObject({ maxTokens: 50000, maxCost: 2, maxMinutes: 15 });
+  });
+
+  it.each(["maxTokens", "maxCost", "maxMinutes"])("supports opting out of %s, not invalid numerical budgets", (field) => {
+    const config = defaultConfig("target");
+    for (const value of [null, 5]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(true);
+    for (const value of [0, -1, NaN, Infinity]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(false);
+  });
+
+  it.each(["google-generative-ai", "bedrock-converse-stream", "azure-openai-responses", "future-pi-api"])("delegates API support for %s to Pi instead of a local allowlist", (api) => {
+    expect(modelConfigSchema.parse({ provider: "pi-provider", model: "pi-model", api }).api).toBe(api);
   });
 
   it.each(["apiKey", "hooks", "skills", "mcpServers"])("rejects unknown config field %s", (field) => {

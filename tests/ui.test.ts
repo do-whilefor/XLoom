@@ -10,7 +10,7 @@ function snapshot(): BoardSnapshot {
     lastMetaStep: 0, lastMetaRevision: 0, usage: { input: 100, output: 80, cost: 0.02 },
     config: { version: 1, title: "测试项目", goal: "检查授权对象的安全边界", scope: "localhost", context: "",
       models: { decide: { provider: "test", model: "test" }, execute: { provider: "test", model: "test" } },
-      limits: { maxSteps: 10, maxNoProgress: 3, maxMinutes: 10, maxTokens: 10000, maxCost: 1, maxTurnsPerRun: 5, stepTimeoutSeconds: 60, metacogEvery: 3 } },
+      limits: { maxNoProgress: 3, maxMinutes: 10, maxTokens: 10000, maxCost: 1, maxTurnsPerRun: 5, stepTimeoutSeconds: 60, metacogEvery: 3 } },
     goals: [{ id: "g1", description: "验证对象归属", parentId: null, status: "active", factIds: [] }],
     facts: [{ id: "f1", description: "已保存响应", stepId: "s1", evidenceIds: ["e1"] }],
     steps: [{ id: "s1", goalId: "g1", from: [], description: "账户对比", successSignal: "实际响应差异", evidencePlan: "保存响应", priority: 1, status: "done", attempts: 1, runId: "r1", leaseUntil: null }],
@@ -76,6 +76,8 @@ describe("TUI formatting", () => {
     expect(text).toContain("e1 .xloom/runs/r1/response.txt");
     expect(text).toContain("next: 验证影响");
     expect(statusLine(board)).toContain("180 tokens");
+    expect(statusLine(board)).toContain("step 1");
+    expect(statusLine(board)).not.toMatch(/step \d+\//);
   });
 
   it("bounds streamed output and updates one collapsed entry per tool call", () => {

@@ -4,7 +4,7 @@ import type { ProjectConfig } from "./types.js";
 
 /** A model registry default, not a model availability check or a network call. */
 export function defaultConfig(goal: string, scope = goal): ProjectConfig {
-  const model = { provider: "anthropic", model: "claude-sonnet-4-6", apiKeyEnv: "ANTHROPIC_API_KEY", thinking: "medium" as const };
+  const model = { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "medium" as const };
   return projectConfigSchema.parse({
     version: 1,
     title: "xloom",

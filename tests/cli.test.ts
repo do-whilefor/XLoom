@@ -24,7 +24,7 @@ function workspace(): string {
 function cli(args: string[], cwd = workspace()) {
   const result = spawnSync(process.execPath, [tsxFile, cliFile, ...args], {
     cwd, encoding: "utf8", timeout: 20_000, windowsHide: true,
-    env: { ...process.env, [missingKeyVariable]: "", NO_COLOR: "1" },
+    env: { ...process.env, [missingKeyVariable]: "", NO_COLOR: "1", PI_CODING_AGENT_DIR: path.join(cwd, ".pi-test"), PI_OFFLINE: "1" },
     maxBuffer: 2 * 1024 * 1024,
   });
   if (result.error) throw result.error;
@@ -83,6 +83,8 @@ describe("command-line entry points", () => {
     const config = loadConfig(file);
     expect(config.goal).toBe("验证本地 fixture 对象权限");
     expect(config.scope).toBe(config.goal);
+    expect(config.limits).not.toHaveProperty("maxSteps");
+    expect(config.limits.maxTokens).toBeNull();
     const original = readFileSync(file);
     const repeated = cli(["init", "--goal", "Must not replace the original goal"], root);
     expect(repeated.status).toBe(1);
@@ -154,9 +156,20 @@ describe("command-line entry points", () => {
   it("ships a valid example config with the same strict runtime contract", () => {
     const config = loadConfig(path.join(projectRoot, "xloom.example.json"));
     expect(config.version).toBe(1);
-    expect(config.models.decide.apiKeyEnv).toBe("ANTHROPIC_API_KEY");
-    expect(config.models.execute.apiKeyEnv).toBe("ANTHROPIC_API_KEY");
+    expect(config.models.decide.apiKeyEnv).toBeUndefined();
+    expect(config.models.execute.apiKeyEnv).toBeUndefined();
     expect(config.context).toContain("不会自动加载");
+  });
+
+  it("lists Pi models without project config, credentials, or an Agent run", () => {
+    const root = workspace();
+    const result = cli(["models", "--provider", "anthropic"], root);
+    expect(result.status).toBe(0);
+    const models = JSON.parse(result.stdout) as Record<string, string>[];
+    expect(models.some(model => model.model === "claude-sonnet-4-6")).toBe(true);
+    expect(models.every(model => model.provider === "anthropic" && Object.keys(model).sort().join() === "api,model,provider")).toBe(true);
+    expect(existsSync(path.join(root, ".xloom"))).toBe(false);
+    expect(existsSync(path.join(root, "xloom.json"))).toBe(false);
   });
 });
 

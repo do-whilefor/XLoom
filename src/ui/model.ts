@@ -46,7 +46,7 @@ export function fitLines(value: string, width: number): string[] {
 
 export function statusLine(board: BoardSnapshot): string {
   const tokens = board.usage.input + board.usage.output;
-  return `${board.status} · r${board.revision} · step ${board.completedSteps}/${board.config.limits.maxSteps}` +
+  return `${board.status} · r${board.revision} · step ${board.completedSteps}` +
     ` · ${tokens.toLocaleString("en-US")} tokens · $${board.usage.cost.toFixed(3)}` +
     (board.outcome ? ` · ${board.outcome}` : "");
 }

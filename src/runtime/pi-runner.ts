@@ -65,25 +65,24 @@ export class PiRunner implements AgentRunner {
       const config = request.snapshot.config.models[request.mode === "execute" ? "execute" : "decide"];
       const selected = await (this.options.resolveModel ?? resolveModel)(config, request.signal);
       request.signal.throwIfAborted();
-      const secrets = [...new Set([
-        ...(selected.secrets ?? []),
-        ...Object.values(request.snapshot.config.models).map((entry) => entry.apiKeyEnv ? process.env[entry.apiKeyEnv] : undefined)
-          .filter((secret): secret is string => typeof secret === "string" && secret.length > 0),
-      ])];
-      redact = (value) => secrets.reduce((clean, secret) => secret ? clean.split(secret).join("[MODEL_CREDENTIAL_REDACTED]") : clean, value);
+      const configuredSecrets = Object.values(request.snapshot.config.models).map((entry) => entry.apiKeyEnv ? process.env[entry.apiKeyEnv] : undefined)
+        .filter((secret): secret is string => typeof secret === "string" && secret.length > 0);
+      // Pi may refresh OAuth during a run; include credentials discovered after resolution.
+      const secrets = () => [...new Set([...(selected.secrets ?? []), ...configuredSecrets])].sort((a, b) => b.length - a.length);
+      redact = (value) => secrets().reduce((clean, secret) => secret ? clean.split(secret).join("[MODEL_CREDENTIAL_REDACTED]") : clean, value);
       await mkdir(join(request.runDir, "artifacts"), { recursive: true });
       const prompt = buildRunPrompt(request);
       await writeFile(join(request.runDir, "input.json"), redact(JSON.stringify({ mode: request.mode, ...prompt }, null, 2)), { flag: "wx" });
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
       let pendingText = "";
-      const secretTail = Math.max(0, ...secrets.map((secret) => secret.length - 1));
       const emitText = (delta: string, flush = false) => {
         pendingText = redact(pendingText + delta);
+        const secretTail = Math.max(0, ...secrets().map((secret) => secret.length - 1));
         const available = flush ? pendingText.length : Math.max(0, pendingText.length - secretTail);
         if (available) emit({ type: "text", mode: request.mode, text: pendingText.slice(0, available) });
         pendingText = pendingText.slice(available);
       };
-      if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Custom endpoint pricing is unknown; cost is an estimate and monetary budget cannot be enforced accurately. Token and time limits still apply." });
+      if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
         initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: request.mode === "execute" ? executeTools(request.workspace) : [] },
         streamFn: selected.streamFn,
@@ -95,8 +94,8 @@ export class PiRunner implements AgentRunner {
           const { limits } = request.snapshot.config;
           const spent = request.snapshot.usage;
           const exhausted = turns >= limits.maxTurnsPerRun
-            || spent.input + spent.output + usage.input + usage.output >= limits.maxTokens
-            || (limits.maxCost > 0 && spent.cost + usage.cost >= limits.maxCost);
+            || (limits.maxTokens !== null && spent.input + spent.output + usage.input + usage.output >= limits.maxTokens)
+            || (limits.maxCost !== null && spent.cost + usage.cost >= limits.maxCost);
           budgetStop = exhausted && hasToolCalls;
           return exhausted;
         },

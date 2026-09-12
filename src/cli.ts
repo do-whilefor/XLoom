@@ -19,6 +19,7 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom status               Read the saved board without running agents
   xloom report               Print a Markdown report with evidence references
   xloom doctor               Check local Node/PowerShell/config/model credentials
+  xloom models [--provider NAME]  List Pi's local built-in/cached/custom model catalog
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
 Options: --workspace PATH  --config PATH  --help
@@ -41,20 +42,29 @@ function savedBoard(workspace: string): BoardSnapshot {
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ options: {
     goal: { type: "string" }, scope: { type: "string" }, workspace: { type: "string" }, config: { type: "string" },
+    provider: { type: "string" },
     headless: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
   }, allowPositionals: true, strict: true });
   const command = positionals[0] ?? "run";
   if (values.help || command === "help") { process.stdout.write(help); return; }
   if (positionals.length > 1) throw new Error("Unexpected positional arguments; use --goal for task text.");
   const demo = command === "demo";
-  if (!["init", "run", "status", "report", "doctor", "demo"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
+  if (!["init", "run", "status", "report", "doctor", "demo", "models"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
+  if (values.provider !== undefined && command !== "models") throw new Error("--provider is only supported by the models command.");
+  if (command === "models") {
+    const { listModels } = await import("./runtime/index.js");
+    const models = await listModels(values.provider);
+    // Select public identifiers only; never print model headers or authentication.
+    process.stdout.write(`${JSON.stringify(models.map(model => ({ provider: model.provider, model: model.id, api: model.api })), null, 2)}\n`);
+    return;
+  }
   if (demo && (values.workspace || values.config)) throw new Error("Demo always uses a new temporary workspace; omit --workspace and --config.");
   const workspace = demo ? mkdtempSync(path.join(tmpdir(), "xloom-demo-")) : realpathSync(path.resolve(values.workspace ?? process.cwd()));
   const configPath = path.resolve(workspace, values.config ?? "xloom.json");
   if (command === "init") {
     if (!values.goal?.trim()) throw new Error("init requires --goal. Your input defines the authorized task and targets.");
     saveNewConfig(configPath, defaultConfig(values.goal, values.scope));
-    process.stdout.write(`Created ${configPath}\nEdit models/context/limits, set the model key environment variable, then run xloom.\n`);
+    process.stdout.write(`Created ${configPath}\nChoose models via xloom models, configure context, and use Pi credentials or a model key environment variable. Goal completion, not a Step count, ends the loop.\n`);
     return;
   }
   if (command === "status" || command === "report") {
@@ -71,7 +81,7 @@ async function main(): Promise<void> {
       const { resolveModel } = await import("./runtime/index.js");
       for (const role of ["decide", "execute"] as const) {
         const resolved = await resolveModel(config.models[role], new AbortController().signal);
-        process.stdout.write(`${role}: ${resolved.model.provider}/${resolved.model.id}; local credential resolution OK (no model request)\n`);
+        process.stdout.write(`${role}: ${resolved.model.provider}/${resolved.model.id}; Pi credential resolution OK (no model request)\n`);
       }
     } else process.stdout.write("No xloom.json yet; use init --goal. No model request was made.\n");
     return;
