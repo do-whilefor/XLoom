@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getCapabilities, Markdown, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, getOsc8LinkAtColumn, Markdown, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
 import { FeedView, THOUGHT_LINK_PREFIX } from "../src/ui/feed-view.js";
 import { EventFeed, plainText, type FeedEntry } from "../src/ui/model.js";
 
@@ -34,6 +34,25 @@ describe("compact Claude-like feed presentation", () => {
     expect(output).not.toContain("**README**");
     expect(output).not.toContain("`read`");
     expect(output).not.toMatch(/Assistant|Decide|Execute|You → Task/);
+  });
+
+  it("renders a complete terminal report as Markdown, including its conclusion beyond preview limits", () => {
+    const { feed, view, screen } = setup();
+    const summary = `**任务未完成**\n\n已确认第一项结果。\n\n${"- 已保存结果及其证据引用，下一步仍须核验剩余目标。\n".repeat(500)}\n**第二项尚未完成**，使用 /start 继续。`;
+    feed.beginWork();
+    feed.runtime({ type: "usage", mode: "execute", text: "", usage: { input: 40, output: 12, cost: 0.1 } });
+    feed.result("execute", summary, undefined, true);
+    feed.finishWork("paused");
+    expect(summary.length).toBeGreaterThan(9000);
+    const output = screen();
+    expect(output).toContain("任务未完成");
+    expect(output).toContain("已确认第一项结果");
+    expect(output).toContain("第二项尚未完成，使用 /start 继续。");
+    expect(output).toContain("paused");
+    expect(output).toContain("52 tokens");
+    expect(output).not.toMatch(/\*\*|详情已截断|\$/);
+    expect(output.indexOf("第二项尚未完成")).toBeLessThan(output.indexOf("Worked for"));
+    for (const line of view.render(90)) expect(visibleWidth(line)).toBeLessThanOrEqual(90);
   });
 
   it("summarizes completed tools and keeps only the active tool beneath its role group", () => {
@@ -239,9 +258,95 @@ describe("real provider thinking blocks and response duration", () => {
     expect(screen()).toContain("∴ **真实 provider 思考**");
     expect(screen()).toContain("不是 Markdown");
     expect(screen()).not.toContain("DO_NOT_RENDER_UNRELATED_PROTOCOL");
-    expect(thoughtLinks(view)).toEqual([link]);
+    expect(thoughtLinks(view)).toEqual([link, link, link]);
     expect(view.toggleThinkingLink(link!)).toBe(true);
     expect(screen()).not.toContain("真实 provider 思考");
+  });
+
+  it("collapses the owning group from any wrapped thought row without changing neighboring groups", () => {
+    const { view, screen } = setup([
+      { kind: "thinking", label: "Decide", text: "FIRST_PROVIDER_TEXT " + "wrapped 思考 ".repeat(12), startedAt: 0, endedAt: 6000, expanded: true },
+      { kind: "message", label: "Decide", text: "Summary boundary." },
+      { kind: "thinking", label: "Execute", text: "SECOND_PROVIDER_TEXT", startedAt: 6000, endedAt: 9000, expanded: true },
+    ]);
+    const rows = view.render(32);
+    const boundary = rows.findIndex(row => plainText(row).includes("Summary boundary."));
+    const firstGroup = rows.slice(0, boundary).filter(row => plainText(row).trim());
+    const firstUrl = getOsc8LinkAtColumn(firstGroup[0]!, 2)!;
+    expect(firstGroup.length).toBeGreaterThan(4);
+    for (const row of firstGroup) for (let column = 0; column < visibleWidth(row); column++) {
+      expect(getOsc8LinkAtColumn(row, column)).toBe(firstUrl);
+    }
+    expect(getOsc8LinkAtColumn(rows[boundary]!, 3)).toBeUndefined();
+    const bodyUrl = getOsc8LinkAtColumn(firstGroup.at(-1)!, 5)!;
+    expect(view.toggleThinkingLink(bodyUrl)).toBe(true);
+    expect(screen()).not.toContain("FIRST_PROVIDER_TEXT");
+    expect(screen()).toContain("SECOND_PROVIDER_TEXT");
+    expect(screen()).toContain("▸ Thought for 6s");
+    expect(view.toggleThinkingLink(firstUrl)).toBe(true);
+    expect(screen()).toContain("FIRST_PROVIDER_TEXT");
+  });
+
+  it.each(["done", "running", "error"] as const)("collapses a %s tool-only group from its command, wrapped input, output and diagnostics", state => {
+    const { view, screen } = setup([
+      { kind: "tool", label: "PowerShell", text: "COMMAND_SOURCE", state, details: "INPUT_DETAIL " + "parameter ".repeat(16), output: "OUTPUT_BODY\n" + (state === "error" ? "Command failed: exit code 1\n" : "") + "wrapped output ".repeat(16), expanded: true },
+      { kind: "diagnostic", label: "Execute", text: "DIAGNOSTIC_DETAIL" },
+      { kind: "message", label: "Assistant", text: "Result boundary." },
+    ]);
+    const rows = view.render(32);
+    const bodyRows = rows.slice(1, rows.findIndex(row => plainText(row).includes("Result boundary."))).filter(row => plainText(row).trim());
+    const link = getOsc8LinkAtColumn(rows[0]!, 2)!;
+    expect(bodyRows.length).toBeGreaterThan(8);
+    expect(rows.map(plainText).join("\n")).toContain("DIAGNOSTIC_DETAIL");
+    for (const row of bodyRows) {
+      const bodyLink = getOsc8LinkAtColumn(row, Math.max(0, visibleWidth(row) - 1));
+      expect(bodyLink).toBe(link);
+      expect(view.toggleThinkingLink(bodyLink!)).toBe(true);
+      expect(screen()).not.toMatch(/INPUT_DETAIL|OUTPUT_BODY|DIAGNOSTIC_DETAIL/);
+      expect(view.toggleThinkingLink(link)).toBe(true);
+      expect(screen()).toContain("OUTPUT_BODY");
+    }
+  });
+
+  it("binds hostile expanded content only to its own group, with no remote OSC or forged group targets", () => {
+    const hostile = "\x1b]8;;https://example.test\x1b\\REMOTE_LINK\x1b]8;;\x1b\\ "
+      + "\x1b]8;;xloom-thinking:9999\x07FORGED_LINK\x1b]8;;\x07 "
+      + "\x1b]52;c;SECRET\x07 [remote](https://example.test)";
+    const { view, screen } = setup([
+      { kind: "thinking", label: "Assistant", text: hostile, startedAt: 0, endedAt: 6000, expanded: true },
+      { kind: "tool", label: "Read", text: hostile, state: "error", details: hostile, output: hostile },
+    ]);
+    const rows = view.render(36);
+    const ownLink = getOsc8LinkAtColumn(rows[0]!, 2)!;
+    const raw = rows.join("\n");
+    const urls = [...raw.matchAll(/\x1b\]8;;([^\x1b\x07]*)(?:\x1b\\|\x07)/g)].map(match => match[1]);
+    expect(new Set(urls)).toEqual(new Set([ownLink, ""]));
+    expect(raw).not.toContain("SECRET");
+    expect(screen()).toContain("REMOTE_LINK");
+    expect(screen()).toContain("FORGED_LINK");
+    expect(view.toggleThinkingLink("xloom-thinking:9999")).toBe(false);
+    expect(view.toggleThinkingLink("https://example.test")).toBe(false);
+    const bodyLink = getOsc8LinkAtColumn(rows[1]!, 4)!;
+    expect(bodyLink).toBe(ownLink);
+    expect(view.toggleThinkingLink(bodyLink)).toBe(true);
+    expect(screen()).not.toContain("∴");
+  });
+
+  it.each([1, 2, 3, 4, 8, 20])("keeps every visible cell of expanded details clickable at %i columns", width => {
+    const { view } = setup([
+      { kind: "thinking", label: "Assistant", text: "🧪 中文思考 wrapped content", startedAt: 0, endedAt: 6000, expanded: true },
+      { kind: "tool", label: "Read", text: "source.md", state: "error", output: "ENOENT: 文件不存在" },
+    ]);
+    const rows = view.render(width);
+    const ownLink = getOsc8LinkAtColumn(rows[0]!, 0)!;
+    expect(ownLink).toMatch(/^xloom-thinking:\d+$/);
+    for (const row of rows) {
+      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+      for (let column = 0; column < visibleWidth(row); column++) expect(getOsc8LinkAtColumn(row, column)).toBe(ownLink);
+      expect(row.endsWith("\x1b]8;;\x1b\\") || visibleWidth(row) === 0).toBe(true);
+    }
+    expect(view.toggleThinkingLink(ownLink)).toBe(true);
+    expect(plainText(view.render(width)[0]!)).toContain("▸");
   });
 
   it("updates active thinking seconds and freezes elapsed time after it finishes", () => {
@@ -306,7 +411,7 @@ describe("real provider thinking blocks and response duration", () => {
 
   it("handles missing, invalid or future timestamps without NaN or negative durations", () => {
     const { screen } = setup([
-      { kind: "thinking", label: "Assistant", text: "", startedAt: 9000, endedAt: 1000 },
+      { kind: "thinking", label: "Assistant", text: "A real provider thought.", startedAt: 9000, endedAt: 1000 },
       { kind: "message", label: "Assistant", text: "Summary boundary." },
       { kind: "thinking", label: "Assistant", text: "", startedAt: Number.NaN, endedAt: Infinity },
       { kind: "work", label: "Assistant", text: "", startedAt: undefined, workStatus: "running" },
@@ -323,6 +428,19 @@ describe("real provider thinking blocks and response duration", () => {
     expect(screen()).not.toMatch(/Thinking|Thought|Worked|Working|●/);
     expect(view.toggleLatestThinking()).toBe(false);
     expect(thoughtLinks(view)).toEqual([]);
+  });
+
+  it.each(["", "Problem:", "∴ Problem：\n"])("does not expose an interrupted empty thought group or dangling heading: %j", text => {
+    const { view, screen } = setup([
+      { kind: "thinking", label: "Execute", text, startedAt: 1000, endedAt: 1200 },
+      { kind: "message", label: "Execute", text: "任务未完成；已提交的第一项结果保留。", final: true },
+    ]);
+    expect(screen()).toContain("任务未完成");
+    expect(screen()).not.toMatch(/Thought|Problem|∴/);
+    expect(view.toggleLatestThinking()).toBe(false);
+    expect(thoughtLinks(view)).toEqual([]);
+    view.toggleDetails();
+    expect(screen()).not.toMatch(/Thought|Problem|∴/);
   });
 
   it("keeps multiple thought blocks independently expandable through known links", () => {
@@ -388,6 +506,10 @@ describe("real provider thinking blocks and response duration", () => {
     expect(rendered).not.toContain("SECRET");
     const clean = rendered.replace(/\x1b\]8;;(?:xloom-thinking:\d+)?\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, "");
     expect(clean).not.toContain("\x1b");
+    const truncationRow = view.render(90).find(row => plainText(row).includes("详情已截断"))!;
+    expect(view.toggleThinkingLink(getOsc8LinkAtColumn(truncationRow, 5)!)).toBe(true);
+    expect(screen()).not.toContain("详情已截断");
+    expect(screen()).toContain("▸ Thought for 6s");
   });
 
   it.each([0, 1, 2, 3, 4, 8, 20, 90])("keeps thinking links, CJK body and work timers safe at %i columns", width => {

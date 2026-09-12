@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { hyperlink, Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { compact, EventFeed, fitLines, plainText, type FeedEntry } from "./model.js";
 import { summarizeToolFailure } from "./tool-output.js";
-import { groupActivities, summarizeActivity, type ActivityGroup } from "./activity.js";
+import { emptyThought, groupActivities, summarizeActivity, type ActivityGroup } from "./activity.js";
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
@@ -120,30 +120,34 @@ export class FeedView implements Component {
     const prefixWidth = width >= 4 ? 2 : 0;
     const available = Math.max(1, width - margin.length - prefixWidth);
     const rows: string[] = [];
-    const line = (text: string): void => { rows.push(truncateToWidth(text, width, width > 3 ? "…" : "")); };
-    const detail = (values: (string | undefined)[]): void => {
-      for (const text of boundedDetails(values, available)) line(margin + " ".repeat(prefixWidth) + muted(text));
+    const line = (text: string, thoughtUrl?: string): void => {
+      const rendered = truncateToWidth(text, width, width > 3 ? "…" : "");
+      // Bind only rendered cells after wrapping/truncation; close the link on every row.
+      rows.push(thoughtUrl && visibleWidth(rendered) ? hyperlink(rendered, thoughtUrl) : rendered);
+    };
+    const detail = (values: (string | undefined)[], thoughtUrl?: string): void => {
+      for (const text of boundedDetails(values, available)) line(margin + " ".repeat(prefixWidth) + muted(text), thoughtUrl);
     };
     const toolState = (entry: FeedEntry): "running" | "done" | "error" => entry.error ? "error" : entry.state ?? "running";
-    const tool = (entry: FeedEntry, expanded: boolean): void => {
+    const tool = (entry: FeedEntry, expanded: boolean, thoughtUrl?: string): void => {
       const state = toolState(entry);
       const label = compact(entry.label, 60);
       const color = state === "error" ? chalk.red : state === "done" ? chalk.green : coral;
       if (state === "error" && !expanded) {
         const summary = entry.label === "PowerShell" && /ParserError/i.test(entry.output ?? "") ? "PowerShell 语法错误（展开查看详情）"
           : `${label}: ${summarizeToolFailure(plainText(entry.output || "工具执行失败；展开查看输入与详情。"))}`;
-        line(margin + chalk.red(`✕ ${summary}`));
+        line(margin + chalk.red(`✕ ${summary}`), thoughtUrl);
         return;
       }
       const icon = state === "error" ? "✕" : state === "done" ? "✓" : "●";
       const elapsed = Number.isFinite(entry.startedAt) && entry.durationKnown !== false ? ` · ${this.duration(entry)}` : "";
-      line(margin + color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""));
-      if (expanded) detail([...(state === "error" ? [summarizeToolFailure(plainText(entry.output || "工具执行失败。"))] : []), entry.details ?? entry.text, entry.output]);
+      line(margin + color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""), thoughtUrl);
+      if (expanded) detail([...(state === "error" ? [summarizeToolFailure(plainText(entry.output || "工具执行失败。"))] : []), entry.details ?? entry.text, entry.output], thoughtUrl);
     };
     const group = (activity: ActivityGroup): void => {
       const summary = summarizeActivity(activity, this.now());
       if (!summary.text) {
-        if (this.detailsVisible) for (const entry of activity.entries) detail([entry.text, entry.details, entry.output]);
+        if (this.detailsVisible) for (const entry of activity.entries) if (!emptyThought(entry)) detail([entry.text, entry.details, entry.output]);
         return;
       }
       const expanded = activity.anchor.expanded ?? this.detailsVisible;
@@ -153,14 +157,16 @@ export class FeedView implements Component {
       // Keep the failure count visible even when a long activity summary is truncated.
       const title = summary.failed ? `${summary.failed} failed${successParts ? ` · ${successParts}` : ""}` : normalTitle;
       const heading = `${expanded ? "▾" : "▸"} ${title}`;
-      line(margin + hyperlink((summary.failed ? chalk.red : muted)(heading), this.thoughtLink(activity.anchor)));
+      const thoughtUrl = this.thoughtLink(activity.anchor);
+      line(margin + (summary.failed ? chalk.red : muted)(heading), thoughtUrl);
       if (expanded) {
         for (const entry of activity.entries) {
           if (entry.kind === "thinking") {
+            if (emptyThought(entry)) continue;
             const thought = boundedDetails([entry.text], available);
-            for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text));
-          } else if (entry.kind === "tool") tool(entry, true);
-          else detail([entry.text, entry.details, entry.output]);
+            for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text), thoughtUrl);
+          } else if (entry.kind === "tool") tool(entry, true, thoughtUrl);
+          else detail([entry.text, entry.details, entry.output], thoughtUrl);
         }
       } else {
         const running = activity.entries.findLast(entry => entry.kind === "tool" && toolState(entry) === "running");
