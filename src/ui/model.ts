@@ -1,5 +1,5 @@
 import { stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { AgentHandoff, BoardSnapshot, LoopEvent, RuntimeEvent, Usage } from "../types.js";
+import type { AgentHandoff, BoardSnapshot, LoopEvent, Mode, RuntimeEvent, Usage } from "../types.js";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
@@ -37,6 +37,8 @@ export const HELP = [
   "/apikey [provider]  私密输入 API Key    /login [provider]  订阅登录    /logout [provider]  移除本地凭据",
   "普通聊天与黑板隔离；补充任务信息请显式使用 /hint。设置期间 Esc 取消。",
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
+  "输入 / 显示命令候选；↑/↓ 选择，Tab / Enter 补全，再按 Enter 执行；Esc 关闭候选",
+  "/details 或 Ctrl+O 展开 / 收起工具详情和协议输出；默认只显示工具摘要与已提交结果",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
   "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
@@ -92,42 +94,88 @@ export function formatBoard(board: BoardSnapshot): string {
   return lines.join("\n");
 }
 
-export interface FeedEntry { label: string; text: string; key?: string; error?: boolean }
+export interface FeedEntry {
+  kind?: "message" | "activity" | "tool" | "notice" | "protocol";
+  label: string; text: string; key?: string; error?: boolean;
+  details?: string; output?: string; state?: "running" | "done" | "error";
+}
+
+function roleLabel(mode: Mode | "chat"): string {
+  return mode === "chat" ? "Assistant" : mode === "metacog" ? "Decide · Meta" : mode === "decide" ? "Decide" : "Execute";
+}
+
+/** Describe the request, not the tool's potentially huge returned document. */
+function toolTarget(event: RuntimeEvent): string {
+  try {
+    const args: unknown = JSON.parse(event.text);
+    if (args && typeof args === "object") {
+      const record = args as Record<string, unknown>;
+      const target = event.toolName === "powershell" ? record.command : record.path;
+      if (typeof target === "string") return compact(target, 180);
+    }
+  } catch { /* Older/custom runners can supply a plain request description. */ }
+  return compact(event.text, 180);
+}
 
 /** UI-only event feed. It is never passed back to either Agent. */
 export class EventFeed {
   readonly entries: FeedEntry[] = [];
+  private pricingNoticeShown = false;
   constructor(private readonly maxEntries = 160, private readonly maxText = 3200) {}
 
   add(label: string, text: string, error = false): void {
-    this.entries.push({ label, text: plainText(text).slice(0, 9000), error });
+    this.breakStream();
+    const kind = (label === "xloom" || label === "Loop" || label === "恢复状态") && !text.includes("\n") ? "notice" : "message";
+    this.entries.push({ kind, label: plainText(label), text: plainText(text).slice(0, 9000), error });
     this.trim();
+  }
+
+  notice(text: string, error = false): void {
+    if (!error && text.startsWith("Endpoint pricing is unknown;")) {
+      if (this.pricingNoticeShown) return;
+      this.pricingNoticeShown = true;
+      this.add("xloom", "当前端点未提供定价；费用仅供估算，金额预算无法准确执行。");
+      return;
+    }
+    this.add("xloom", text, error);
+  }
+
+  result(mode: Mode, summary: string, outcome?: string): void {
+    this.add(roleLabel(mode), `${outcome ? `${outcome}\n\n` : ""}${summary}`);
   }
 
   handoff(event: AgentHandoff): void {
     this.breakStream();
-    const label = event.mode === "metacog" ? "Decide · Meta" : event.role === "execute" ? "Execute" : "Decide";
-    this.add(label, `r${event.revision} · ${event.trigger.kind}${event.stepId ? ` · ${event.stepId}` : ""}\n${event.trigger.reason}`);
+    const phase = event.mode === "metacog" ? "复核" : event.mode === "execute" ? "执行" : "规划";
+    this.entries.push({ kind: "activity", label: roleLabel(event.mode),
+      text: `${phase}${event.stepId ? ` · ${plainText(event.stepId)}` : ""}`,
+      details: `r${event.revision} · ${event.trigger.kind}\n${plainText(event.trigger.reason).slice(0, 2000)}` });
+    this.trim();
   }
 
   runtime(event: RuntimeEvent): void {
-    const label = event.mode === "chat" ? "Assistant" : event.mode === "metacog" ? "Decide · Meta" : event.mode === "decide" ? "Decide" : "Execute";
+    const label = roleLabel(event.mode);
     if (event.type === "text") {
       const last = this.entries.at(-1);
       if (last?.label === label && last.key === "stream") {
         const joined = last.text + plainText(event.text);
         last.text = joined.length > this.maxText ? `…${joined.slice(-this.maxText)}` : joined;
       } else {
-        this.entries.push({ label, text: plainText(event.text).slice(-this.maxText), key: "stream" });
+        this.entries.push({ kind: event.mode === "chat" ? "message" : "protocol", label, text: plainText(event.text).slice(-this.maxText), key: "stream" });
       }
     } else if (event.type === "notice") {
-      this.add(label, compact(event.text, 700), event.isError);
+      this.notice(compact(event.text, 700), event.isError);
     } else {
-      const key = `tool:${event.toolCallId ?? event.toolName ?? "unknown"}`;
-      const existing = this.entries.findLast((entry) => entry.key === key);
+      this.breakStream();
+      const key = `tool:${event.mode}:${event.toolCallId ?? event.toolName ?? "unknown"}`;
+      // A new call may reuse an ID in a new Pi context. Never overwrite a prior call.
+      const existing = event.type === "tool_start" ? undefined : this.entries.findLast((entry) => entry.key === key && entry.state === "running");
       const state = event.type === "tool_start" ? "running" : event.type === "tool_end" ? (event.isError ? "error" : "done") : "running";
-      const entry = existing ?? { key, label: `${label} · ${event.toolName ?? "tool"}`, text: "" };
-      entry.text = `[${state}] ${compact(event.text, 240)}`;
+      const names: Record<string, string> = { read: "Read", write: "Write", edit: "Edit", powershell: "PowerShell" };
+      const entry: FeedEntry = existing ?? { kind: "tool", key, label: names[event.toolName ?? ""] ?? compact(event.toolName ?? "Tool", 40),
+        text: event.type === "tool_start" ? toolTarget(event) : "", details: event.type === "tool_start" ? plainText(event.text).slice(0, 9000) : undefined };
+      if (event.type !== "tool_start") entry.output = plainText(event.text).slice(0, 9000);
+      entry.state = state;
       entry.error = event.isError;
       if (!existing) this.entries.push(entry);
     }
@@ -151,6 +199,7 @@ export interface CommandActions {
   chat?(text: string): void;
   run?(goal: string): void;
   settings?(command: SettingsCommand, argument: string): void;
+  details?(): void;
 }
 
 /** Credential commands and accidental inline credentials never enter editor history. */
@@ -204,6 +253,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else { controller.hint(argument); actions.print("You → Blackboard", argument); }
       break;
     case "/board": actions.print("Blackboard", formatBoard(controller.snapshot())); break;
+    case "/details": actions.details?.(); break;
     case "/help": actions.print("xloom", HELP); break;
     case "/exit":
     case "/quit": actions.quit(); break;

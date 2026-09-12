@@ -63,7 +63,9 @@ describe("TUI formatting", () => {
     });
     expect(feed.entries.map(entry => entry.label)).toEqual(["Decide", "Execute", "Decide · Meta"]);
     expect(feed.entries[1]?.text).toContain("S1");
-    expect(feed.entries[0]?.text).toContain("r3 · planned");
+    expect(feed.entries[0]?.text).toBe("规划");
+    expect(feed.entries[0]?.details).toContain("r3 · planned");
+    expect(feed.entries.every(entry => entry.kind === "activity")).toBe(true);
     expect(JSON.stringify(feed.entries)).not.toContain("run-private-id");
     expect(feed.entries.every(entry => !entry.text.includes("\x1b"))).toBe(true);
   });
@@ -96,25 +98,71 @@ describe("TUI formatting", () => {
 
   it("bounds streamed output and updates one collapsed entry per tool call", () => {
     const feed = new EventFeed(3, 40);
-    feed.runtime({ type: "text", mode: "decide", text: "a".repeat(20) });
-    feed.runtime({ type: "text", mode: "decide", text: "b".repeat(40) });
+    feed.runtime({ type: "text", mode: "chat", text: "a".repeat(20) });
+    feed.runtime({ type: "text", mode: "chat", text: "b".repeat(40) });
     expect(feed.entries).toHaveLength(1);
     expect(feed.entries[0]!.text.length).toBeLessThanOrEqual(41);
     feed.runtime({ type: "tool_start", mode: "execute", text: "test", toolName: "powershell", toolCallId: "t1" });
     feed.runtime({ type: "tool_update", mode: "execute", text: "x".repeat(10000), toolName: "powershell", toolCallId: "t1" });
     feed.runtime({ type: "tool_end", mode: "execute", text: "saved evidence", toolName: "powershell", toolCallId: "t1" });
     expect(feed.entries).toHaveLength(2);
-    expect(feed.entries[1]!.text).toBe("[done] saved evidence");
+    expect(feed.entries[1]!.text).toBe("test");
+    expect(feed.entries[1]!.state).toBe("done");
+    expect(feed.entries[1]!.output).toBe("saved evidence");
     feed.add("note", "first");
     feed.add("note", "last");
     expect(feed.entries).toHaveLength(3);
-    expect(feed.entries[0]!.label).toContain("powershell");
+    expect(feed.entries[0]!.label).toBe("PowerShell");
   });
 
   it("labels metacognition as Decide, not a third agent", () => {
     const feed = new EventFeed();
     feed.runtime({ type: "text", mode: "metacog", text: "复核证据" });
     expect(feed.entries[0]!.label).toBe("Decide · Meta");
+    expect(feed.entries[0]!.kind).toBe("protocol");
+  });
+
+  it("keeps read targets and PowerShell commands instead of raw returned bodies", () => {
+    const feed = new EventFeed();
+    feed.runtime({ type: "tool_start", mode: "decide", toolName: "read", toolCallId: "a", text: JSON.stringify({ path: "src/main.ts", offset: 2 }) });
+    feed.runtime({ type: "tool_end", mode: "decide", toolName: "read", toolCallId: "a", text: "source code\n".repeat(2000) });
+    feed.runtime({ type: "tool_start", mode: "execute", toolName: "powershell", toolCallId: "b", text: JSON.stringify({ command: "Get-Content\n README.md" }) });
+    expect(feed.entries[0]).toMatchObject({ kind: "tool", label: "Read", text: "src/main.ts", state: "done" });
+    expect(feed.entries[0]!.output!.length).toBe(9000);
+    expect(feed.entries[1]).toMatchObject({ label: "PowerShell", text: "Get-Content README.md", state: "running" });
+  });
+
+  it("preserves prior calls when a fresh context reuses a tool call id", () => {
+    const feed = new EventFeed();
+    for (const file of ["one.txt", "two.txt"]) {
+      feed.runtime({ type: "tool_start", mode: "decide", toolName: "read", toolCallId: "a", text: JSON.stringify({ path: file }) });
+      feed.runtime({ type: "tool_end", mode: "decide", toolName: "read", toolCallId: "a", text: file + " output" });
+    }
+    expect(feed.entries.map(entry => entry.text)).toEqual(["one.txt", "two.txt"]);
+    expect(feed.entries.map(entry => entry.output)).toEqual(["one.txt output", "two.txt output"]);
+  });
+
+  it("deduplicates pricing warnings across roles without suppressing errors", () => {
+    const feed = new EventFeed();
+    for (const mode of ["chat", "decide", "execute", "metacog"] as const) feed.runtime({ type: "notice", mode,
+      text: "Endpoint pricing is unknown; cost is an estimate and a monetary budget cannot be enforced accurately." });
+    expect(feed.entries).toHaveLength(1);
+    expect(feed.entries[0]!.text).toContain("金额预算无法准确执行");
+    feed.runtime({ type: "notice", mode: "decide", text: "authentication failed", isError: true });
+    feed.runtime({ type: "notice", mode: "execute", text: "authentication failed", isError: true });
+    expect(feed.entries.filter(entry => entry.error)).toHaveLength(2);
+  });
+
+  it("separates raw protocol from a committed summary and preserves explicit help", () => {
+    const feed = new EventFeed();
+    feed.runtime({ type: "text", mode: "decide", text: '{"summary":"draft"}' });
+    feed.result("decide", "已提交下一步");
+    feed.runtime({ type: "text", mode: "decide", text: '{"summary":"new draft"}' });
+    feed.result("metacog", "请补充账号", "NEED_INPUT");
+    feed.add("xloom", "帮助\n第二行");
+    expect(feed.entries.map(entry => entry.kind)).toEqual(["protocol", "message", "protocol", "message", "message"]);
+    expect(feed.entries[1]!.text).toBe("已提交下一步");
+    expect(feed.entries[3]!.text).toContain("NEED_INPUT");
   });
 
   it("keeps editor CJK and IME focus safe on narrow terminals", () => {
@@ -178,13 +226,14 @@ describe("TUI command routing", () => {
 
   it("routes all lifecycle and inspection commands", () => {
     const { controller } = fakeController();
-    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
-    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/help", "/quit", "/exit"]) dispatchCommand(command, controller, actions);
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), details: vi.fn() };
+    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/details", "/help", "/quit", "/exit"]) dispatchCommand(command, controller, actions);
     expect(actions.start).toHaveBeenCalledOnce();
     expect(controller.pause).toHaveBeenCalledOnce();
     expect(controller.stop).toHaveBeenCalledOnce();
     expect(controller.requestMetacog).toHaveBeenCalledOnce();
     expect(actions.quit).toHaveBeenCalledTimes(2);
+    expect(actions.details).toHaveBeenCalledOnce();
     expect(actions.print.mock.calls.some(([label]) => label === "Blackboard")).toBe(true);
   });
 

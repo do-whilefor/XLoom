@@ -78,6 +78,78 @@ afterEach(async () => {
 });
 
 describe("LoopController synthetic protocol flow", () => {
+  it("emits summaries only after commit and does not label a deferred completion proposal as a final outcome", async () => {
+    const test = setup(request => request.mode === "execute" ? result(fixtureExecution(request))
+      : result(request.snapshot.completedSteps ? closure(request) : plan()));
+    const committed: { reason: string; status: string; runStatus: string | undefined }[] = [];
+    test.controller.subscribe(event => {
+      if (event.type === "result") committed.push({ reason: test.controller.snapshot().reason, status: test.controller.snapshot().status, runStatus: test.store.runs().at(-1)?.status });
+    });
+    await test.controller.start();
+    const summaries = test.events.flatMap(event => event.type === "result" && event.result ? [event.result] : []);
+    expect(summaries).toEqual([
+      { mode: "decide", summary: plan().summary },
+      { mode: "execute", summary: "Saved synthetic fixture for testing state transitions; not real target evidence" },
+      { mode: "decide", summary: "Synthetic terminal-state validation, not a real vulnerability conclusion" },
+      { mode: "metacog", summary: "Synthetic protocol test completed; no live target was tested", outcome: "NOT_REPRODUCED" },
+    ]);
+    expect(committed.map(item => item.reason)).toEqual(summaries.map(item => item.summary));
+    expect(committed.map(item => item.runStatus)).toEqual(["completed", "completed", "completed", "completed"]);
+    expect(committed.map(item => item.status)).toEqual(["running", "running", "running", "completed"]);
+    expect(summaries.slice(0, -1).every(item => !Object.hasOwn(item, "outcome"))).toBe(true);
+  });
+
+  it("emits a committed NEED_INPUT outcome without claiming that the task completed", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") {
+        const output = fixtureExecution(request);
+        output.findings![0]!.next = "Provide a second synthetic account before the next comparison.";
+        return result(output);
+      }
+      if (!request.snapshot.completedSteps) return result(plan());
+      return result({ summary: "Input gap review", conclusion: { outcome: "NEED_INPUT", reason: "A second synthetic fixture account is missing." } });
+    });
+    await test.controller.start();
+    const summaries = test.events.flatMap(event => event.type === "result" && event.result ? [event.result] : []);
+    expect(summaries.at(-1)).toEqual({ mode: "metacog", summary: "A second synthetic fixture account is missing.", outcome: "NEED_INPUT" });
+    expect(summaries.at(-2)).toEqual({ mode: "decide", summary: "Input gap review" });
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: "NEED_INPUT" });
+    expect(test.controller.snapshot().goals[0]?.status).toBe("active");
+  });
+
+  it.each(["decide", "execute", "metacog"] as const)("does not emit a result for an invalid %s proposal", async invalidMode => {
+    const test = setup(request => {
+      if (request.mode !== invalidMode) return result(invalidMode === "metacog" ? { summary: "No plan yet; request review" } : plan());
+      return request.mode === "execute"
+        ? result({ summary: "INVALID EXECUTION MUST NOT BE SHOWN", result: "done", facts: [{ ref: "missing-proof", description: "Unsupported", evidenceRefs: ["nonexistent-evidence"] }] })
+        : result({ summary: "INVALID DECISION MUST NOT BE SHOWN", steps: [{ ...plan().steps![0]!, from: ["nonexistent-fact"] }] });
+    });
+    await test.controller.start();
+    expect(test.controller.snapshot().status).toBe("error");
+    expect(test.store.runs().at(-1)?.status).toBe("failed");
+    const summaries = test.events.flatMap(event => event.type === "result" && event.result ? [event.result] : []);
+    expect(summaries.map(item => item.mode)).toEqual(invalidMode === "decide" ? [] : ["decide"]);
+    expect(JSON.stringify(summaries)).not.toContain("INVALID");
+  });
+
+  it.each(["decide", "execute", "metacog"] as const)("does not emit a late %s result after cancellation", async cancelledMode => {
+    let release!: () => void;
+    const test = setup(request => {
+      if (request.mode !== cancelledMode) return result(cancelledMode === "metacog" ? { summary: "No plan yet; request review" } : plan());
+      return new Promise(resolve => {
+        release = () => resolve(result(request.mode === "execute" ? fixtureExecution(request) : { summary: "Cancelled proposal must not be shown" }));
+      });
+    });
+    const active = test.controller.start();
+    await vi.waitFor(() => expect(release).toBeDefined());
+    test.controller.pause(); release(); await active;
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 0, facts: [], evidence: [] });
+    expect(test.store.runs().at(-1)?.status).toBe("cancelled");
+    const summaries = test.events.flatMap(event => event.type === "result" && event.result ? [event.result] : []);
+    expect(summaries.map(item => item.mode)).toEqual(cancelledMode === "decide" ? [] : ["decide"]);
+    expect(JSON.stringify(summaries)).not.toContain("Cancelled proposal");
+  });
+
   it("hands off exactly two logical roles with public context and persists each outer trigger", async () => {
     const test = setup(request => {
       if (request.mode === "execute") return result(fixtureExecution(request));
@@ -134,6 +206,7 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.run).not.toHaveBeenCalled();
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null });
     expect(test.store.runs()[0]?.status).toBe("cancelled");
+    expect(test.events.some(event => event.type === "result")).toBe(false);
   });
 
   it("cleans up an active claim when context assembly fails instead of leaving a phantom run", async () => {
@@ -382,6 +455,9 @@ describe("LoopController interruption and fresh boundaries", () => {
     controller = test.controller;
     await controller.start();
     expect(test.requests.map((r) => r.mode)).toEqual(["decide", "execute", "metacog", "metacog"]);
+    const reviewsWithResults = test.events.flatMap(event => event.type === "result" && event.result?.mode === "metacog" ? [event.result] : []);
+    expect(reviewsWithResults[0]).toEqual({ mode: "metacog", summary: "Synthetic terminal-state validation, not a real vulnerability conclusion" });
+    expect(reviewsWithResults[1]).toEqual({ mode: "metacog", summary: "Synthetic protocol test completed; no live target was tested", outcome: "NOT_REPRODUCED" });
     expect(controller.snapshot().status).toBe("completed");
   });
 
@@ -461,6 +537,7 @@ describe("LoopController budgets and errors", () => {
     else expect(board.steps[0]).toMatchObject({ status: "failed", attempts: 1, leaseUntil: null });
     expect(test.store.runs().at(-1)?.status).toBe("failed");
     expect(test.store.runs().some((run) => run.status === "running")).toBe(false);
+    expect(test.events.some(event => event.type === "result" && event.result?.mode === invalidMode)).toBe(false);
     expect(test.events.some((event) => event.type === "notice" && /usage/i.test(event.message ?? ""))).toBe(true);
     const beforeResume = test.requests.length;
     await test.controller.start();

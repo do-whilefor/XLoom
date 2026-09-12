@@ -1,9 +1,11 @@
 import chalk from "chalk";
 import { Editor, getKeybindings, isKeyRelease, isKeyRepeat, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
-import { compact, dispatchCommand, EventFeed, fitLines, plainText, recordCommandHistory, statusLine, type UiController } from "./model.js";
+import { compact, dispatchCommand, EventFeed, plainText, recordCommandHistory, statusLine, type UiController } from "./model.js";
 import { createSystemClipboard, type Clipboard } from "./clipboard.js";
 import { SettingsDialogs } from "./settings-dialog.js";
+import { createCommandAutocomplete } from "./autocomplete.js";
+import { FeedView } from "./feed-view.js";
 
 export type { UiController } from "./model.js";
 
@@ -21,20 +23,6 @@ export function pasteText(text: string): string {
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
-
-class FeedView implements Component {
-  constructor(private readonly feed: EventFeed) {}
-  invalidate(): void {}
-  render(width: number): string[] {
-    const padding = width >= 6 ? "  " : "";
-    const available = Math.max(1, width - padding.length);
-    return this.feed.entries.flatMap((entry) => [
-      "",
-      truncateToWidth(padding + (entry.error ? chalk.red : coral)(plainText(entry.label)), width, ""),
-      ...fitLines(entry.text, available).map((line) => padding + line),
-    ]);
-  }
-}
 
 class StatusView implements Component {
   constructor(private readonly content: () => string, private readonly color = muted) {}
@@ -72,6 +60,11 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     onRightClickPaste: () => { requestPaste(); },
   });
   const feed = new EventFeed();
+  const feedView = new FeedView(feed);
+  const toggleDetails = (): void => {
+    tui.flash(feedView.toggleDetails() ? "详情已展开 · Ctrl+O 收起" : "详情已收起 · Ctrl+O 展开");
+    tui.requestRender();
+  };
   let snapshot = controller.snapshot();
   let active: Promise<void> | undefined;
   let setting: Promise<void> | undefined;
@@ -110,7 +103,6 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const start = (): void => {
     if (active || closing || setting) return;
     exitArmedAt = undefined;
-    print("xloom", "Loop 启动。Esc 暂停；/hint 可随时补充黑板。");
     active = Promise.resolve().then(() => closing ? undefined : controller.start()).catch((error: unknown) => {
       print("xloom", error instanceof Error ? error.message : String(error), true);
     }).finally(() => {
@@ -124,6 +116,8 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     borderColor: coral,
     selectList: { selectedPrefix: coral, selectedText: coral, description: muted, scrollInfo: muted, noMatch: muted },
   }, { paddingX: 1 });
+  editor.setAutocompleteProvider(createCommandAutocomplete());
+  editor.setAutocompleteMaxVisible(6);
   const previousBindings = getKeybindings();
   setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, {
     ...previousBindings.getUserBindings(),
@@ -165,7 +159,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     exitArmedAt = undefined;
     try {
       dispatchCommand(text, controller, {
-        start, quit, print,
+        start, quit, print, details: toggleDetails,
         chat: value => perform(() => { print("You", value); return controller.chat!(value); }),
         run: goal => perform(() => { print("You → Task", goal); return controller.runGoal!(goal); }),
         settings: (command, argument) => {
@@ -183,7 +177,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     }
     tui.requestRender();
   };
-  const scroll = new ScrollView(new FeedView(feed), { follow: "end", primary: true, scrollbar: "auto", scrollbarStyle: muted });
+  const scroll = new ScrollView(feedView, { follow: "end", primary: true, scrollbar: "auto", scrollbarStyle: muted });
   tui.setLayoutRoot(new VStack([
     { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
@@ -196,10 +190,13 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (event.snapshot) snapshot = event.snapshot;
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
     else if (event.type === "handoff" && event.handoff) feed.handoff(event.handoff);
-    else if (event.type === "notice" && event.message) print("xloom", event.message);
+    else if (event.type === "notice" && event.message) feed.notice(event.message);
+    else if (event.type === "result" && event.result) feed.result(event.result.mode, event.result.summary, event.result.outcome);
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {
-      print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`);
+      feed.breakStream();
+      // Routine running/revision updates belong in the status bar, not the transcript.
+      if (snapshot.status !== "running") print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`, snapshot.status === "error");
     }
     tui.requestRender();
   });
@@ -223,6 +220,23 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (isKeyRelease(data)) return { consume: true };
     if (!matchesKey(data, "ctrl+c")) exitArmedAt = undefined;
     if (tui.hasOverlay()) return undefined;
+    if (matchesKey(data, "ctrl+o")) {
+      toggleDetails();
+      return { consume: true };
+    }
+    if (editor.isShowingAutocomplete()) {
+      if (matchesKey(data, "enter")) {
+        // Pi normally submits slash commands immediately. Picking is not executing.
+        if (!editor.disableSubmit) editor.handleInput("\t");
+        tui.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, "escape")) {
+        editor.handleInput(data);
+        tui.requestRender();
+        return { consume: true };
+      }
+    }
     if (matchesKey(data, "ctrl+v") || matchesKey(data, "ctrl+shift+v") || matchesKey(data, "shift+insert")) {
       requestPaste();
       return { consume: true };

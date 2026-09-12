@@ -85,7 +85,8 @@ describe("ordinary chat and dual-agent task UI", () => {
     const feed = new EventFeed();
     feed.runtime({ type: "text", mode: "chat", text: "hello" });
     feed.runtime({ type: "tool_start", mode: "chat", toolName: "read", text: "read file" });
-    expect(feed.entries.map(entry => entry.label)).toEqual(["Assistant", "Assistant · read"]);
+    expect(feed.entries.map(entry => entry.label)).toEqual(["Assistant", "Read"]);
+    expect(feed.entries.map(entry => entry.kind)).toEqual(["message", "tool"]);
   });
 
   it("routes normal text, /run goal and /hint independently", async () => {

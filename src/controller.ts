@@ -105,7 +105,8 @@ export class LoopController {
         result = await this.runner.run(request);
         if (cancellation.signal.aborted) throw new Error(timedOut ? "Run time limit reached" : this.interruptReason);
         hintsChanged = this.snapshot().hints.length !== snapshot.hints.length;
-        if (mode === "execute") this.store.applyExecution(runId, result.output, result.usage);
+        let committed: BoardSnapshot;
+        if (mode === "execute") committed = this.store.applyExecution(runId, result.output, result.usage);
         else {
           const decision = decisionSchema.parse(result.output);
           const rootIds = new Set(snapshot.goals.filter(goal => goal.parentId === null).map(goal => goal.id));
@@ -116,9 +117,10 @@ export class LoopController {
             if (decision.updateGoals) decision.updateGoals = decision.updateGoals.filter(goal => !rootIds.has(goal.id));
             this.notice(hintsChanged ? "New hint arrived during planning; conclusion deferred for a fresh review." : "Completion proposed; starting a fresh metacognitive review before concluding.");
           }
-          this.store.applyDecision(runId, decision, result.usage);
+          committed = this.store.applyDecision(runId, decision, result.usage);
         }
         this.board();
+        this.emit({ type: "result", result: { mode, summary: committed.reason, ...(committed.outcome ? { outcome: committed.outcome } : {}) } });
       } catch (error) {
         const partial = usageSchema.safeParse(error && typeof error === "object" && "usage" in error ? error.usage : undefined);
         const completedUsage = usageSchema.safeParse(result?.usage);

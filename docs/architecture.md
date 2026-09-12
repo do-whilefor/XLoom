@@ -55,6 +55,8 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 手动 `/meta`、新 Hint、空计划和完成前复核由 Controller 保留为流程不变量。`LoopController` 第三个可选参数接收 `policy` 与 `projectContext`；默认行为无需配置。`handoff` 事件携带两个角色之一、运行模式、黑板版本、Step 和触发原因，供 TUI / headless 显示；触发原因也写入 `run_started` 审计。TUI 不增加常驻介绍或底部帮助行。
 
+`result` 事件只在 `applyDecision` / `applyExecution` 成功后发出，携带已提交摘要及非空最终状态，不把流式协议或工具返回当作已确认结果。TUI 将角色交接、工具摘要、聊天正文和协议细节分层渲染；`/details` / Ctrl+O 仅切换本地展示，不改变 Agent 上下文、证据归档或 Loop。`/` 候选使用 Pi Editor 的命令补全接口，仅有静态应用命令与模型角色，不扫描文件、不读取凭据；候选 Enter 在应用层映射为补全，下一次 Enter 才执行。
+
 ## 黑板不变量
 
 1. Facts 追加而不是覆盖，修正通过 `supersedes` 指向旧 Fact；事实必须带已有原始证据引用。

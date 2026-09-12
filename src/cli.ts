@@ -23,7 +23,7 @@ const help = `xloom — local two-agent research loop (Windows MVP)
 
 Options: --workspace PATH  --config PATH  --help
 TUI: plain text chats; /run GOAL starts a separate two-agent task
-     /model /apikey /login /logout /new /start /pause /stop /hint /meta /board /help /exit
+     /model /apikey /login /logout /new /start /pause /stop /hint /meta /board /details /help /exit
 User input defines authorization. No extra authorization confirmation or hooks.
 Chat and both agents have read/write/edit/powershell with the current user's OS permissions.
 `;

@@ -139,6 +139,103 @@ describe("TUI layout and input history", () => {
   });
 });
 
+describe("TUI slash candidates and compact transcript", () => {
+  async function typeCommand(app: ReturnType<typeof launch>, text: string): Promise<void> {
+    for (const char of text) app.terminal.input(char);
+    await vi.waitFor(() => expect(app.editor.isShowingAutocomplete()).toBe(true), { interval: 1 });
+  }
+
+  it("opens on slash and navigates candidates without replacing the draft with history", async () => {
+    const app = launch();
+    app.submit("历史输入");
+    await typeCommand(app, "/");
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toContain("/run");
+    expect(plainText(app.terminal.output)).toContain("/model");
+    app.terminal.input("\x1b[B");
+    app.terminal.input("\x1b[B");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("/");
+    app.terminal.input("\t");
+    expect(app.editor.getExpandedText()).toBe("/model ");
+    expect(app.editor.isShowingAutocomplete()).toBe(false);
+    expect(app.controller.start).not.toHaveBeenCalled();
+    app.editor.setText("");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("历史输入");
+  });
+
+  it("Enter accepts a command without executing; another Enter explicitly runs it", async () => {
+    const app = launch();
+    await typeCommand(app, "/ex");
+    app.terminal.input("\r");
+    expect(app.editor.getExpandedText()).toBe("/exit");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.terminal.stopped).toBe(false);
+    app.terminal.input("\r");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("Esc closes suggestions before pausing; Ctrl+C still clears a suggested draft", async () => {
+    const app = launch();
+    await typeCommand(app, "/ru");
+    app.terminal.input("\x1b");
+    expect(app.editor.isShowingAutocomplete()).toBe(false);
+    expect(app.editor.getExpandedText()).toBe("/ru");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    app.terminal.input("\x1b");
+    expect(app.controller.pause).toHaveBeenCalledOnce();
+    app.editor.setText("");
+    await typeCommand(app, "/hi");
+    app.terminal.input("\x03");
+    expect(app.editor.getExpandedText()).toBe("");
+    expect(app.editor.isShowingAutocomplete()).toBe(false);
+    expect(app.controller.stop).not.toHaveBeenCalled();
+  });
+
+  it("shows committed results, keeps raw output in details, and hides running boilerplate", () => {
+    const app = launch(undefined, 100, 45);
+    app.emit({ type: "state", snapshot: { ...app.board, status: "running", reason: "Starting a fresh planning context" } });
+    app.emit({ type: "handoff", handoff: { role: "decide", mode: "decide", revision: 2, runId: "private", trigger: { kind: "start", reason: "Verbose planning reason" } } });
+    app.emit({ type: "runtime", runtime: { type: "tool_start", mode: "decide", toolName: "read", toolCallId: "t", text: '{"path":"README.md"}' } });
+    app.emit({ type: "runtime", runtime: { type: "tool_end", mode: "decide", toolName: "read", toolCallId: "t", text: "RAW_FILE_BODY" } });
+    app.emit({ type: "runtime", runtime: { type: "text", mode: "decide", text: '{"summary":"RAW_PROTOCOL"}' } });
+    app.emit({ type: "result", result: { mode: "decide", summary: "已提交计划，下一步验证目标边界。" } });
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const compactScreen = plainText(app.terminal.output);
+    expect(compactScreen).toContain("Read");
+    expect(compactScreen).toContain("README.md");
+    expect(compactScreen).toContain("已提交计划");
+    expect(compactScreen).not.toMatch(/RAW_FILE_BODY|RAW_PROTOCOL|Starting a fresh|Verbose planning/);
+    app.terminal.input("\x0f");
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toContain("RAW_FILE_BODY");
+    expect(plainText(app.terminal.output)).toContain("RAW_PROTOCOL");
+    expect(plainText(app.terminal.output)).toContain("Verbose planning reason");
+    app.submit("/details");
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).not.toMatch(/RAW_FILE_BODY|RAW_PROTOCOL/);
+    expect(app.controller.pause).not.toHaveBeenCalled();
+  });
+
+  it("keeps tool errors and unknown pricing visible without repeated warning spam", () => {
+    const app = launch(undefined, 100, 35);
+    for (const mode of ["decide", "execute", "metacog"] as const) app.emit({ type: "runtime", runtime: { type: "notice", mode,
+      text: "Endpoint pricing is unknown; cost is an estimate." } });
+    app.emit({ type: "runtime", runtime: { type: "tool_start", mode: "execute", toolName: "read", toolCallId: "bad", text: '{"path":"missing.txt"}' } });
+    app.emit({ type: "runtime", runtime: { type: "tool_end", mode: "execute", toolName: "read", toolCallId: "bad", text: "File not found", isError: true } });
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const screen = plainText(app.terminal.output);
+    expect(screen.match(/当前端点未提供定价/g)).toHaveLength(1);
+    expect(screen).toContain("File not found");
+  });
+});
+
 describe("TUI clipboard", () => {
   it.each(["\x16", "\x1b[2;2~"])("pastes native clipboard with %j and keeps it in the editor", async (key) => {
     const readText = vi.fn(async () => "中文 🧪\r\n第二行");

@@ -73,6 +73,7 @@ describe("command-line entry points", () => {
     expect(result.stdout).toContain("local two-agent research loop");
     expect(result.stdout).toContain("read/write/edit/powershell");
     expect(result.stdout).toContain("--headless");
+    expect(result.stdout).toContain("/details");
     expect(existsSync(path.join(root, ".xloom"))).toBe(false);
     expect(existsSync(path.join(root, "xloom.json"))).toBe(false);
   });
