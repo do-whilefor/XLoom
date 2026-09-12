@@ -12,7 +12,7 @@ SettingsService 只复用 Pi ModelRuntime 的本地目录、持久 API Key 和 O
 
 `decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。运行时将 `metacog` 映射到 Decide 的模型，加载简短的复核指令。每个新 run 创建新的 Pi Agent；同一次 run 可维护私有上下文并在模型瞬断后续接一次。不同 run / 角色之间没有共享 `messages`，也不让一个 Agent 总结另一方聊天。
 
-Decide / 元认知仅挂载 `read`，负责读证据、制定计划、验证交接条件与审查。Execute 使用 `read / write / edit / powershell` 完成调查和状态变更，新增权威事实 / 证据由 Execute 提交。Decide 的私有阅读历史不作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，避免与另一个任务混淆。
+Decide / 元认知仅挂载 `read`，负责读证据、制定计划、验证交接条件与审查。Execute 使用 `read / write / edit / powershell` 完成调查和状态变更，新增权威事实 / 证据由 Execute 提交。Decide 的私有阅读历史不作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，只有 Execute 收到自己的可写 artifacts 路径；计划文件名不代表文件存在。`runtime/read.ts` 通过 Pi 的已解析路径和原生文件/图片操作扩展目录列表，同名同参数，不增加工具或修改依赖源码。
 
 一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 调查，必要时阶段性提交证据 / 事实 / 条件尝试 → Controller 归档证据并事务提交 → Execute 继续或交回 fresh Decide。最终结果结算 Step；主动交回时 Step 保持“尚未完整验证”的 `blocked` 结果，fresh Decide 另提后续工作。达到触发条件时使用 fresh Decide 元认知；提议完成时再独立复核。
 
@@ -131,6 +131,8 @@ Store 生成 `conditionKey = hash(hypothesis, scope, identity, stateVersion, bas
 `NOT_REPRODUCED` 要求至少完成一次 Execute，并对所有记录的假设有证据支持的关闭与重开条件；`LOW_ROI` 要求经过影响验证后只剩 info/已关闭项。一般空结果不能进入这两个结论。
 
 `NEED_INPUT` 保留 lead / technical_hit 和 unrated，缺失条件写进 `next`；状态为 paused，可在补充 Hint 后恢复。系统无法仅靠非空字符串自动验证“确实缺少账号/对象”，这一语义由元认知承担。
+
+Controller 在提交前检查 NEED_INPUT 的结构性前提（考虑本次 reviews 后是否仍有未解决的 lead / technical_hit 及非空 next）。不成立时只移除等待结论，保留计划供 Store 完整校验，按既有规则执行或复核后操作暂停，避免未执行工作的空产物把整个调用变成提交错误。合法 NEED_INPUT 仍经 fresh metacog 复核；普通完成提议、证据约束和 Store 的最终校验保持不变。
 
 单次/累计运行时间、回合数、输入/输出 Token、费用预算默认 null，只在用户显式设置时作为资源暂停条件；旧 maxSteps 加载时丢弃。旧配置若仍显式填写 180 秒，则须删除或改为 null 并重启才能解除。资源耗尽、调用失败、取消和没有可执行计划是操作状态，不强行映射到研究结论。
 

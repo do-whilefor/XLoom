@@ -2,7 +2,7 @@ import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentOptions } from "@earendil-works/pi-agent-core";
-import { createReadTool, createWriteTool, createEditTool } from "@earendil-works/pi-coding-agent";
+import { createWriteTool, createEditTool } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
 import { buildRunPrompt } from "./prompts.js";
@@ -13,6 +13,7 @@ import { decisionSchema, executionSchema, formatValidationError } from "../schem
 import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure } from "./continuity.js";
 import { stageWriter } from "./stage.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
+import { createWorkspaceReadTool } from "./read.js";
 
 export class RuntimeRunError extends Error {
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions) { super(message, options); this.name = "RuntimeRunError"; }
@@ -28,7 +29,7 @@ export function parseFinalJson(text: string): Record<string, unknown> {
 }
 
 export function executeTools(workspace: string) {
-  return [createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createCheckedPowerShellTool(workspace)];
+  return [createWorkspaceReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createCheckedPowerShellTool(workspace)];
 }
 
 export function contentText(value: unknown): string {
@@ -186,7 +187,7 @@ export class PiRunner implements AgentRunner {
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
-      const tools = request.mode === "execute" ? executeTools(request.workspace).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createReadTool(request.workspace)];
+      const tools = request.mode === "execute" ? executeTools(request.workspace).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createWorkspaceReadTool(request.workspace)];
       const checkpointFile = join(request.runDir, "continuation.json");
       const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
         baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };

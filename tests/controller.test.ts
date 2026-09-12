@@ -99,14 +99,17 @@ describe("LoopController synthetic protocol flow", () => {
     expect(summaries.slice(0, -1).every(item => !Object.hasOwn(item, "outcome"))).toBe(true);
   });
 
-  it("emits a committed NEED_INPUT outcome without claiming that the task completed", async () => {
+  it.each([false, true])("preserves valid NEED_INPUT without claiming completion (ready plan: %s)", async readyPlan => {
     const test = setup(request => {
       if (request.mode === "execute") {
         const output = fixtureExecution(request);
         output.findings![0]!.next = "Provide a second synthetic account before the next comparison.";
         return result(output);
       }
-      if (!request.snapshot.completedSteps) return result(plan());
+      if (!request.snapshot.completedSteps) return result(readyPlan ? { ...plan(), steps: [
+        { ...plan("First fixture action").steps![0]!, priority: 100 },
+        { ...plan("Action requiring the missing fixture account").steps![0]!, priority: 50 },
+      ] } : plan());
       return result({ summary: "Input gap review", conclusion: { outcome: "NEED_INPUT", reason: "A second synthetic fixture account is missing." } });
     });
     await test.controller.start();
@@ -115,6 +118,73 @@ describe("LoopController synthetic protocol flow", () => {
     expect(summaries.at(-2)).toEqual({ mode: "decide", summary: "Input gap review" });
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: "NEED_INPUT" });
     expect(test.controller.snapshot().goals[0]?.status).toBe("active");
+    expect(test.requests.filter(request => request.mode === "execute")).toHaveLength(1);
+    expect(test.controller.snapshot().steps.filter(step => step.status === "ready")).toHaveLength(readyPlan ? 1 : 0);
+  });
+
+  it("executes a first plan that mistakenly labels its unproduced results as NEED_INPUT", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (request.snapshot.completedSteps) return result(closure(request));
+      return result({ ...plan(), conclusion: { outcome: "NEED_INPUT", reason: "The planned fixture output does not exist yet." } });
+    });
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+    expect(test.requests[1]!.snapshot).toMatchObject({ outcome: null, completedSteps: 0, findings: [] });
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1 });
+    expect(test.events.some(event => event.type === "notice" && event.message?.includes("NEED_INPUT lacks"))).toBe(true);
+    expect(test.events.some(event => event.type === "result" && event.result?.outcome === "NEED_INPUT")).toBe(false);
+  });
+
+  it("keeps a ready plan when metacognition proposes unsupported NEED_INPUT", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(request.snapshot.completedSteps
+        ? fixtureExecution(request) : { summary: "First fixture action was unavailable; an independent action remains", result: "blocked" });
+      if (!request.snapshot.steps.length) return result({ ...plan(), steps: [
+        { ...plan("First fixture action").steps![0]!, priority: 100 },
+        { ...plan("Independent fixture action").steps![0]!, priority: 50 },
+      ] });
+      if (request.snapshot.completedSteps === 1) {
+        expect(request.mode).toBe("metacog");
+        expect(request.snapshot.findings).toEqual([]);
+        return result({ summary: "The remaining action has no output yet", conclusion: { outcome: "NEED_INPUT", reason: "Waiting for the unexecuted action." } });
+      }
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "metacog", "execute", "decide", "metacog"]);
+    expect(test.requests.filter(request => request.mode === "execute").map(request => request.step!.description)).toEqual(["First fixture action", "Independent fixture action"]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 2 });
+  });
+
+  it("checks unresolved findings after the proposal's reviews before accepting NEED_INPUT", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (!request.snapshot.completedSteps) return result({ ...plan(), steps: [
+        { ...plan("First fixture comparison").steps![0]!, priority: 100 },
+        { ...plan("Second fixture comparison").steps![0]!, priority: 50 },
+      ] });
+      if (request.snapshot.completedSteps === 1) return result({
+        summary: "Close the resolved fixture hypothesis and keep the remaining action",
+        reviews: closure(request).reviews,
+        conclusion: { outcome: "NEED_INPUT", reason: "The second comparison is not recorded yet." },
+      });
+      return result(closure(request));
+    });
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "execute", "decide", "metacog"]);
+    expect(test.requests[3]!.snapshot.findings[0]!.status).toBe("closed");
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 2 });
+  });
+
+  it("pauses operationally after reviewing unsupported NEED_INPUT without inventing a missing input", async () => {
+    const test = setup(() => result({ summary: "No executable proposal", conclusion: { outcome: "NEED_INPUT", reason: "No results exist yet." } }));
+    await test.controller.start();
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "metacog"]);
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 0, findings: [] });
+    expect(test.controller.snapshot().reason).toContain("no executable step");
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.some(event => event.type === "result" && event.result?.outcome === "NEED_INPUT")).toBe(false);
   });
 
   it.each(["decide", "execute", "metacog"] as const)("does not emit a result for an invalid %s proposal", async invalidMode => {
@@ -354,7 +424,7 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.controller.snapshot().reason).toContain("no executable step");
   });
 
-  it("reviews superseded pending plans once, then pauses without executing or cycling through the stale plan", async () => {
+  it.each([false, true])("reviews superseded pending plans without executing or cycling (unsupported NEED_INPUT: %s)", async unsupportedNeedInput => {
     const test = setup(request => {
       if (request.mode === "execute") {
         const output = fixtureExecution(request);
@@ -363,6 +433,7 @@ describe("LoopController synthetic protocol flow", () => {
           output.facts![0]!.supersedes = request.snapshot.facts[0]!.id;
           output.findings = [];
         }
+        if (unsupportedNeedInput) output.findings = [];
         return result(output);
       }
       if (request.snapshot.completedSteps === 0) return result(plan("Record initial synthetic condition"));
@@ -371,7 +442,8 @@ describe("LoopController synthetic protocol flow", () => {
         { ...plan().steps![0]!, description: "OLD DEPENDENT PLAN MUST NOT EXECUTE", priority: 90, from: [request.snapshot.facts[0]!.id] },
       ] });
       expect(request.context!.projection.stepReviews).toHaveLength(1);
-      return result({ summary: "Review did not resolve the outdated dependency" });
+      return result({ summary: "Review did not resolve the outdated dependency", ...(unsupportedNeedInput
+        ? { conclusion: { outcome: "NEED_INPUT", reason: "The stale plan has no output yet." } } : {}) });
     });
     await test.controller.start();
     expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "execute", "metacog"]);

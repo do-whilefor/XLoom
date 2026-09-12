@@ -94,6 +94,15 @@ describe("compact built-in prompts", () => {
     const example = JSON.parse(protocol.split("\n")[1]!, (_key, value: unknown) =>
       typeof value === "string" ? value.split("|")[0] : value);
     expect((mode === "execute" ? executionSchema : decisionSchema).safeParse(example).success).toBe(true);
-    expect(JSON.parse(userPrompt.split("\n").at(-1)!).blackboard.project.goal).toBe("Synthetic prompt fixture");
+    const data = JSON.parse(userPrompt.split("\n").at(-1)!);
+    expect(data.blackboard.project.goal).toBe("Synthetic prompt fixture");
+    if (mode === "execute") expect(data.artifacts).toBeTypeOf("string");
+    else {
+      expect(data).not.toHaveProperty("artifacts");
+      expect(data).not.toHaveProperty("checkpointFile");
+      expect(systemPrompt).toContain("Read listed evidence paths, not guessed plan outputs");
+      expect(protocol).toContain("omit conclusion while work remains");
+      expect(protocol).toContain("pending work or its unwritten files are not missing input");
+    }
   });
 });

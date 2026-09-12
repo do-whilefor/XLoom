@@ -110,7 +110,7 @@ function proposal(input: PromptData): Decision {
 }
 
 describe("real Pi inner loop with the two-Agent outer loop", () => {
-  it("commits native tool evidence, replans through the blackboard and completes only after fresh Decide metacognition", async () => {
+  it.each([false, true])("commits real tool evidence and completes after review, with premature NEED_INPUT and directory read: %s", async prematureInput => {
     const test = setup((run, context, input) => {
       if (run.channel === "offline-execute") {
         expect(input.assignedStep).toMatchObject({ goalId: "G0", status: "claimed", attempts: 1 });
@@ -138,7 +138,19 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
           findings: [{ key: "synthetic-fixture-only", title: "Synthetic integration hypothesis", target: "local generated fixture only", status: "lead", factRefs: ["roundtrip-f"], evidenceRefs: ["roundtrip-e"], next: "Review synthetic protocol fixture; no vulnerability claim" }],
         });
       }
-      if (!input.blackboard.completedSteps) return json(plan());
+      if (!input.blackboard.completedSteps) {
+        expect(input).not.toHaveProperty("artifacts");
+        if (prematureInput && run.contexts.length === 1) {
+          return message([{ type: "toolCall", id: "inspect-directory", name: "read", arguments: { path: input.workspace } }], "toolUse");
+        }
+        if (prematureInput) {
+          expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+          expect(JSON.stringify(context.messages.at(-1))).toContain(".xloom");
+        }
+        return json({ ...plan(), ...(prematureInput ? { conclusion: {
+          outcome: "NEED_INPUT" as const, reason: "The planned fixture file has not been written by Execute yet.",
+        } } : {}) });
+      }
       expect(input.blackboard.evidence[0]?.excerpt).toBe(syntheticArtifact);
       expect(input.blackboard.facts[0]?.evidenceIds).toEqual([input.blackboard.evidence[0]!.id]);
       expect(input.blackboard.goals[0]?.status).toBe("active");
@@ -153,7 +165,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
 
     await test.controller.start();
     const board = test.controller.snapshot();
-    expect(board).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1, usage: { input: 60, output: 30, cost: 0 } });
+    expect(board).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1, usage: { input: prematureInput ? 70 : 60, output: prematureInput ? 35 : 30, cost: 0 } });
     expect(board.goals[0]).toMatchObject({ id: "G0", status: "satisfied", factIds: [board.facts[0]!.id] });
     expect(board.findings[0]).toMatchObject({ status: "closed", rating: "unrated" });
     expect(board.evidence).toHaveLength(1);
@@ -165,7 +177,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     ]);
     expect(test.seen.map(run => run.channel)).toEqual(["offline-decide", "offline-execute", "offline-decide", "offline-decide"]);
     expect(new Set(test.seen.map(run => run.channel)).size).toBe(2);
-    expect(test.seen.map(run => run.contexts.length)).toEqual([1, 3, 1, 1]);
+    expect(test.seen.map(run => run.contexts.length)).toEqual([prematureInput ? 2 : 1, 3, 1, 1]);
     for (const run of test.seen) {
       expect(run.contexts[0]?.messages).toHaveLength(1);
       expect(run.contexts[0]?.messages[0]?.role).toBe("user");
@@ -175,6 +187,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     }
     expect(JSON.stringify(test.seen[1]!.contexts[2])).toContain(privateTurn);
     expect(test.events.filter(event => event.runtime?.type === "tool_end").map(event => [event.runtime?.mode, event.runtime?.toolName, event.runtime?.isError])).toEqual([
+      ...(prematureInput ? [["decide", "read", false]] : []),
       ["execute", "write", false], ["execute", "read", false],
     ]);
     const decisions = test.store.events().filter(event => event.kind === "decision").map(event => JSON.parse(event.payload).decision as Decision);

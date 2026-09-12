@@ -124,6 +124,17 @@ export class LoopController {
         if (mode === "execute") committed = this.store.applyExecution(runId, result.output, result.usage);
         else {
           const decision = decisionSchema.parse(result.output);
+          if (decision.conclusion?.outcome === "NEED_INPUT") {
+            // A planner can mistake the absent output of an unexecuted Step for
+            // missing external input. Keep its plan, but do not let an unsupported
+            // pause proposal bypass Execute or fail the whole run at commit.
+            const reviewed = new Set(decision.reviews?.map(review => review.findingId));
+            const unresolved = snapshot.findings.filter(finding => ["lead", "technical_hit"].includes(finding.status) && !reviewed.has(finding.id));
+            if (!unresolved.length || unresolved.some(finding => !finding.next.trim())) {
+              delete decision.conclusion;
+              this.notice("NEED_INPUT lacks an unresolved lead/hit with a recorded input requirement; continuing planning.");
+            }
+          }
           const rootIds = new Set(snapshot.goals.filter(goal => goal.parentId === null).map(goal => goal.id));
           const completesRoot = decision.updateGoals?.some(goal => rootIds.has(goal.id));
           if ((decision.conclusion || completesRoot) && (mode !== "metacog" || hintsChanged)) {
