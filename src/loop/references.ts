@@ -1,20 +1,49 @@
 import type { BoardSnapshot, Decision } from "../types.js";
 
-/** Check against the complete committed board, not its partial prompt projection.
- * A plausible-looking ID is never a substitute for an actual Fact. */
-export function validateDecisionFactReferences(board: BoardSnapshot, decision: Decision): void {
-  const known = new Set(board.facts.map(fact => fact.id));
-  const missing: string[] = [];
-  const check = (refs: string[], field: string) => refs.forEach((ref, index) => {
-    if (!known.has(ref)) missing.push(`${field}[${index}]=${JSON.stringify(ref)}`);
+/** Check all explicit references against the complete board before the one repair
+ * request. Report every bad reference together; never guess replacement IDs. */
+export function validateDecisionReferences(board: BoardSnapshot, decision: Decision): void {
+  const facts = new Set(board.facts.map(fact => fact.id));
+  const goals = new Set(board.goals.map(goal => goal.id));
+  const steps = new Map(board.steps.map(step => [step.id, step]));
+  const findings = new Map(board.findings.map(finding => [finding.id, finding]));
+  const evidence = new Set(board.evidence.map(item => item.id));
+  const errors: string[] = [];
+  const check = (known: { has(ref: string): boolean }, kind: string, ref: string, field: string) => {
+    if (!known.has(ref)) errors.push(`Unknown ${kind} reference: ${field}=${JSON.stringify(ref)}`);
+  };
+  const checkFacts = (refs: string[], field: string) => refs.forEach((ref, index) => check(facts, "fact", ref, `${field}[${index}]`));
+  // Store creates goals in proposal order, so a parent can be an earlier new goal.
+  decision.goals?.forEach((goal, index) => {
+    check(goals, "Goal", goal.parentId, `goals[${index}].parentId`);
+    goals.add(goal.id);
   });
   decision.steps?.forEach((step, index) => {
-    check(step.from, `steps[${index}].from`);
+    check(goals, "Goal", step.goalId, `steps[${index}].goalId`);
+    checkFacts(step.from, `steps[${index}].from`);
     if (step.combination) {
-      check(step.combination.requires, `steps[${index}].combination.requires`);
-      check(step.combination.counterEvidence ?? [], `steps[${index}].combination.counterEvidence`);
+      checkFacts(step.combination.requires, `steps[${index}].combination.requires`);
+      checkFacts(step.combination.counterEvidence ?? [], `steps[${index}].combination.counterEvidence`);
     }
   });
-  decision.updateGoals?.forEach((goal, index) => check(goal.factIds, `updateGoals[${index}].factIds`));
-  if (missing.length) throw new Error(`Unknown fact reference: ${missing.join("; ")}. Copy exact committed Fact IDs from blackboard.facts or factIndex. Evidence IDs and batch-local refs are not Fact IDs; never change ID prefixes. Recheck the referenced observation before choosing its Fact.`);
+  decision.updateSteps?.forEach((update, index) => {
+    check(steps, "Step", update.id, `updateSteps[${index}].id`);
+    if (steps.get(update.id)?.status === "claimed") errors.push(`updateSteps[${index}].id=${JSON.stringify(update.id)} is claimed; only ready Steps may be changed`);
+    // Settled updates are intentionally left for the controller's history filter.
+  });
+  decision.updateGoals?.forEach((goal, index) => {
+    check(goals, "Goal", goal.id, `updateGoals[${index}].id`);
+    checkFacts(goal.factIds, `updateGoals[${index}].factIds`);
+  });
+  decision.reviews?.forEach((review, index) => {
+    check(findings, "Finding", review.findingId, `reviews[${index}].findingId`);
+    if (review.pocEvidenceId) {
+      check(evidence, "Evidence", review.pocEvidenceId, `reviews[${index}].pocEvidenceId`);
+      const finding = findings.get(review.findingId);
+      if (finding && evidence.has(review.pocEvidenceId) && !finding.evidenceIds.includes(review.pocEvidenceId)) {
+        errors.push(`reviews[${index}].pocEvidenceId=${JSON.stringify(review.pocEvidenceId)} must belong to Finding ${JSON.stringify(finding.id)}`);
+      }
+    }
+  });
+  if (errors.length) throw new Error(`${errors.join("; ")}. Copy exact IDs from the committed blackboard (Fact IDs also appear in factIndex); never change ID prefixes, truncate IDs or guess replacements. Evidence IDs and batch-local refs are not Fact IDs. New Goals may reference an existing or earlier new parent Goal.`);
 }

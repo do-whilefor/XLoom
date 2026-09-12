@@ -8,7 +8,7 @@ import { PiRunner, RuntimeRunError, executeTools, parseFinalJson } from "../src/
 import { buildRunPrompt } from "../src/runtime/prompts.js";
 import { ChatSession, type ChatRequest } from "../src/runtime/chat.js";
 import type { BoardSnapshot, Decision, ModelConfig, RunRequest, RuntimeEvent } from "../src/types.js";
-import { validateDecisionFactReferences } from "../src/loop/references.js";
+import { validateDecisionReferences } from "../src/loop/references.js";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -165,33 +165,39 @@ describe("Pi runtime isolation", () => {
     await expect(readFile(join(input.workspace, "forbidden.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it.each(["decide", "metacog"] as const)("repairs a %s Fact ID copied from an Evidence ID without replaying tools", async mode => {
+  it.each(["decide", "metacog"] as const)("repairs a %s wrong Fact and truncated Step ID together without replaying tools", async mode => {
     const input = await request(mode);
     input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.goals.push({ id: "G0", parentId: null, status: "active", description: "Inspect synthetic fixture", factIds: [] });
     input.snapshot.facts.push({ id: "F-observation", stepId: null, description: "The fixture contains an allow/deny comparison", evidenceIds: ["E-artifact"] });
+    input.snapshot.steps.push({ id: "S-3b514130-6a6", goalId: "G0", from: [], description: "Prior synthetic fixture check", successSignal: "Label", evidencePlan: "Save", priority: 1,
+      status: "ready", attempts: 0, runId: null, leaseUntil: null });
     await writeFile(join(input.workspace, "public-evidence.txt"), "SYNTHETIC allow/deny comparison");
     const events: RuntimeEvent[] = [];
     input.onEvent = event => events.push(event);
     let calls = 0;
-    const plan = (ref: string) => ({ summary: "Inspect the remaining fixture condition", steps: [{
+    const plan = (ref: string, stepId: string) => ({ summary: "Inspect the remaining fixture condition", steps: [{
       goalId: "G0", from: [ref], description: "Check another fixture label", successSignal: "Expected label observed", evidencePlan: "Save fixture", priority: 1,
-    }] });
+    }], updateSteps: [{ id: stepId, action: "abandon", reason: "Replace prior plan using the observed fixture" }] });
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
       if (++calls === 1) return message([{ type: "toolCall", id: "read-once", name: "read", arguments: { path: "public-evidence.txt" } }], "toolUse");
-      if (calls === 2) return message([{ type: "text", text: JSON.stringify(plan("F-artifact")) }]);
+      if (calls === 2) return message([{ type: "text", text: JSON.stringify(plan("F-artifact", "S-3b514130-6a")) }]);
       expect(context.tools).toEqual([]);
       expect(JSON.stringify(context.messages.at(-1))).toContain("steps[0].from[0]");
+      expect(JSON.stringify(context.messages.at(-1))).toContain("updateSteps[0].id");
+      expect(JSON.stringify(context.messages.at(-1))).toContain("S-3b514130-6a");
       expect(JSON.stringify(context.messages.at(-1))).toContain("never change ID prefixes");
       expect(JSON.stringify(context.messages)).toContain("F-observation");
-      return message([{ type: "text", text: JSON.stringify(plan("F-observation")) }]);
+      return message([{ type: "text", text: JSON.stringify(plan("F-observation", "S-3b514130-6a6")) }]);
     }) }) });
     const result = await runner.run(input);
-    expect(result.output).toEqual(plan("F-observation"));
+    expect(result.output).toEqual(plan("F-observation", "S-3b514130-6a6"));
     expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
     expect(calls).toBe(3);
     expect(events.filter(event => event.type === "tool_start")).toHaveLength(1);
+    expect(events.filter(event => event.type === "notice" && event.text.includes("tool-free repair"))).toHaveLength(1);
     const saved = JSON.parse(await readFile(join(input.runDir, "output.json"), "utf8"));
-    expect(saved.output).toEqual(plan("F-observation"));
+    expect(saved.output).toEqual(plan("F-observation", "S-3b514130-6a6"));
   });
 
   it.each([1, null])("never invents a replacement Fact when correction fails (explicit request limit %s)", async maxTurns => {
@@ -211,11 +217,12 @@ describe("Pi runtime isolation", () => {
 
   it("checks every Fact reference field against the full board without changing the proposal", async () => {
     const { snapshot } = await request();
+    snapshot.goals.push(...["G0", "G1"].map(id => ({ id, parentId: null, status: "active" as const, description: "Synthetic fixture goal", factIds: [] })));
     snapshot.facts.push({ id: "F-old", description: "Indexed historical observation", stepId: null, evidenceIds: ["E-old"] });
     const valid: Decision = { summary: "Recheck compatible observations", steps: [{ goalId: "G0", from: ["F-old"], description: "Fixture recheck", successSignal: "Comparison", evidencePlan: "Save", priority: 1,
       combination: { requires: ["F-old"], counterEvidence: ["F-old"], missing: ["condition"], scope: "fixture", stateVersion: "v1", expectedCapability: "label comparison" } }],
       updateGoals: [{ id: "G1", status: "satisfied", factIds: ["F-old"], reason: "Already observed" }] };
-    expect(() => validateDecisionFactReferences(snapshot, valid)).not.toThrow();
+    expect(() => validateDecisionReferences(snapshot, valid)).not.toThrow();
     const invalid = structuredClone(valid);
     invalid.steps![0]!.from = ["E-old"];
     invalid.steps![0]!.combination!.requires = ["f1"];
@@ -223,7 +230,7 @@ describe("Pi runtime isolation", () => {
     invalid.updateGoals![0]!.factIds = ["F-missing"];
     const original = structuredClone(invalid);
     for (const field of ["steps[0].from[0]", "steps[0].combination.requires[0]", "steps[0].combination.counterEvidence[0]", "updateGoals[0].factIds[0]"]) {
-      expect(() => validateDecisionFactReferences(snapshot, invalid)).toThrow(field);
+      expect(() => validateDecisionReferences(snapshot, invalid)).toThrow(field);
     }
     expect(invalid).toEqual(original);
   });

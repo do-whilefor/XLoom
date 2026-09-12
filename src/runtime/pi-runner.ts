@@ -12,7 +12,7 @@ import { createCheckedPowerShellTool } from "./powershell.js";
 import { decisionSchema, executionSchema, formatValidationError } from "../schema.js";
 import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure } from "./continuity.js";
 import { stageWriter } from "./stage.js";
-import { validateDecisionFactReferences } from "../loop/references.js";
+import { validateDecisionReferences } from "../loop/references.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
 import { createWorkspaceReadTool } from "./read.js";
 
@@ -308,7 +308,7 @@ export class PiRunner implements AgentRunner {
         }
         const validated = decisionSchema.safeParse(parsed);
         if (!validated.success) throw new Error(formatValidationError(validated.error));
-        validateDecisionFactReferences(request.snapshot, validated.data);
+        validateDecisionReferences(request.snapshot, validated.data);
         return validated.data;
       };
       let output: unknown;
@@ -316,7 +316,7 @@ export class PiRunner implements AgentRunner {
       catch (error) {
         if (!canRequest()) throw error;
         const reason = error instanceof Error ? error.message : String(error);
-        emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape or Fact reference; requesting one tool-free repair using existing results." });
+        emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape or reference; requesting one tool-free repair using existing results." });
         agent.state.tools = [];
         agent.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
         await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, IDs, findings, or completion. Submit only records not already committed by checkpoints. Return the required single JSON object.`);

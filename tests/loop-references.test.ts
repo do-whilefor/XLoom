@@ -1,0 +1,83 @@
+import { describe, expect, it } from "vitest";
+import { defaultConfig } from "../src/config.js";
+import { validateDecisionReferences } from "../src/loop/references.js";
+import type { BoardSnapshot, Decision, StepStatus } from "../src/types.js";
+
+function board(): BoardSnapshot {
+  return {
+    revision: 1, config: defaultConfig("Synthetic reference validation"), status: "running", outcome: null, reason: "",
+    goals: [{ id: "G0", description: "Synthetic fixture", parentId: null, status: "active", factIds: [] }],
+    facts: [{ id: "F-fixture", description: "Synthetic observation", stepId: null, evidenceIds: ["E-fixture"] }],
+    steps: [{ id: "S-fixture", goalId: "G0", from: [], description: "Synthetic check", successSignal: "Compare labels", evidencePlan: "Save fixture", priority: 1,
+      status: "ready", attempts: 0, runId: null, leaseUntil: null }],
+    findings: [{ id: "V-fixture", key: "fixture", target: "synthetic fixture", title: "Fixture", status: "technical_hit", rating: "unrated", factIds: ["F-fixture"], evidenceIds: ["E-fixture"], next: "Review fixture" }],
+    evidence: ["E-fixture", "E-other"].map(id => ({ id, path: "synthetic.txt", sha256: "fixture", bytes: 1, description: "Synthetic artifact", runId: "r1", stepId: "S-fixture" })),
+    hints: [], usage: { input: 0, output: 0, cost: 0 }, completedSteps: 0, noProgressCount: 0, lastMetaStep: 0, lastMetaRevision: 0,
+  };
+}
+
+describe("Decision reference validation", () => {
+  it("reports all reference families together without changing IDs, records or state", () => {
+    const snapshot = board();
+    const proposal: Decision = {
+      summary: "Synthetic invalid references",
+      goals: [{ id: "G-new", parentId: "G-unknown", description: "Invalid parent" }],
+      steps: [{ goalId: "G-missing", from: ["F-invented"], description: "Synthetic check", successSignal: "Compare", evidencePlan: "Save", priority: 1 }],
+      updateSteps: [{ id: "S-fixtur", action: "abandon", reason: "Truncated ID" }],
+      updateGoals: [{ id: "G-missing", status: "satisfied", factIds: ["E-fixture"], reason: "Wrong ID family" }],
+      reviews: [{ findingId: "V-missing", status: "closed", rating: "unrated", reason: "Unknown review", pocEvidenceId: "E-missing" }],
+    };
+    const original = structuredClone({ snapshot, proposal });
+    const error = (() => { try { validateDecisionReferences(snapshot, proposal); } catch (failure) { return failure as Error; } })();
+    for (const field of ["goals[0].parentId", "steps[0].goalId", "steps[0].from[0]", "updateSteps[0].id", "updateGoals[0].id", "updateGoals[0].factIds[0]", "reviews[0].findingId", "reviews[0].pocEvidenceId"]) {
+      expect(error?.message).toContain(field);
+    }
+    expect({ snapshot, proposal }).toEqual(original);
+  });
+
+  it("accepts exact references and goals created earlier in the same proposal", () => {
+    const proposal: Decision = {
+      summary: "Synthetic reference plan",
+      goals: [{ id: "G-parent", parentId: "G0", description: "New parent" }, { id: "G-child", parentId: "G-parent", description: "New child" }],
+      steps: [{ goalId: "G-child", from: ["F-fixture"], description: "Synthetic comparison", successSignal: "Label", evidencePlan: "Save", priority: 1 }],
+      updateSteps: [{ id: "S-fixture", action: "prioritize", priority: 2, reason: "Order fixture" }],
+      updateGoals: [{ id: "G-parent", status: "satisfied", factIds: ["F-fixture"], reason: "Known fact" }],
+      reviews: [{ findingId: "V-fixture", status: "impact_verified", rating: "info", reason: "Synthetic reference check", pocEvidenceId: "E-fixture" }],
+    };
+    // This validates references only; Store still checks closure and goal lifecycle.
+    expect(() => validateDecisionReferences(board(), proposal)).not.toThrow();
+  });
+
+  it("does not accept a goal parent that is only created later in the batch", () => {
+    const proposal: Decision = { summary: "Forward parent", goals: [
+      { id: "G-child", parentId: "G-parent", description: "Child before parent" },
+      { id: "G-parent", parentId: "G0", description: "Later parent" },
+    ] };
+    expect(() => validateDecisionReferences(board(), proposal)).toThrow("goals[0].parentId");
+  });
+
+  it("rejects existing PoC evidence belonging to another finding", () => {
+    const proposal: Decision = { summary: "Wrong evidence owner", reviews: [
+      { findingId: "V-fixture", status: "impact_verified", rating: "info", reason: "Synthetic check", pocEvidenceId: "E-other" },
+    ] };
+    expect(() => validateDecisionReferences(board(), proposal)).toThrow('must belong to Finding "V-fixture"');
+  });
+
+  it.each(["done", "no_progress", "blocked", "failed", "abandoned"] satisfies StepStatus[])("leaves %s Step updates to the controller history filter", status => {
+    const snapshot = board();
+    snapshot.steps[0]!.status = status;
+    expect(() => validateDecisionReferences(snapshot, { summary: "Historical cleanup", updateSteps: [
+      { id: "S-fixture", action: "abandon", reason: "Controller will retain history" },
+    ] })).not.toThrow();
+  });
+
+  it("rejects claimed Step updates without guessing or altering the step", () => {
+    const snapshot = board();
+    snapshot.steps[0]!.status = "claimed";
+    const original = structuredClone(snapshot);
+    expect(() => validateDecisionReferences(snapshot, { summary: "Claimed update", updateSteps: [
+      { id: "S-fixture", action: "abandon", reason: "Must remain owned by Execute" },
+    ] })).toThrow('"S-fixture" is claimed');
+    expect(snapshot).toEqual(original);
+  });
+});
