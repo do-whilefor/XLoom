@@ -264,7 +264,9 @@ export class BlackboardStore {
         if (proposal.combination) {
           factsExist(proposal.combination.requires);
           factsExist(proposal.combination.counterEvidence ?? []);
-          assert(proposal.combination.requires.every(ref => proposal.from.includes(ref)), "Combination requirements must belong to the Step's from facts.");
+          // Requirements already declare causal inputs. Persist their complete, validated
+          // union in both the Step and decision audit, without inventing or dropping facts.
+          proposal.from = union(proposal.from, proposal.combination.requires);
         }
         const conditions = (step: Pick<Step, "combination">) => step.combination ? JSON.stringify([step.combination.scope, step.combination.stateVersion, [...step.combination.requires].sort(), [...step.combination.missing].sort(), step.combination.expectedCapability, [...(step.combination.counterEvidence ?? [])].sort()]) : "";
         const equivalent = board.steps.some(step => step.goalId === proposal.goalId && normalize(step.description) === normalize(proposal.description) && JSON.stringify([...step.from].sort()) === JSON.stringify([...proposal.from].sort()) && conditions(step) === conditions(proposal));

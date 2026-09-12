@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { BlackboardStore } from "../src/store.js";
-import type { AttemptProposal, Execution, Usage } from "../src/types.js";
+import type { AttemptProposal, Decision, Execution, Usage } from "../src/types.js";
 
 const roots: string[] = [];
 const stores: BlackboardStore[] = [];
@@ -286,6 +286,25 @@ describe("conditional research progress", () => {
 });
 
 describe("combination prerequisites", () => {
+  function fixture() {
+    const store = open(); const current = claim(store);
+    const result = output(current.artifacts);
+    result.facts!.push(
+      { ref: "f2", description: "A second prerequisite", evidenceRefs: ["e"] },
+      { ref: "f3", description: "A third prerequisite", evidenceRefs: ["e"] },
+      { ref: "counter", description: "A contrary observation", evidenceRefs: ["e"] },
+    );
+    const board = store.applyExecution(current.runId, result, usage);
+    return { store, facts: board.facts.map(fact => fact.id) };
+  }
+
+  function decision(from: string[], requires: string[], counterEvidence: string[] = []): Decision {
+    return { summary: "Combine existing capabilities", steps: [{
+      goalId: "G0", from, description: "Combine fixture observations", priority: 10, successSignal: "Combined capability confirmed", evidencePlan: "Store combined observation",
+      combination: { requires, missing: ["Second account session"], scope: "fixture", stateVersion: "v1", expectedCapability: "Read fixture using both prerequisites", counterEvidence },
+    }] };
+  }
+
   function combinationPlan(store: BlackboardStore, changes: Record<string, unknown> = {}) {
     const fact = store.snapshot().facts[0];
     const runId = `combination-${++sequence}`;
@@ -305,18 +324,70 @@ describe("combination prerequisites", () => {
     expect(combinationPlan(store, { stateVersion: "v2" }).steps).toHaveLength(3);
   });
 
-  it.each([{ requires: ["unknown"] }, { counterEvidence: ["unknown"] }])("rejects unknown combination facts: %j", changes => {
-    const store = open(); const current = claim(store);
-    store.applyExecution(current.runId, output(current.artifacts), usage);
-    expect(() => combinationPlan(store, changes)).toThrow(/Unknown fact/);
-    expect(store.snapshot().steps).toHaveLength(1);
+  it.each(["from", "requires", "counterEvidence"] as const)("atomically rejects an unknown %s reference before completing the decision", field => {
+    const { store, facts } = fixture();
+    const input = decision([facts[0]], [facts[1]], [facts[3]]);
+    const invalid = structuredClone(input.steps![0]);
+    invalid.description = "Invalid second proposal";
+    if (field === "from") invalid.from.push("unknown");
+    else invalid.combination![field]!.push("unknown");
+    input.steps!.push(invalid);
+    const original = structuredClone(input);
+    const runId = `combination-${++sequence}`;
+    store.beginRun(runId, "decide");
+    const before = store.snapshot();
+    const events = store.events();
+    const runs = store.runs();
+    expect(() => store.applyDecision(runId, input, usage)).toThrow(/Unknown fact/);
+    expect(store.snapshot()).toEqual(before);
+    expect(store.events()).toEqual(events);
+    expect(store.runs()).toEqual(runs);
+    expect(input).toEqual(original);
   });
 
-  it("requires known prerequisites to also appear in the Step's causal inputs", () => {
-    const store = open(); const current = claim(store);
-    const result = output(current.artifacts);
-    result.facts!.push({ ref: "f2", description: "A second prerequisite", evidenceRefs: ["e"] });
-    const board = store.applyExecution(current.runId, result, usage);
-    expect(() => combinationPlan(store, { requires: [board.facts[1].id] })).toThrow(/must belong/);
+  it("persists omitted known requirements as causal inputs and audit data without altering the model output", () => {
+    const { store, facts } = fixture();
+    const input = decision([facts[0]], [facts[1]], [facts[3]]);
+    const original = structuredClone(input);
+    const runId = `combination-${++sequence}`;
+    store.beginRun(runId, "decide");
+    const board = store.applyDecision(runId, input, usage);
+    expect(board.steps.at(-1)?.from).toEqual([facts[0], facts[1]]);
+    expect(board.steps.at(-1)?.combination).toEqual(input.steps![0].combination);
+    expect(board.steps.at(-1)?.from).not.toContain(facts[3]);
+    const audit = JSON.parse(store.events().at(-1)!.payload);
+    expect(audit.decision.steps[0].from).toEqual([facts[0], facts[1]]);
+    expect(audit.decision.steps[0].combination).toEqual(input.steps![0].combination);
+    expect(input).toEqual(original);
+  });
+
+  it.each([
+    { from: [1, 1, 0], requires: [2, 1, 2, 0], expected: [1, 0, 2] },
+    { from: [1, 0, 1, 2, 0], requires: [2, 0], expected: [1, 0, 2] },
+    { from: [], requires: [2, 0, 2, 1], expected: [2, 0, 1] },
+  ])("preserves first occurrence order and removes duplicate causal inputs: %j", ({ from, requires, expected }) => {
+    const { store, facts } = fixture();
+    const input = decision(from.map(index => facts[index]), requires.map(index => facts[index]));
+    const runId = `combination-${++sequence}`;
+    store.beginRun(runId, "decide");
+    const board = store.applyDecision(runId, input, zero);
+    expect(board.steps.at(-1)?.from).toEqual(expected.map(index => facts[index]));
+  });
+
+  it.each([true, false])("deduplicates equivalent plans after normalizing omitted requirements (explicit first: %s)", explicitFirst => {
+    const { store, facts } = fixture();
+    const explicit = decision([facts[0], facts[1]], [facts[0], facts[1]]);
+    const omitted = decision([facts[0]], [facts[0], facts[1]]);
+    const inputs = explicitFirst ? [explicit, omitted] : [omitted, explicit];
+    let plannedId: string | undefined;
+    for (const input of inputs) {
+      const runId = `combination-${++sequence}`;
+      store.beginRun(runId, "decide");
+      const board = store.applyDecision(runId, input, zero);
+      expect(board.steps).toHaveLength(2);
+      expect(board.steps.at(-1)?.from).toEqual([facts[0], facts[1]]);
+      if (plannedId) expect(board.steps.at(-1)?.id).toBe(plannedId);
+      plannedId = board.steps.at(-1)?.id;
+    }
   });
 });
