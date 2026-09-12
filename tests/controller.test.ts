@@ -509,6 +509,35 @@ describe("LoopController interruption and fresh boundaries", () => {
     expect(test.store.runs().at(-1)?.status).toBe("cancelled");
   });
 
+  it("keeps an unlimited run active beyond the former timeout without installing a timer, until the user pauses", async () => {
+    vi.useFakeTimers();
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    let markExecuting!: () => void;
+    const executing = new Promise<void>(resolve => { markExecuting = resolve; });
+    const test = setup(request => {
+      if (request.mode === "execute") { markExecuting(); return abortable(request); }
+      return result(plan());
+    }, { stepTimeoutSeconds: null, maxMinutes: null });
+    const active = test.controller.start();
+    try {
+      await executing;
+      expect(timer).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(test.controller.snapshot()).toMatchObject({ status: "running", outcome: null });
+      expect(test.requests[1]!.signal.aborted).toBe(false);
+      expect(test.controller.snapshot().steps[0]).toMatchObject({ status: "claimed", leaseUntil: null });
+      test.controller.pause();
+      await active;
+      expect(test.controller.snapshot()).toMatchObject({ status: "paused", usage: { input: 17, output: 7, cost: 0.0014 } });
+      expect(test.requests[1]!.signal.aborted).toBe(true);
+    } finally {
+      test.controller.stop();
+      await active;
+      timer.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("defers a conclusion when hints arrive during Decide and gives the next review a fresh snapshot", async () => {
     let controller!: LoopController;
     const test = setup((request) => {
@@ -601,8 +630,8 @@ describe("LoopController budgets and errors", () => {
         const usage = { input: 300_000, output: 20_000, cost: 6 };
         if (request.mode === "execute") return result(fixtureExecution(request), usage);
         return result(request.snapshot.completedSteps ? closure(request) : plan(), usage);
-      }, { stepTimeoutSeconds: 3600 });
-      expect(test.controller.snapshot().config.limits).toMatchObject({ maxMinutes: null, maxTokens: null, maxCost: null });
+      });
+      expect(test.controller.snapshot().config.limits).toMatchObject({ maxMinutes: null, maxTokens: null, maxCost: null, stepTimeoutSeconds: null });
       await test.controller.start();
       const board = test.controller.snapshot();
       expect(test.requests.map((request) => request.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
@@ -652,13 +681,14 @@ describe("LoopController budgets and errors", () => {
     expect(test.controller.snapshot().steps[0]!.attempts).toBe(0);
   });
 
-  it("enforces the remaining wall-time budget during an in-flight call", async () => {
-    const test = setup((request) => abortable(request), { maxMinutes: 0.0005, stepTimeoutSeconds: 100 });
+  it.each([null, 100])("enforces the remaining wall-time budget during an in-flight call with run timeout %s", async stepTimeoutSeconds => {
+    const test = setup((request) => abortable(request), { maxMinutes: 0.0005, stepTimeoutSeconds });
     await test.controller.start();
     expect(test.run).toHaveBeenCalledOnce();
     expect(test.requests[0]!.signal.aborted).toBe(true);
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, usage: { input: 7, output: 2, cost: 0.0004 } });
     expect(test.controller.snapshot().goals[0]?.status).toBe("active");
+    expect(test.controller.snapshot().reason).toContain("Time budget exhausted");
   });
 
   it("records schema failures without leaking partial proposals or fabricating a result", async () => {

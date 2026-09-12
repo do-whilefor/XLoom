@@ -63,6 +63,26 @@ function assertReferences(context: BlackboardContext): void {
 }
 
 describe("role-specific blackboard context", () => {
+  it.each(["decide", "execute", "metacog"] as const)("keeps %s projection guidance compact without losing evidence and recovery boundaries", mode => {
+    const context = projectContext(request(mode));
+    const guidance = context.projection.notice;
+    // This fixed text accompanies every research call; avoid restoring the
+    // previous 2,150-character explanation alongside the role protocol.
+    expect(guidance.length).toBeLessThanOrEqual(1_250);
+    for (const required of [
+      "Omission is not negative evidence", "counts give no contents", "dependencies may exceed a fixed context budget",
+      "stepOrigins: causal inputs/conditions, not executable plans", "all Facts for Decide/metacog, related Facts for Execute",
+      "available means no recorded replacement, not current validity", "Summaries/excerpts may be truncated and references unexpanded",
+      "inspect full evidence", "schedule Execute from indexed Facts", "Superseded Facts are historical; read replacements",
+      "superseded direct/causal inputs", "recheck scope/identity/state and abandon/replan",
+      "attempts apply only to recorded scope/identity/state/baseline/changedVariable",
+      "Combination requires must hold together in the same scope/state", "missing conditions are unverified",
+      "recovery.artifacts files may be absent", "not committed Evidence or Facts", "Inspect before retrying",
+      "in old runs read only artifacts, never sibling logs/transcripts/chats", "recovery evidence in this run's artifacts",
+      "unavailableReferences are missing records, never verified facts",
+    ]) expect(guidance).toContain(required);
+  });
+
   it.each(["decide", "metacog"] as const)("keeps the entire active frontier for %s beyond tail limits", mode => {
     const input = request(mode);
     for (let i = 0; i < 30; i++) {

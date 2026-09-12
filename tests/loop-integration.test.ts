@@ -143,7 +143,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
       expect(input.blackboard.facts[0]?.evidenceIds).toEqual([input.blackboard.evidence[0]!.id]);
       expect(input.blackboard.goals[0]?.status).toBe("active");
       expect(input.blackboard.findings[0]?.status).toBe("lead");
-      if (!context.systemPrompt?.includes("fresh metacognitive review")) return json(proposal(input));
+      if (input.blackboard.projection.mode !== "metacog") return json(proposal(input));
       return json({
         ...proposal(input),
         summary: "Fresh review confirms only the synthetic protocol goal is complete",

@@ -17,10 +17,15 @@ afterEach(() => {
 });
 
 describe("project configuration", () => {
+  it("ships an example config with no application time, turn, token or cost limits", () => {
+    const config = projectConfigSchema.parse(JSON.parse(readFileSync(new URL("../xloom.example.json", import.meta.url), "utf8")));
+    expect(config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null, maxTurnsPerRun: null, maxTokens: null, maxCost: null });
+  });
+
   it("uses user input as scope without extra authorization settings", () => {
     const config = defaultConfig("测试本地 Web 靶场");
     expect(config.scope).toBe(config.goal);
-    expect(config.limits).toEqual({ maxNoProgress: 3, maxMinutes: null, maxTokens: null, maxCost: null, maxTurnsPerRun: null, stepTimeoutSeconds: 180, metacogEvery: 3 });
+    expect(config.limits).toEqual({ maxNoProgress: 3, maxMinutes: null, maxTokens: null, maxCost: null, maxTurnsPerRun: null, stepTimeoutSeconds: null, metacogEvery: 3 });
     expect(config.models.decide.model).toBe("claude-sonnet-4-6");
     expect(config.models.decide).not.toHaveProperty("apiKeyEnv");
     expect(config.models.execute).not.toBe(config.models.decide);
@@ -48,7 +53,7 @@ describe("project configuration", () => {
     expect(parsed.limits).toMatchObject({ maxTokens: 50000, maxCost: 2, maxMinutes: 15 });
   });
 
-  it.each(["maxTokens", "maxCost", "maxMinutes", "maxTurnsPerRun"])("supports opting out of %s, not invalid numerical budgets", (field) => {
+  it.each(["maxTokens", "maxCost", "maxMinutes", "maxTurnsPerRun", "stepTimeoutSeconds"])("supports opting out of %s, not invalid numerical budgets", (field) => {
     const config = defaultConfig("target");
     for (const value of [null, 5]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(true);
     for (const value of [0, -1, NaN, Infinity]) expect(projectConfigSchema.safeParse({ ...config, limits: { ...config.limits, [field]: value } }).success).toBe(false);
@@ -62,6 +67,16 @@ describe("project configuration", () => {
       expect(loadConfig(file).limits.maxTurnsPerRun).toBe(limits.maxTurnsPerRun ?? null);
       expect(loadConfig(file).limits.maxTokens).toBeNull();
     }
+  });
+
+  it("loads omitted or null run timeouts as unlimited and preserves explicit legacy timeouts", () => {
+    const config = defaultConfig("target");
+    const file = configPath();
+    for (const limits of [{}, { stepTimeoutSeconds: null }, { stepTimeoutSeconds: 180 }]) {
+      writeFileSync(file, JSON.stringify({ ...config, limits }));
+      expect(loadConfig(file).limits.stepTimeoutSeconds).toBe(limits.stepTimeoutSeconds ?? null);
+    }
+    expect(projectConfigSchema.safeParse({ ...config, limits: { stepTimeoutSeconds: 86_401 } }).success).toBe(false);
   });
 
   it.each(["google-generative-ai", "bedrock-converse-stream", "azure-openai-responses", "future-pi-api"])("delegates API support for %s to Pi instead of a local allowlist", (api) => {

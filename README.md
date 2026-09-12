@@ -140,7 +140,7 @@ OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `ope
 
 `maxNoProgress: 3` 是元认知触发阈值，不再强制暂停；有新执行计划就继续。LLM 无法给出可执行步骤或有效结论时，保留未完成状态并暂停；确实缺少必要输入时为 `NEED_INPUT`，补充后可恢复。没有隐藏的 24 步停机点。
 
-新配置的 `maxTurnsPerRun`、累计 `maxMinutes`、`maxTokens`、`maxCost` 默认 `null`。应用默认不按回合数或累计输入/输出 token 停机；token 计量照常保留，用户可随时 `/pause` 或 `/stop`。这些字段仍可显式设正数作为资源暂停条件，不是 Goal 完成条件。独立的 `stepTimeoutSeconds` 仍默认 180 秒，适用于整次运行，超时仍会取消并保留中断状态。
+新配置的 `stepTimeoutSeconds`、累计 `maxMinutes`、`maxTurnsPerRun`、`maxTokens`、`maxCost` 默认均为 `null`。应用默认不设置单次运行或累计运行时间上限，也不按回合数或累计输入/输出 token 停机；token 计量照常保留，用户可随时 `/pause` 或 `/stop`。未设时间上限时不创建运行超时定时器。只有用户显式设正数才启用对应资源暂停条件，它不是 Goal 完成条件。提供方的请求超时及工具显式指定的超时仍可能终止对应调用。
 
 `maxTurnsPerRun: null` 不预留“最后一轮”，工具始终可用，直到模型正常提交、用户取消、发生错误或触及其他显式限制。仅在用户配置有限回合数时，最后一轮才禁用工具并整理已有结果；例如显式设 12 时为最多 11 个工具回合加 1 个收尾回合，设 1 时只有无工具回复。每回合可以调用多个工具，失败调用同样计数。提前正常回答直接结束，已触及资源限制或取消时不追加收尾请求。
 
@@ -148,9 +148,11 @@ OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `ope
 
 PowerShell 的 `command` 是 JSON 解码一次后的原始源码，反斜线不能转义 PowerShell 引号；例如单个双引号可写成单引号字符串 `'"'`。工具先用同一 PowerShell 解释器做 AST 语法检查，错误返回源码行列及修复提示，通过后原样执行一次。预检和执行共用工具超时，临时源码在结束时清理；程序不自动改写命令或重放副作用。外部脚本及动态生成的源码仍可能在运行时出错。
 
-兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略；旧文件中已有的回合、累计时间、Token、费用上限仍按显式配置保留。取消回合和累计 token 上限可将 `limits.maxTurnsPerRun`、`limits.maxTokens` 设为 `null` 或删除并重启；去掉各角色的 `models.<role>.maxTokens` 则取消应用输出覆盖。任务证据和 token 计量不会清空。
+兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略；旧文件中已有的回合、单次/累计时间、Token、费用上限仍按显式配置保留。旧配置的 `stepTimeoutSeconds: 180` 会触发 `Run time limit reached`；取消时间上限须将 `limits.stepTimeoutSeconds` 和 `limits.maxMinutes` 设为 `null` 或删除并重启，恢复旧任务时也会使用新配置。取消回合和累计 token 上限同理修改 `limits.maxTurnsPerRun`、`limits.maxTokens`；去掉各角色的 `models.<role>.maxTokens` 则取消应用输出覆盖。任务证据和 token 计量不会清空。
 
 Token / 费用在模型回合结束后累计，正在进行的调用可能超出软上限；超时由取消信号处理。自定义端点价格可能未知，费用上限不能视为准确账单硬限额。暂停时间不计入运行时间；进程被强制结束时，最后一次调用的 token 统计可能不完整。
+
+普通聊天仅调用一个 ChatSession，不启动双 Agent 或注入红队黑板。输入用量仍包含简短系统提示词、四工具的说明和参数定义、当前消息及历史；输出包含提供方计量的回答/思考。PowerShell 说明只放在工具描述中，无限回合时不再追加预算说明。红队调用另含角色 JSON 契约和公开黑板。UI 的 token 是累计输入（含缓存读取/写入）加输出，既不是系统提示词长度，也不是新增输出量或账单金额；缓存折扣由提供方决定。
 
 ## 数据与恢复
 

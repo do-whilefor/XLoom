@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { LoopController } from "../src/controller.js";
 import { BlackboardStore } from "../src/store.js";
@@ -722,6 +722,29 @@ describe("single controller and restart recovery", () => {
     const dedup = runDecision(recovered, { summary: "Same work must not automatically replay", steps: [{ goalId: "G0", from: [], description: step.description, successSignal: step.successSignal, evidencePlan: step.evidencePlan, priority: step.priority }] });
     expect(dedup.steps).toHaveLength(1);
     expect(dedup.steps[0].status).toBe("failed");
+  });
+
+  it.each([null, 180])("preserves elapsed time and a valid lease across interrupted recovery with run timeout %s", stepTimeoutSeconds => {
+    const start = Date.now();
+    let now = start;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const config = defaultConfig("Validate local test fixtures");
+      config.limits.stepTimeoutSeconds = stepTimeoutSeconds;
+      const store = new BlackboardStore(workspace(), config);
+      stores.push(store);
+      const { runId, step } = claimStep(store);
+      expect(store.snapshot().steps.find(item => item.id === step.id)?.leaseUntil).toBe(stepTimeoutSeconds === null ? null : start + 180_000);
+      store.close();
+      now += 10 * 60_000;
+      const recovered = new BlackboardStore(store.workspace, config);
+      stores.push(recovered);
+      const board = recovered.snapshot();
+      expect(board.elapsedMs).toBe(stepTimeoutSeconds === null ? 600_000 : 180_000);
+      expect(Number.isFinite(board.elapsedMs)).toBe(true);
+      expect(board.steps.find(item => item.id === step.id)).toMatchObject({ status: "failed", leaseUntil: null, attempts: 1 });
+      expect(recovered.runs().find(run => run.id === runId)?.status).toBe("interrupted");
+    } finally { clock.mockRestore(); }
   });
 
   it("does not overwrite user-owned state/blackboard.md and records projection failure", () => {

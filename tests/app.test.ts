@@ -92,6 +92,30 @@ describe("chat / red-team application boundary", () => {
     expect(reopened.snapshot().status).toBe("paused");
   });
 
+  it("uses unlimited workspace time settings for a saved task and for later chat and runs", async () => {
+    const test = setup();
+    await test.app.close();
+    const legacy = defaultConfig("saved fixture goal");
+    legacy.limits.stepTimeoutSeconds = 180;
+    legacy.limits.maxMinutes = 5;
+    const store = new BlackboardStore(test.root, legacy);
+    store.hint("preserved fixture context");
+    store.setStatus("paused", "Run time limit reached");
+    const before = store.snapshot();
+    store.close();
+    const app = new AppController(test.root, test.configPath, loadConfig(test.configPath), { runner: test.runner, chat: test.chat, settings: test.settings });
+    apps.push(app);
+    expect(test.runner.run).not.toHaveBeenCalled();
+    expect(app.snapshot()).toMatchObject({ status: "paused", goals: before.goals, hints: before.hints, usage: before.usage });
+    expect(app.snapshot().config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null });
+    await app.start();
+    expect(test.runRequests[0]!.snapshot.config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null });
+    await app.chat("model identity");
+    expect(test.chatRequests[0]!.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null });
+    await app.runGoal("new fixture goal");
+    expect(test.runRequests.at(-1)!.snapshot.config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null });
+  });
+
   it("preserves a legacy root blackboard and keeps newly requested tasks separate", async () => {
     const test = setup(); await test.app.close();
     const store = new BlackboardStore(test.root, defaultConfig("legacy fixture goal")); store.hint("legacy hint"); store.close();

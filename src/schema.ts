@@ -42,7 +42,7 @@ export const limitsSchema = z.object({
   maxTokens: positiveInt(1_000_000_000).nullable().default(null),
   maxCost: z.number().finite().positive().max(1_000_000).nullable().default(null),
   maxTurnsPerRun: positiveInt(1_000).nullable().default(null),
-  stepTimeoutSeconds: z.number().finite().positive().max(86_400).default(180),
+  stepTimeoutSeconds: z.number().finite().positive().max(86_400).nullable().default(null),
   metacogEvery: positiveInt(1_000).default(3),
 }).strict().transform(({ maxSteps: _legacyMaxSteps, ...limits }) => limits);
 

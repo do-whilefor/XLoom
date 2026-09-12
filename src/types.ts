@@ -33,7 +33,7 @@ export interface ProjectConfig {
   scope: string;
   context: string;
   models: { decide: ModelConfig; execute: ModelConfig; chat?: ModelConfig };
-  limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number | null; stepTimeoutSeconds: number; metacogEvery: number };
+  limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number | null; stepTimeoutSeconds: number | null; metacogEvery: number };
 }
 export interface Goal { id: string; description: string; parentId: string | null; status: "active" | "satisfied" | "abandoned"; factIds: string[] }
 export interface Fact { id: string; description: string; stepId: string | null; evidenceIds: string[]; supersedes?: string }
@@ -107,5 +107,5 @@ export interface LoopEvent {
   type: "state" | "board" | "runtime" | "notice" | "handoff" | "session" | "result";
   snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff;
   /** Public summary of an already-committed proposal, never the raw model response. */
-  result?: { mode: Mode; summary: string; outcome?: Outcome };
+  result?: { mode: Mode; summary: string; outcome?: Outcome; final?: boolean };
 }

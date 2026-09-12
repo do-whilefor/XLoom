@@ -112,20 +112,20 @@ $items | ConvertTo-Json -Compress`;
     await expect(readFile(sourcePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("teaches PowerShell literals in every research mode and the tool schema description", () => {
-    for (const prompt of [decidePrompt, executePrompt, metacogPrompt, createCheckedPowerShellTool("workspace").description]) {
-      expect(prompt).toContain(powerShellPrompt);
-      expect(prompt).toContain("Backslash does not escape PowerShell quotes");
-      expect(prompt).toContain("do not assume python3 exists on Windows");
-    }
-    expect(createCheckedPowerShellTool("workspace").name).toBe("powershell");
+  it("keeps PowerShell quoting guidance in its tool description without duplicating it in system prompts", () => {
+    const tool = createCheckedPowerShellTool("workspace");
+    expect(tool.name).toBe("powershell");
+    expect(tool.description).toContain(powerShellPrompt);
+    expect(tool.description).toContain("Backslash does not escape PowerShell quotes");
+    expect(tool.description).toContain("do not assume python3 exists on Windows");
+    for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) expect(prompt).not.toContain(powerShellPrompt);
   });
 
   it("allows truthful tool progress while retaining the final JSON contract in all research modes", () => {
     for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) {
-      expect(prompt).toContain("You may briefly state observed progress or the next check before tool calls");
-      expect(prompt).toContain("narration is optional and must not invent observations or private reasoning");
-      expect(prompt).toContain("Your final response must be one JSON object, without markdown");
+      expect(prompt).toContain("Brief factual progress narration is optional");
+      expect(prompt).toContain("Never invent evidence or private reasoning");
+      expect(prompt).toContain("Final response: one JSON object");
     }
   });
 });

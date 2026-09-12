@@ -128,7 +128,8 @@ export class BlackboardStore {
         step.result = "Interrupted; side effects may have occurred. Inspect evidence and current target state before proposing any retry.";
       }
       for (const run of active) {
-        board.elapsedMs = (board.elapsedMs ?? 0) + Math.min(Date.now() - run.startedAt, board.config.limits.stepTimeoutSeconds * 1000);
+        const timeoutMs = board.config.limits.stepTimeoutSeconds === null ? Infinity : board.config.limits.stepTimeoutSeconds * 1000;
+        board.elapsedMs = (board.elapsedMs ?? 0) + Math.max(0, Math.min(Date.now() - run.startedAt, timeoutMs));
         this.db.prepare("UPDATE runs SET status='interrupted',finishedAt=? WHERE id=?").run(Date.now(), run.id);
       }
       board.status = "paused";
@@ -180,7 +181,7 @@ export class BlackboardStore {
         const step = board.steps.find(item => item.id === stepId);
         assert(step && step.status === "ready", "Step is not ready.");
         step.status = "claimed"; step.attempts++; step.runId = runId;
-        step.leaseUntil = Date.now() + board.config.limits.stepTimeoutSeconds * 1000;
+        step.leaseUntil = board.config.limits.stepTimeoutSeconds === null ? null : Date.now() + board.config.limits.stepTimeoutSeconds * 1000;
       } else assert(!stepId, "Only Execute may claim a step.");
       this.db.prepare("INSERT INTO runs VALUES (?,?,?,?,?,NULL)").run(runId, mode, stepId ?? null, "running", Date.now());
       this.db.prepare("INSERT INTO run_progress (runId,usage,progressed) VALUES (?,?,0)").run(runId, JSON.stringify(zeroUsage()));

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalPowerShellOperations, createPowerShellTool, type PowerShellOperations } from "@earendil-works/pi-coding-agent";
 
-export const powerShellPrompt = `The powershell tool runs actual PowerShell source, not Bash, JavaScript, JSON, or Markdown. Its command field is JSON-decoded once; do not add Markdown escapes to URLs, underscores, or punctuation. Backslash does not escape PowerShell quotes. Prefer single-quoted literal strings: '"' represents one double quote, and 'it''s' represents it's. Use PowerShell's backtick only when an escape is needed inside a double-quoted string. Keep complicated literal lists or scripts in files with write, then load them with Get-Content -LiteralPath or invoke a .ps1 file. If syntax preflight rejects a command, correct the reported source location before trying again; do not repeat the same broken quoting. Runtime failures can leave side effects; inspect results before retrying. Discover available executable names when needed; do not assume python3 exists on Windows.`;
+export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Backslash does not escape PowerShell quotes. Use single-quoted literals: '"' for a double quote, 'it''s' for an apostrophe. Put complex data/scripts in files. Fix syntax errors before retrying; inspect runtime side effects before replaying. Discover executables; do not assume python3 exists on Windows.`;
 
 const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;

@@ -92,10 +92,14 @@ export class LoopController {
       const claimedStep = step ? snapshot.steps.find(item => item.id === step.id) : undefined;
       this.cancellation = new AbortController();
       const remainingMs = snapshot.config.limits.maxMinutes === null ? Infinity : snapshot.config.limits.maxMinutes * 60000 - (snapshot.elapsedMs ?? 0);
-      const timeoutMs = Math.max(1, Math.min(snapshot.config.limits.stepTimeoutSeconds * 1000, remainingMs));
+      const stepTimeoutMs = snapshot.config.limits.stepTimeoutSeconds === null ? Infinity : snapshot.config.limits.stepTimeoutSeconds * 1000;
+      const timeoutMs = Math.max(1, Math.min(stepTimeoutMs, remainingMs));
+      const timeoutReason = remainingMs <= stepTimeoutMs ? "Time budget exhausted" : "Run time limit reached";
       const cancellation = this.cancellation;
       let timedOut = false;
-      const timeout = setTimeout(() => { timedOut = true; cancellation.abort(new Error("Run time limit reached")); }, timeoutMs);
+      const timeout = Number.isFinite(timeoutMs)
+        ? setTimeout(() => { timedOut = true; cancellation.abort(new Error(timeoutReason)); }, timeoutMs)
+        : undefined;
       this.board();
       let result: RunResult | undefined;
       let needsCompletionReview = false;
@@ -114,7 +118,7 @@ export class LoopController {
         this.emit({ type: "handoff", handoff: { role: mode === "execute" ? "execute" : "decide", mode, runId, revision: snapshot.revision, stepId: claimedStep?.id, trigger } });
         cancellation.signal.throwIfAborted();
         result = await this.runner.run(request);
-        if (cancellation.signal.aborted) throw new Error(timedOut ? "Run time limit reached" : this.interruptReason);
+        if (cancellation.signal.aborted) throw new Error(timedOut ? timeoutReason : this.interruptReason);
         hintsChanged = this.snapshot().hints.length !== snapshot.hints.length;
         let committed: BoardSnapshot;
         if (mode === "execute") committed = this.store.applyExecution(runId, result.output, result.usage);
@@ -139,10 +143,10 @@ export class LoopController {
         if (result && !completedUsage.success) this.notice("Runner returned invalid usage; this run's consumption is unknown and was not added to the estimated budget.");
         const reason = error instanceof Error ? error.message : String(error);
         this.store.failRun(runId, reason, usage, cancellation.signal.aborted);
-        if (timedOut) this.store.setStatus("paused", "Run time limit reached; inspect interrupted step state before resuming.");
+        if (timedOut) this.store.setStatus("paused", `${timeoutReason}; inspect interrupted step state before resuming.`);
         this.board("state");
         return;
-      } finally { clearTimeout(timeout); this.cancellation = undefined; }
+      } finally { if (timeout !== undefined) clearTimeout(timeout); this.cancellation = undefined; }
 
       const current = this.snapshot();
       if (current.status !== "running" || current.outcome) return;

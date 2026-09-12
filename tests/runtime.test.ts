@@ -885,6 +885,47 @@ describe("private Pi chat session", () => {
     expect(await session.send({ ...input, signal: new AbortController().signal, limits: { ...input.limits, stepTimeoutSeconds: 60 } })).toEqual({ input: 13, output: 4, cost: 0.02 });
   });
 
+  it("keeps an unlimited chat reply active beyond three minutes without a timeout and still accepts cancellation", async () => {
+    const input = await chatRequest();
+    input.limits.stepTimeoutSeconds = null;
+    const control = new AbortController();
+    input.signal = control.signal;
+    let begin!: () => void;
+    const begun = new Promise<void>(resolve => { begin = resolve; });
+    let providerSignal: AbortSignal | undefined;
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: (_model, _context, options) => {
+      providerSignal = options?.signal;
+      const events = new AssistantMessageEventStream();
+      providerSignal?.addEventListener("abort", () => {
+        events.push({ type: "error", reason: "aborted", error: message([], "aborted") });
+        events.end();
+      }, { once: true });
+      begin();
+      return events;
+    } }) });
+    vi.useFakeTimers();
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    const active = session.send(input).catch(error => error);
+    try {
+      await begun;
+      expect(timer).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(providerSignal?.aborted).toBe(false);
+      control.abort(new Error("User paused the long reply"));
+      const failure = await active;
+      expect(failure).toBeInstanceOf(RuntimeRunError);
+      expect(failure.message).toContain("User paused the long reply");
+      expect(failure.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+      expect(providerSignal?.aborted).toBe(true);
+    } finally {
+      control.abort();
+      await active;
+      session.reset();
+      timer.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects simultaneous chat sends without injecting them into the active history", async () => {
     const input = await chatRequest();
     let release!: () => void;

@@ -9,11 +9,11 @@ export function createRunBudget(limits: ProjectConfig["limits"], usage: Usage, s
   let stoppedBy: string | undefined;
   const maxTurns = limits.maxTurnsPerRun;
   const finalInstruction = protocol === "chat"
-    ? "This is the final allowed model turn. Tools are unavailable. Give a concise final reply using only results already observed. Clearly state unfinished work or missing evidence; do not claim success merely because this invocation is ending."
-    : "This is the final allowed model turn. Tools are unavailable. Return the required single JSON object using only results already observed and artifacts already written. For an unfinished Execute Step, report no_progress or blocked honestly with available evidence; for Decide, propose a bounded next Step. Do not invent artifacts, facts, evidence or Goal completion merely because this invocation is ending.";
+    ? "This is the final allowed model turn; tools are unavailable. Report observed results and unfinished work honestly. Ending is not success."
+    : "This is the final allowed model turn; tools are unavailable. Return the required JSON using observed results and existing artifacts. Unfinished Execute: no_progress/blocked; Decide: plan the next Step. Ending is not Goal completion.";
   const instruction = maxTurns === null
-    ? "No application model-turn limit is configured. Use tools as needed for the assigned work, preserve observed evidence, and return the required final result when ready. A count is not a completion condition."
-    : `Invocation budget: maxTurnsPerRun=${maxTurns}, including a reserved final reporting turn. At most ${maxTurns - 1} model turns may use tools. Save necessary artifacts before the final turn. This invocation's end does not mean the user's Goal is complete.`;
+    ? ""
+    : `maxTurnsPerRun=${maxTurns}: at most ${maxTurns - 1} tool turns, then a tool-free final report. Save artifacts first. This limit does not mean the Goal is complete.`;
   const shouldStopAfterTurn: NonNullable<AgentOptions["shouldStopAfterTurn"]> = ({ message }) => {
     turns++;
     const tokens = spent.input + spent.output + usage.input + usage.output;
