@@ -9,6 +9,7 @@
 需要 Windows、Node.js 24+、PowerShell 7（`pwsh.exe` 在 PATH 中）。推荐 Windows Terminal。模型服务凭据由用户提供。
 
 ```powershell
+Set-Location 'D:\Users\Acer\Desktop\SRC\xloom'
 npm ci --ignore-scripts
 npm run check
 
@@ -49,7 +50,19 @@ TUI 默认等待 `/start`，不会刚打开就执行。`xloom.example.json` 提�
 | `/stop` | 停止，保留状态和证据 |
 | `/board` | 查看简洁 FGS / Finding 视图 |
 | `/help`、`/quit` | 帮助、退出 |
-| Ctrl+C | 运行中先中断；再次按下或空闲时退出 |
+| ↑ / ↓、Ctrl+P / Ctrl+N | 切换上一条 / 下一条已提交输入（当前 TUI 会话最多 100 条），返回最新时恢复未提交草稿 |
+| Alt+↑ / Alt+↓ | 在多行输入内移动光标 |
+| Alt+Enter / Shift+Enter | 插入换行；Enter 提交 |
+| 拖动选择文字 | 松开鼠标后复制到系统剪贴板 |
+| Ctrl+C | 有选择时只复制；无选择时运行中先中断，再次按下或空闲时退出 |
+| Ctrl+Shift+C / Ctrl+Insert | 复制选中文字；无选择时复制当前输入框内容 |
+| Ctrl+V / Shift+Insert / 右键 | 将系统剪贴板文字粘贴到输入框；支持中文及多行，不会自动提交 |
+| 滚轮 / PageUp / PageDown | 滚动会话区；上翻后新输出不会强制拉回底部 |
+| End | 回到会话底部，恢复自动跟随新输出 |
+
+界面只保留标题、会话区、输入框和状态栏，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
+
+应用收到 Ctrl+V 后会直接插入剪贴板文本，不将换行解释为 Enter。终端自己的粘贴功能则需要支持并透传 bracketed paste（括号粘贴）协议；缺少该协议的旧控制台/PTY 通道可能把换行转成回车提交。此时应使用应用的 Ctrl+V，或换用支持该协议的终端。自动测试使用模拟剪贴板，不会读取或覆盖用户当前的系统剪贴板。
 
 ```powershell
 npm start -- run --headless

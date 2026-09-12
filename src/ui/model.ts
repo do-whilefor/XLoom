@@ -17,8 +17,12 @@ export const HELP = [
   "/hint 内容  写入黑板    /meta  请求元认知    /board  查看黑板",
   "/help  帮助    /quit  退出",
   "普通输入仅作为黑板 Hint；两个 Agent 不共享聊天历史。",
-  "Enter 提交 · Alt+Enter 换行 · Esc 暂停 · Ctrl+C 中断，再按退出",
-  "PageUp / PageDown 或鼠标滚轮查看历史；Ctrl+Shift+F 搜索。",
+  "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
+  "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
+  "选中即复制；有选择时 Ctrl+C 复制，无选择时中断，再按退出",
+  "Ctrl+Shift+C / Ctrl+Insert 复制选择或输入 · Ctrl+V / Shift+Insert / 右键粘贴",
+  "应用剪贴板粘贴不会自动提交；终端原生粘贴需支持括号粘贴协议",
+  "滚轮 / PageUp / PageDown 滚动会话 · End 回到底部并恢复跟随 · Ctrl+Shift+F 搜索",
 ].join("\n");
 
 // Tool output and remote content must never become terminal control sequences.

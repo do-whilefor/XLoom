@@ -1,9 +1,22 @@
 import chalk from "chalk";
-import { Editor, matchesKey, ProcessTerminal, ScrollView, truncateToWidth, TuiAltScreen, VStack,
+import { Editor, getKeybindings, isKeyRelease, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
 import { compact, dispatchCommand, EventFeed, fitLines, plainText, statusLine, type UiController } from "./model.js";
+import { createSystemClipboard, type Clipboard } from "./clipboard.js";
 
 export type { UiController } from "./model.js";
+
+export interface TuiOptions {
+  clipboard?: Clipboard;
+  onReady?: (controls: { editor: Editor; tui: TuiAltScreen }) => void;
+}
+
+/** Clipboard content is text, never terminal input or executable key sequences. */
+export function pasteText(text: string): string {
+  if (Buffer.byteLength(text, "utf8") > 1024 * 1024) throw new Error("粘贴内容超过 1 MiB，请分段粘贴。");
+  return stripTerminalSequences(text).replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+}
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
@@ -44,13 +57,26 @@ export class ResponsiveEditor implements Component, Focusable {
 }
 
 /** Terminal injection is for local tests; production uses Pi's ProcessTerminal. */
-export async function runTui(controller: UiController, terminal: Terminal): Promise<void> {
-  const tui = new TuiAltScreen(terminal, true, undefined, { copyOnSelect: false });
+export async function runTui(controller: UiController, terminal: Terminal, options: TuiOptions = {}): Promise<void> {
+  const clipboard = options.clipboard ?? createSystemClipboard();
+  const clipboardTasks = new Set<Promise<unknown>>();
+  const trackClipboard = <T>(operation: Promise<T>): Promise<T> => {
+    clipboardTasks.add(operation);
+    void operation.then(() => clipboardTasks.delete(operation), () => clipboardTasks.delete(operation));
+    return operation;
+  };
+  const tui = new TuiAltScreen(terminal, true, undefined, {
+    mouse: true, wheelScrollLines: 3, copyOnSelect: true,
+    copySelection: (text) => trackClipboard(Promise.resolve().then(() => clipboard.writeText(text)).catch(() => false)),
+    onRightClickPaste: () => { requestPaste(); },
+  });
   const feed = new EventFeed();
   let snapshot = controller.snapshot();
   let active: Promise<void> | undefined;
   let closing = false;
   let interrupted = false;
+  let pastePending: Promise<void> | undefined;
+  let terminalPaste: string | undefined;
   let resolveExit!: () => void;
   const exitRequested = new Promise<void>((resolve) => { resolveExit = resolve; });
   const print = (label: string, text: string, error = false): void => {
@@ -82,24 +108,57 @@ export async function runTui(controller: UiController, terminal: Terminal): Prom
     borderColor: coral,
     selectList: { selectedPrefix: coral, selectedText: coral, description: muted, scrollInfo: muted, noMatch: muted },
   }, { paddingX: 1 });
+  const previousBindings = getKeybindings();
+  setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, {
+    ...previousBindings.getUserBindings(),
+    "tui.editor.historyPrevious": ["up", "ctrl+p"],
+    "tui.editor.historyNext": ["down", "ctrl+n"],
+    "tui.editor.cursorUp": "alt+up",
+    "tui.editor.cursorDown": "alt+down",
+  }));
+  const insertPaste = (text: string): void => {
+    const clean = pasteText(text);
+    if (clean) editor.insertTextAtCursor(clean);
+    tui.requestRender();
+  };
+  function requestPaste(): void {
+    if (closing || pastePending || tui.hasOverlay()) return;
+    // Prevent an Enter racing a clipboard read from submitting an incomplete draft.
+    editor.disableSubmit = true;
+    pastePending = trackClipboard(Promise.resolve().then(() => clipboard.readText()).then(text => {
+      if (!closing && !tui.hasOverlay()) insertPaste(text);
+    }).catch(() => {
+      if (!closing) print("xloom", "无法读取剪贴板。可尝试终端原生粘贴（Ctrl+Shift+V）。", true);
+    }).finally(() => { editor.disableSubmit = false; pastePending = undefined; }));
+  }
+  const copySelectionOrDraft = (): void => {
+    if (tui.hasActiveSelection()) { void trackClipboard(tui.copyActiveSelectionToClipboard()); return; }
+    const text = editor.getExpandedText();
+    if (!text) return;
+    void trackClipboard(Promise.resolve().then(() => clipboard.writeText(text)).catch(() => false).then(ok => {
+      if (!closing) tui.flash(ok ? "已复制输入" : "复制失败");
+    }));
+  };
   const input = new ResponsiveEditor(editor);
   editor.onSubmit = (text) => {
     if (closing) return;
     try {
       dispatchCommand(text, controller, { start, quit, print });
+      editor.addToHistory(text);
       editor.setText("");
+      tui.scrollToBottom();
     } catch (error) {
+      editor.setText(text);
       print("xloom", error instanceof Error ? error.message : String(error), true);
     }
     tui.requestRender();
   };
   const scroll = new ScrollView(new FeedView(feed), { follow: "end", primary: true, scrollbar: "auto", scrollbarStyle: muted });
   tui.setLayoutRoot(new VStack([
-    { component: new StatusView(() => ` xloom  ·  ${compact(snapshot.config.title, 100)}`, coral), basis: 1, shrink: 0 },
+    { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
-    { component: new StatusView(() => ` ${statusLine(snapshot)}`), basis: 1, shrink: 0 },
-    { component: new StatusView(() => " /help · /start · /board    Enter 提交 · Alt+Enter 换行 · Esc 暂停"), basis: 1, shrink: 0, visible: ({ height }) => height >= 10 },
+    { component: new StatusView(() => ` ${statusLine(snapshot)}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
   ]));
   tui.setFocus(input);
 
@@ -114,7 +173,34 @@ export async function runTui(controller: UiController, terminal: Terminal): Prom
     tui.requestRender();
   });
   const removeInput = tui.addInputListener((data) => {
+    if (closing) return { consume: true };
+    // ProcessTerminal normally delivers a complete paste; tolerate split deliveries too.
+    if (!tui.hasOverlay() && (terminalPaste !== undefined || data.startsWith("\x1b[200~"))) {
+      terminalPaste = (terminalPaste ?? "") + (terminalPaste === undefined ? data.slice(6) : data);
+      const end = terminalPaste.lastIndexOf("\x1b[201~");
+      if (end !== -1) {
+        const text = terminalPaste.slice(0, end) + terminalPaste.slice(end + 6);
+        terminalPaste = undefined;
+        try { insertPaste(text); }
+        catch (error) { print("xloom", error instanceof Error ? error.message : "粘贴失败", true); }
+      } else if (terminalPaste.length > 1024 * 1024) {
+        // Continue consuming the paste through its end marker, but cap retained memory.
+        terminalPaste = terminalPaste.slice(0, 1024 * 1024 + 1) + terminalPaste.slice(-5);
+      }
+      return { consume: true };
+    }
+    if (isKeyRelease(data)) return { consume: true };
+    if (tui.hasOverlay()) return undefined;
+    if (matchesKey(data, "ctrl+v") || matchesKey(data, "ctrl+shift+v") || matchesKey(data, "shift+insert")) {
+      requestPaste();
+      return { consume: true };
+    }
+    if (matchesKey(data, "ctrl+shift+c") || matchesKey(data, "ctrl+insert")) {
+      copySelectionOrDraft();
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+c")) {
+      if (tui.hasActiveSelection()) { copySelectionOrDraft(); return { consume: true }; }
       if ((active || snapshot.status === "running") && !interrupted) {
         interrupted = true;
         controller.pause();
@@ -131,20 +217,23 @@ export async function runTui(controller: UiController, terminal: Terminal): Prom
   const signalHandler = (): void => { quit(); };
   process.once("SIGTERM", signalHandler);
   process.once("SIGINT", signalHandler);
-  feed.add("xloom", `${snapshot.config.goal}\n\n双 Agent · 黑板协作 · read / write / edit / powershell\n输入 /start 开始，/help 查看快捷操作。`);
-  if (snapshot.reason) feed.add("恢复状态", snapshot.reason);
+  feed.add("xloom", snapshot.config.goal);
+  if (snapshot.reason && snapshot.status !== "idle") feed.add("恢复状态", snapshot.reason);
   try {
     tui.start();
+    options.onReady?.({ editor, tui });
     await exitRequested;
     // Keep the terminal alive until cancellation has finished, then restore it.
     if (active) await active;
     await controller.waitForIdle?.();
+    await Promise.allSettled([...clipboardTasks]);
   } finally {
     closing = true;
     unsubscribe();
     removeInput();
     process.removeListener("SIGTERM", signalHandler);
     process.removeListener("SIGINT", signalHandler);
+    setKeybindings(previousBindings);
     try { await terminal.drainInput(300, 30); }
     finally { tui.stop(); }
   }

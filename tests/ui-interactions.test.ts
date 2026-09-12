@@ -1,0 +1,295 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Editor, Terminal, TuiAltScreen } from "@earendil-works/pi-tui";
+import type { BoardSnapshot, LoopEvent } from "../src/types.js";
+import type { Clipboard } from "../src/ui/clipboard.js";
+import { runTui } from "../src/ui/index.js";
+import { plainText, type UiController } from "../src/ui/model.js";
+
+class MemoryTerminal implements Terminal {
+  output = "";
+  stopped = false;
+  input: (data: string) => void = () => {};
+  resize: () => void = () => {};
+  kittyProtocolActive = false;
+  constructor(public columns = 90, public rows = 24) {}
+  start(onInput: (data: string) => void, onResize: () => void): void { this.input = onInput; this.resize = onResize; }
+  stop(): void { this.stopped = true; }
+  async drainInput(): Promise<void> {}
+  write(data: string): void { this.output += data; }
+  moveBy(): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(): void {}
+  setProgress(): void {}
+}
+
+function snapshot(): BoardSnapshot {
+  return {
+    revision: 2, status: "idle", outcome: null, reason: "", completedSteps: 1, noProgressCount: 0,
+    lastMetaStep: 0, lastMetaRevision: 0, usage: { input: 100, output: 80, cost: 0.02 },
+    config: { version: 1, title: "界面测试", goal: "验证 TUI 交互", scope: "localhost", context: "",
+      models: { decide: { provider: "test", model: "test" }, execute: { provider: "test", model: "test" } },
+      limits: { maxSteps: 10, maxNoProgress: 3, maxMinutes: 10, maxTokens: 10000, maxCost: 1, maxTurnsPerRun: 5, stepTimeoutSeconds: 60, metacogEvery: 3 } },
+    goals: [], facts: [], steps: [], findings: [], evidence: [], hints: [],
+  };
+}
+
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
+  vi.unstubAllEnvs();
+});
+
+function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板文本"), writeText: vi.fn(async () => true) }, columns = 90, rows = 24) {
+  const board = snapshot();
+  const listeners = new Set<(event: LoopEvent) => void>();
+  const controller = {
+    snapshot: vi.fn(() => board),
+    subscribe: vi.fn((listener: (event: LoopEvent) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; }),
+    start: vi.fn(async () => {}), pause: vi.fn(), stop: vi.fn(), hint: vi.fn(), requestMetacog: vi.fn(),
+  } satisfies UiController;
+  const terminal = new MemoryTerminal(columns, rows);
+  let controls!: { editor: Editor; tui: TuiAltScreen };
+  const session = runTui(controller, terminal, { clipboard, onReady: (value) => { controls = value; } });
+  const close = async (): Promise<void> => {
+    if (!terminal.stopped) {
+      controls.editor.disableSubmit = false;
+      controls.editor.setText("/quit");
+      terminal.input("\r");
+    }
+    await session;
+  };
+  cleanup.push(close);
+  const submit = (text: string): void => { controls.editor.setText(text); terminal.input("\r"); };
+  const emit = (event: LoopEvent): void => { for (const listener of listeners) listener(event); };
+  return { ...controls, board, controller, terminal, clipboard, session, close, submit, emit };
+}
+
+describe("TUI layout and input history", () => {
+  it("keeps the project header and status without the removed intro or static help footer", () => {
+    const app = launch();
+    app.tui.renderNow(true);
+    const screen = plainText(app.terminal.output);
+    expect(screen).toContain("xloom");
+    expect(screen).toContain("界面测试");
+    expect(screen).toContain("idle");
+    expect(screen).toContain("180 tokens");
+    expect(screen).not.toContain("双 Agent");
+    expect(screen).not.toContain("黑板协作");
+    expect(screen).not.toContain("输入 /start");
+    expect(screen).not.toContain("/help · /start · /board");
+  });
+
+  it("uses Up/Down for previous/next submissions and restores a multiline unsent draft", () => {
+    const app = launch();
+    app.submit("第一条信息");
+    app.submit("第二条信息");
+    app.editor.setText("尚未发送\n第二行草稿");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("第二条信息");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("第一条信息");
+    app.terminal.input("\x1b[B");
+    expect(app.editor.getExpandedText()).toBe("第二条信息");
+    app.terminal.input("\x1b[B");
+    expect(app.editor.getExpandedText()).toBe("尚未发送\n第二行草稿");
+    expect(app.controller.hint).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores commands and deduplicates consecutive identical history entries", () => {
+    const app = launch();
+    app.submit("旧信息");
+    app.submit("/board");
+    app.submit("/board");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("/board");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("旧信息");
+    expect(app.controller.hint).toHaveBeenCalledOnce();
+  });
+
+  it("retains multiline cursor movement on Alt+Up and Alt+Down", () => {
+    const app = launch();
+    app.submit("历史信息");
+    app.editor.setText("第一行\n第二行");
+    app.tui.renderNow(true);
+    expect(app.editor.getCursor().line).toBe(1);
+    app.terminal.input("\x1b[1;3A");
+    expect(app.editor.getCursor().line).toBe(0);
+    app.terminal.input("\x1b[1;3B");
+    expect(app.editor.getCursor().line).toBe(1);
+    expect(app.editor.getExpandedText()).toBe("第一行\n第二行");
+  });
+
+  it("keeps Alt+Enter as newline until an explicit submission", () => {
+    const app = launch();
+    app.editor.setText("第一行");
+    app.terminal.input("\x1b\r");
+    app.terminal.input("第二行");
+    expect(app.editor.getExpandedText()).toBe("第一行\n第二行");
+    expect(app.controller.hint).not.toHaveBeenCalled();
+    app.terminal.input("\r");
+    expect(app.controller.hint).toHaveBeenCalledWith("第一行\n第二行");
+  });
+});
+
+describe("TUI clipboard", () => {
+  it.each(["\x16", "\x1b[2;2~"])("pastes native clipboard with %j and keeps it in the editor", async (key) => {
+    const readText = vi.fn(async () => "中文 🧪\r\n第二行");
+    const app = launch({ readText, writeText: vi.fn(async () => true) });
+    app.terminal.input(key);
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("中文 🧪\n第二行"));
+    expect(readText).toHaveBeenCalledOnce();
+    expect(app.controller.hint).not.toHaveBeenCalled();
+    app.terminal.input("\r");
+    expect(app.controller.hint).toHaveBeenCalledWith("中文 🧪\n第二行");
+  });
+
+  it("does not execute a pasted /quit command until Enter", async () => {
+    const app = launch({ readText: vi.fn(async () => "/quit"), writeText: vi.fn(async () => true) });
+    app.terminal.input("\x16");
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("/quit"));
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.terminal.stopped).toBe(false);
+    app.terminal.input("\r");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps all native bracketed-paste chunks as text, including control bytes", () => {
+    const app = launch();
+    app.terminal.input("\x1b[200~");
+    app.terminal.input("/quit\r\n第二行");
+    app.terminal.input("\x1b");
+    app.terminal.input("\x03");
+    app.terminal.input("\x1b[201~");
+    expect(app.editor.getExpandedText()).toBe("/quit\n第二行");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.controller.hint).not.toHaveBeenCalled();
+    expect(app.clipboard.readText).not.toHaveBeenCalled();
+  });
+
+  it("disables Enter while an asynchronous clipboard read is pending", async () => {
+    let resolve!: (text: string) => void;
+    const readText = vi.fn(() => new Promise<string>((done) => { resolve = done; }));
+    const app = launch({ readText, writeText: vi.fn(async () => true) });
+    app.editor.setText("草稿");
+    app.terminal.input("\x16");
+    app.terminal.input("\r");
+    expect(app.controller.hint).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(readText).toHaveBeenCalledOnce());
+    resolve("续写");
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("草稿续写"));
+    app.terminal.input("\r");
+    expect(app.controller.hint).toHaveBeenCalledWith("草稿续写");
+  });
+
+  it("leaves the editor intact and usable when reading the clipboard fails", async () => {
+    const app = launch({ readText: vi.fn(async () => { throw new Error("clipboard is busy"); }), writeText: vi.fn(async () => true) });
+    app.editor.setText("保留草稿");
+    app.terminal.input("\x16");
+    await vi.waitFor(() => expect(app.editor.disableSubmit).toBe(false));
+    app.tui.renderNow(true);
+    expect(app.editor.getExpandedText()).toBe("保留草稿");
+    expect(plainText(app.terminal.output)).toMatch(/clipboard|剪贴板/i);
+    app.terminal.input("\r");
+    expect(app.controller.hint).toHaveBeenCalledWith("保留草稿");
+  });
+
+  it("does not insert clipboard results after quit, and drains the pending operation before closing", async () => {
+    let resolve!: (text: string) => void;
+    const readText = vi.fn(() => new Promise<string>((done) => { resolve = done; }));
+    const app = launch({ readText, writeText: vi.fn(async () => true) });
+    app.terminal.input("\x16");
+    await vi.waitFor(() => expect(readText).toHaveBeenCalledOnce());
+    const closed = app.close();
+    const before = app.editor.getExpandedText();
+    expect(app.terminal.stopped).toBe(false);
+    resolve("不应写入");
+    await closed;
+    expect(app.editor.getExpandedText()).toBe(before);
+    expect(app.terminal.stopped).toBe(true);
+  });
+
+  it.each(["\x1b[99;6u", "\x1b[2;5~"])("copies the draft with %j without triggering lifecycle actions", async (key) => {
+    const writeText = vi.fn(async () => true);
+    const app = launch({ readText: vi.fn(async () => ""), writeText });
+    app.editor.setText("复制草稿\n保留换行");
+    app.terminal.input(key);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("复制草稿\n保留换行"));
+    expect(app.editor.getExpandedText()).toBe("复制草稿\n保留换行");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+  });
+
+  it("preserves Ctrl+C interruption with no selection, ignoring Kitty key releases", async () => {
+    const app = launch();
+    app.board.status = "running";
+    app.emit({ type: "state", snapshot: app.board });
+    app.terminal.input("\x1b[99;5:1u");
+    app.terminal.input("\x1b[99;5:3u");
+    expect(app.controller.pause).toHaveBeenCalledOnce();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.terminal.stopped).toBe(false);
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("auto-copies a mouse selection and Ctrl+C copies that selection instead of exiting", async () => {
+    const writeText = vi.fn(async () => true);
+    const app = launch({ readText: vi.fn(async () => ""), writeText });
+    app.tui.renderNow(true);
+    app.terminal.input("\x1b[<0;2;1M");
+    app.terminal.input("\x1b[<32;7;1M");
+    app.terminal.input("\x1b[<0;7;1m");
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(writeText.mock.calls[0]?.[0].trim()).toBe("xloom");
+    const count = writeText.mock.calls.length;
+    app.terminal.input("\x03");
+    await vi.waitFor(() => expect(writeText.mock.calls.length).toBe(count + 1));
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform !== "win32")("supports the Windows terminal right-click paste event", async () => {
+    vi.stubEnv("TERM_PROGRAM", "Windows_Terminal");
+    const app = launch();
+    app.tui.renderNow(true);
+    app.terminal.input("\x1b[<2;5;5M");
+    await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("剪贴板文本"));
+    expect(app.clipboard.readText).toHaveBeenCalledOnce();
+    expect(app.controller.hint).not.toHaveBeenCalled();
+  });
+});
+
+describe("TUI transcript scrolling", () => {
+  it("scrolls three lines per wheel tick, preserves reading position, and follows again at the bottom", () => {
+    const app = launch(undefined, 70, 16);
+    for (let index = 0; index < 25; index++) app.emit({ type: "notice", message: `会话信息 ${index}\n详细内容 ${index}` });
+    app.tui.renderNow(true);
+    const bottom = app.tui.viewportTop;
+    expect(bottom).toBeGreaterThan(3);
+    expect(app.tui.isFollowingOutput).toBe(true);
+    app.terminal.input("\x1b[<64;5;5M");
+    app.tui.renderNow(true);
+    expect(app.tui.viewportTop).toBe(bottom - 3);
+    expect(app.tui.isFollowingOutput).toBe(false);
+    const reading = app.tui.viewportTop;
+    app.emit({ type: "runtime", runtime: { type: "text", mode: "execute", text: "新增运行输出\n不应抢走滚动位置" } });
+    app.tui.renderNow(true);
+    expect(app.tui.viewportTop).toBe(reading);
+    for (let index = 0; index < 60; index++) app.terminal.input("\x1b[<65;5;5M");
+    app.tui.renderNow(true);
+    expect(app.tui.isFollowingOutput).toBe(true);
+    const previousBottom = app.tui.viewportTop;
+    app.emit({ type: "notice", message: "回到底部后继续跟随\n下一条消息" });
+    app.tui.renderNow(true);
+    expect(app.tui.viewportTop).toBeGreaterThan(previousBottom);
+    expect(app.tui.isFollowingOutput).toBe(true);
+  });
+});
