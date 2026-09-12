@@ -129,22 +129,23 @@ describe("TUI command routing", () => {
   it("routes all lifecycle and inspection commands", () => {
     const { controller } = fakeController();
     const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
-    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/help", "/quit"]) dispatchCommand(command, controller, actions);
+    for (const command of ["/start", "/pause", "/stop", "/meta", "/board", "/help", "/quit", "/exit"]) dispatchCommand(command, controller, actions);
     expect(actions.start).toHaveBeenCalledOnce();
     expect(controller.pause).toHaveBeenCalledOnce();
     expect(controller.stop).toHaveBeenCalledOnce();
     expect(controller.requestMetacog).toHaveBeenCalledOnce();
-    expect(actions.quit).toHaveBeenCalledOnce();
+    expect(actions.quit).toHaveBeenCalledTimes(2);
     expect(actions.print.mock.calls.some(([label]) => label === "Blackboard")).toBe(true);
   });
 
   it("does not silently treat unknown commands as agent instructions", () => {
     const { controller } = fakeController();
     const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
-    for (const command of ["/unknown", "/hint", "/stop now", "  "]) dispatchCommand(command, controller, actions);
+    for (const command of ["/unknown", "/hint", "/stop now", "/exit now", "  "]) dispatchCommand(command, controller, actions);
     expect(controller.hint).not.toHaveBeenCalled();
     expect(controller.stop).not.toHaveBeenCalled();
-    expect(actions.print).toHaveBeenCalledTimes(3);
+    expect(actions.quit).not.toHaveBeenCalled();
+    expect(actions.print).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -164,8 +165,10 @@ describe("TUI lifecycle", () => {
     expect(controller.requestMetacog).toHaveBeenCalledOnce();
     expect(controller.start).not.toHaveBeenCalled();
     terminal.input("\x03");
-    expect(controller.pause).toHaveBeenCalledOnce();
-    terminal.submit("/quit");
+    expect(controller.pause).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
+    terminal.input("\x03");
+    expect(controller.stop).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(waitForIdle).toHaveBeenCalledOnce());
     expect(terminal.stopped).toBe(false);
     release();
@@ -197,7 +200,8 @@ describe("TUI lifecycle", () => {
     terminal.submit("补充身份对比");
     expect(controller.hint).toHaveBeenCalledWith("补充身份对比");
     terminal.input("\x03");
-    expect(controller.pause).toHaveBeenCalledOnce();
+    expect(controller.pause).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
     terminal.input("\x03");
     expect(controller.stop).toHaveBeenCalledOnce();
     expect(terminal.stopped).toBe(false);

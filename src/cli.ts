@@ -22,7 +22,7 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
 Options: --workspace PATH  --config PATH  --help
-TUI: /start /pause /stop /hint text /meta /board /help /quit
+TUI: /start /pause /stop /hint text /meta /board /help /exit /quit
 User input defines authorization. No extra authorization confirmation or hooks.
 Execute has read/write/edit/powershell with the current user's OS permissions.
 `;

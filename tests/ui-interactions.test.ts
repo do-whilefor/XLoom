@@ -40,6 +40,7 @@ function snapshot(): BoardSnapshot {
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -226,13 +227,14 @@ describe("TUI clipboard", () => {
     expect(app.controller.stop).not.toHaveBeenCalled();
   });
 
-  it("preserves Ctrl+C interruption with no selection, ignoring Kitty key releases", async () => {
+  it("confirms before exiting a running loop without pausing, ignoring Kitty releases and repeats", async () => {
     const app = launch();
     app.board.status = "running";
     app.emit({ type: "state", snapshot: app.board });
     app.terminal.input("\x1b[99;5:1u");
     app.terminal.input("\x1b[99;5:3u");
-    expect(app.controller.pause).toHaveBeenCalledOnce();
+    app.terminal.input("\x1b[99;5:2u");
+    expect(app.controller.pause).not.toHaveBeenCalled();
     expect(app.controller.stop).not.toHaveBeenCalled();
     expect(app.terminal.stopped).toBe(false);
     app.terminal.input("\x03");
@@ -240,7 +242,7 @@ describe("TUI clipboard", () => {
     expect(app.controller.stop).toHaveBeenCalledOnce();
   });
 
-  it("auto-copies a mouse selection and Ctrl+C copies that selection instead of exiting", async () => {
+  it("auto-copies a mouse selection but Ctrl+C clears a non-empty draft instead of copying", async () => {
     const writeText = vi.fn(async () => true);
     const app = launch({ readText: vi.fn(async () => ""), writeText });
     app.tui.renderNow(true);
@@ -250,8 +252,11 @@ describe("TUI clipboard", () => {
     await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
     expect(writeText.mock.calls[0]?.[0].trim()).toBe("xloom");
     const count = writeText.mock.calls.length;
+    app.editor.setText("草稿\n第二行");
     app.terminal.input("\x03");
-    await vi.waitFor(() => expect(writeText.mock.calls.length).toBe(count + 1));
+    expect(app.editor.getExpandedText()).toBe("");
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledTimes(count);
     expect(app.controller.pause).not.toHaveBeenCalled();
     expect(app.controller.stop).not.toHaveBeenCalled();
   });
@@ -264,6 +269,118 @@ describe("TUI clipboard", () => {
     await vi.waitFor(() => expect(app.editor.getExpandedText()).toBe("剪贴板文本"));
     expect(app.clipboard.readText).toHaveBeenCalledOnce();
     expect(app.controller.hint).not.toHaveBeenCalled();
+  });
+});
+
+describe("TUI Ctrl+C and exit", () => {
+  it("requires two Ctrl+C presses to exit from idle", async () => {
+    const app = launch();
+    app.terminal.input("\x03");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.terminal.stopped).toBe(false);
+    app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toMatch(/Ctrl\+C.*退出/);
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+    expect(app.terminal.stopped).toBe(true);
+  });
+
+  it.each(["未提交输入", "  \t ", "第一行\n第二行", "\n\n"])("clears all of %j and needs two additional presses to quit", async (draft) => {
+    const app = launch();
+    app.board.status = "running";
+    app.emit({ type: "state", snapshot: app.board });
+    app.editor.setText(draft);
+    app.terminal.input("\x03");
+    expect(app.editor.getExpandedText()).toBe("");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    expect(app.controller.hint).not.toHaveBeenCalled();
+    app.terminal.input("\x03");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+    expect(app.controller.pause).not.toHaveBeenCalled();
+  });
+
+  it("does not let an active transcript selection intercept the empty-editor exit sequence", async () => {
+    const writeText = vi.fn(async () => true);
+    const app = launch({ readText: vi.fn(async () => ""), writeText });
+    app.tui.renderNow(true);
+    app.terminal.input("\x1b[<0;2;1M");
+    app.terminal.input("\x1b[<32;7;1M");
+    app.terminal.input("\x1b[<0;7;1m");
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+    app.terminal.input("\x03");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    app.terminal.input("\x03");
+    await app.session;
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("cancels exit confirmation after intervening keyboard input", async () => {
+    const app = launch();
+    app.terminal.input("\x03");
+    app.terminal.input("\x1b[A");
+    expect(app.editor.getExpandedText()).toBe("");
+    app.terminal.input("\x03");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("cancels exit confirmation after a submitted command", async () => {
+    const app = launch();
+    app.terminal.input("\x03");
+    app.submit("/board");
+    app.terminal.input("\x03");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("expires the exit confirmation after two seconds", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(10000);
+    const app = launch();
+    app.terminal.input("\x03");
+    now.mockReturnValue(12001);
+    app.terminal.input("\x03");
+    expect(app.controller.stop).not.toHaveBeenCalled();
+    now.mockReturnValue(12002);
+    app.terminal.input("\x03");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+  });
+
+  it("discards a clipboard result that arrives after Ctrl+C clears the draft", async () => {
+    let resolve!: (text: string) => void;
+    const readText = vi.fn(() => new Promise<string>((done) => { resolve = done; }));
+    const app = launch({ readText, writeText: vi.fn(async () => true) });
+    app.editor.setText("要清除的草稿");
+    app.terminal.input("\x16");
+    await vi.waitFor(() => expect(readText).toHaveBeenCalledOnce());
+    app.terminal.input("\x03");
+    const cleared = app.editor.getExpandedText();
+    app.terminal.input("新的草稿");
+    resolve("过期粘贴结果");
+    await vi.waitFor(() => expect(app.editor.disableSubmit).toBe(false));
+    expect(cleared).toBe("");
+    expect(app.editor.getExpandedText()).toBe("新的草稿");
+    expect(app.controller.pause).not.toHaveBeenCalled();
+    expect(app.controller.stop).not.toHaveBeenCalled();
+  });
+
+  it("exits with /exit without requiring a Ctrl+C confirmation", async () => {
+    const app = launch();
+    app.submit("/exit");
+    await app.session;
+    expect(app.controller.stop).toHaveBeenCalledOnce();
+    expect(app.terminal.stopped).toBe(true);
   });
 });
 

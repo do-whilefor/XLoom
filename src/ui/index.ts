@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { Editor, getKeybindings, isKeyRelease, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
+import { Editor, getKeybindings, isKeyRelease, isKeyRepeat, KeybindingsManager, matchesKey, ProcessTerminal, ScrollView, setKeybindings, stripTerminalSequences, TUI_KEYBINDINGS, truncateToWidth, TuiAltScreen, VStack,
   type Component, type Focusable, type Terminal } from "@earendil-works/pi-tui";
 import { compact, dispatchCommand, EventFeed, fitLines, plainText, statusLine, type UiController } from "./model.js";
 import { createSystemClipboard, type Clipboard } from "./clipboard.js";
@@ -74,7 +74,8 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   let snapshot = controller.snapshot();
   let active: Promise<void> | undefined;
   let closing = false;
-  let interrupted = false;
+  let exitArmedAt: number | undefined;
+  let draftGeneration = 0;
   let pastePending: Promise<void> | undefined;
   let terminalPaste: string | undefined;
   let resolveExit!: () => void;
@@ -93,7 +94,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   };
   const start = (): void => {
     if (active || closing) return;
-    interrupted = false;
+    exitArmedAt = undefined;
     print("xloom", "Loop 启动。Esc 暂停；/hint 可随时补充黑板。");
     active = Promise.resolve().then(() => closing ? undefined : controller.start()).catch((error: unknown) => {
       print("xloom", error instanceof Error ? error.message : String(error), true);
@@ -118,6 +119,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   }));
   const insertPaste = (text: string): void => {
     const clean = pasteText(text);
+    exitArmedAt = undefined;
     if (clean) editor.insertTextAtCursor(clean);
     tui.requestRender();
   };
@@ -125,11 +127,13 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (closing || pastePending || tui.hasOverlay()) return;
     // Prevent an Enter racing a clipboard read from submitting an incomplete draft.
     editor.disableSubmit = true;
-    pastePending = trackClipboard(Promise.resolve().then(() => clipboard.readText()).then(text => {
-      if (!closing && !tui.hasOverlay()) insertPaste(text);
+    const generation = draftGeneration;
+    const pending = trackClipboard(Promise.resolve().then(() => clipboard.readText()).then(text => {
+      if (!closing && generation === draftGeneration && !tui.hasOverlay()) insertPaste(text);
     }).catch(() => {
-      if (!closing) print("xloom", "无法读取剪贴板。可尝试终端原生粘贴（Ctrl+Shift+V）。", true);
-    }).finally(() => { editor.disableSubmit = false; pastePending = undefined; }));
+      if (!closing && generation === draftGeneration) print("xloom", "无法读取剪贴板。可尝试支持括号粘贴的终端。", true);
+    }).finally(() => { if (pastePending === pending) { editor.disableSubmit = false; pastePending = undefined; } }));
+    pastePending = pending;
   }
   const copySelectionOrDraft = (): void => {
     if (tui.hasActiveSelection()) { void trackClipboard(tui.copyActiveSelectionToClipboard()); return; }
@@ -142,6 +146,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const input = new ResponsiveEditor(editor);
   editor.onSubmit = (text) => {
     if (closing) return;
+    exitArmedAt = undefined;
     try {
       dispatchCommand(text, controller, { start, quit, print });
       editor.addToHistory(text);
@@ -190,6 +195,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
       return { consume: true };
     }
     if (isKeyRelease(data)) return { consume: true };
+    if (!matchesKey(data, "ctrl+c")) exitArmedAt = undefined;
     if (tui.hasOverlay()) return undefined;
     if (matchesKey(data, "ctrl+v") || matchesKey(data, "ctrl+shift+v") || matchesKey(data, "shift+insert")) {
       requestPaste();
@@ -200,12 +206,20 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+c")) {
-      if (tui.hasActiveSelection()) { copySelectionOrDraft(); return { consume: true }; }
-      if ((active || snapshot.status === "running") && !interrupted) {
-        interrupted = true;
-        controller.pause();
-        print("xloom", "已中断当前运行，等待取消完成。再次 Ctrl+C 退出。");
-      } else quit();
+      if (isKeyRepeat(data)) return { consume: true };
+      // Clearing a draft also invalidates a delayed clipboard read so it cannot refill it.
+      draftGeneration++;
+      pastePending = undefined;
+      editor.disableSubmit = false;
+      if (editor.getExpandedText().length > 0) {
+        editor.setText("");
+        exitArmedAt = undefined;
+        tui.requestRender();
+      } else {
+        const now = Date.now();
+        if (exitArmedAt !== undefined && now >= exitArmedAt && now - exitArmedAt <= 2000) quit();
+        else { exitArmedAt = now; tui.flash("2 秒内再按一次 Ctrl+C 退出"); }
+      }
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {

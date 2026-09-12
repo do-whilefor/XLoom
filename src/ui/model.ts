@@ -15,11 +15,12 @@ export interface UiController {
 export const HELP = [
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
   "/hint 内容  写入黑板    /meta  请求元认知    /board  查看黑板",
-  "/help  帮助    /quit  退出",
+  "/help  帮助    /exit 或 /quit  退出",
   "普通输入仅作为黑板 Hint；两个 Agent 不共享聊天历史。",
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
-  "选中即复制；有选择时 Ctrl+C 复制，无选择时中断，再按退出",
+  "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
+  "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
   "Ctrl+Shift+C / Ctrl+Insert 复制选择或输入 · Ctrl+V / Shift+Insert / 右键粘贴",
   "应用剪贴板粘贴不会自动提交；终端原生粘贴需支持括号粘贴协议",
   "滚轮 / PageUp / PageDown 滚动会话 · End 回到底部并恢复跟随 · Ctrl+Shift+F 搜索",
@@ -148,6 +149,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
       break;
     case "/board": actions.print("Blackboard", formatBoard(controller.snapshot())); break;
     case "/help": actions.print("xloom", HELP); break;
+    case "/exit":
     case "/quit": actions.quit(); break;
     default: actions.print("xloom", `未知命令 ${compact(command ?? "")}。使用 /help 查看命令。`);
   }
