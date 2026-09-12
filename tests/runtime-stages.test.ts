@@ -107,6 +107,45 @@ function assertExactUsage(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("inherits a checkpoint finding's Fact evidence and repairs a later metacog reference before SQLite commit", async () => {
+    let factId = "";
+    let evidenceId = "";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") {
+        if (input.blackboard.completedSteps === 1 && context.systemPrompt?.includes("Fresh metacognitive review")) {
+          factId = input.blackboard.facts[0]!.id;
+          evidenceId = input.blackboard.evidence[0]!.id;
+          const mistakenId = evidenceId.replace(/^E-/, "F-");
+          if (run.contexts.length === 2) {
+            expect(context.tools).toEqual([]);
+            expect(JSON.stringify(context.messages.at(-1))).toContain(mistakenId);
+          }
+          return json({ summary: "Review another synthetic condition", steps: [{ goalId: "G0",
+            from: [run.contexts.length === 1 ? mistakenId : factId], description: "Inspect the remaining fixture condition",
+            successSignal: "Remaining label observed", evidencePlan: "Use archived fixture", priority: 1 }] });
+        }
+        return planning(input);
+      }
+      if (input.blackboard.completedSteps) return json({ summary: "Remaining fixture condition still unverified", result: "no_progress" });
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      const submission = JSON.parse(checkpoint(input, "inherited-finding", true));
+      submission.execution.findings = [{ key: "fixture-lead", title: "Synthetic fixture hypothesis", target: "local fixture",
+        status: "lead", factRefs: ["fixture-f"], evidenceRefs: [], next: "Inspect the remaining fixture condition" }];
+      return write("checkpoint-write", input.checkpointFile!, JSON.stringify(submission));
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board.status).toBe("paused");
+    expect(board.completedSteps).toBe(2);
+    expect(board.findings[0]).toMatchObject({ factIds: [factId], evidenceIds: [evidenceId] });
+    expect(board.steps[1]!.from).toEqual([factId]);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toEqual([]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("Fact reference"))).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it("keeps accepted facts and evidence after a later model error without counting checkpoint usage twice", async () => {
     const test = setup((run, context, input) => {
       if (run.channel !== "offline-execute") return planning(input);
