@@ -77,10 +77,17 @@ function thinkingMilliseconds(entries: readonly FeedEntry[], now: number): numbe
   return total + (previous ? previous[1] - previous[0] : 0);
 }
 
+/** Providers sometimes stop after emitting only a reasoning-section heading. */
+export function emptyThought(entry: FeedEntry): boolean {
+  return entry.kind === "thinking" && /^(?:\s*|\s*(?:∴\s*)?Problem\s*[:：]\s*)$/i.test(entry.text);
+}
+
 /** Counts successful/running/failed calls, not unique paths or inferred impact.
  * Protocol-only groups intentionally have an empty summary and remain details. */
 export function summarizeActivity(group: ActivityGroup, now: number): { text: string; active: boolean; failed: number } {
-  const thoughts = group.entries.filter(entry => entry.kind === "thinking");
+  const thoughts = group.entries.filter(entry => entry.kind === "thinking" && !(emptyThought(entry)
+    && entry.durationKnown !== false && Number.isFinite(entry.startedAt) && Number.isFinite(entry.endedAt)
+    && Math.max(0, entry.endedAt! - entry.startedAt!) < 1000));
   const thoughtActive = thoughts.some(entry => !Number.isFinite(entry.endedAt));
   const done = new Map<ToolKind, number>();
   const running = new Map<ToolKind, number>();
