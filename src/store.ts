@@ -376,17 +376,18 @@ export class BlackboardStore {
       }
       for (const proposal of output.findings ?? []) {
         const key = normalize(proposal.key);
-        const evidenceIds = resolveEvidence(proposal.evidenceRefs);
+        const explicitEvidenceIds = resolveEvidence(proposal.evidenceRefs);
         const factIds = union(proposal.factRefs.map(ref => {
           const resolved = factMap.get(ref) ?? ref;
           assert(board.facts.some(item => item.id === resolved), `Unknown fact reference: ${ref}`); return resolved;
         }));
+        // Referencing a fact also attaches its original evidence. Verify inherited
+        // archives just like explicit references, including facts from earlier runs.
+        const evidenceIds = union(explicitEvidenceIds, resolveEvidence(factIds.flatMap(ref => board.facts.find(item => item.id === ref)!.evidenceIds)));
         if (proposal.status === "technical_hit") assert(evidenceIds.length > 0 && factIds.length > 0, "A technical hit requires evidence-backed facts.");
         const pocEvidenceId = proposal.pocEvidenceRef ? resolveEvidence([proposal.pocEvidenceRef])[0] : undefined;
         if (pocEvidenceId) assert(evidenceIds.includes(pocEvidenceId), "PoC evidence must be attached to this finding.");
         let finding = board.findings.find(item => item.key === key);
-        const allEvidence = union(finding?.evidenceIds ?? [], evidenceIds);
-        assert(factIds.every(ref => board.facts.find(item => item.id === ref)!.evidenceIds.every(evidenceId => allEvidence.includes(evidenceId))), "All evidence backing a finding's facts must be attached to that finding.");
         if (finding) {
           assert(normalize(finding.target) === normalize(proposal.target), "A finding key cannot be reused for a different target.");
           finding.evidenceIds = union(finding.evidenceIds, evidenceIds); finding.factIds = union(finding.factIds, factIds);

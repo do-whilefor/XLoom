@@ -161,23 +161,23 @@ describe("transactional blackboard", () => {
     expect(() => store.applyExecution(runId, { summary: "No evidence", result: "done", findings: [{ key: "unsupported", title: "Unsupported hit", target: "fixture", status: "technical_hit", factRefs: [], evidenceRefs: [], next: "Verify" }] }, usage)).toThrow(/technical hit requires evidence-backed facts/);
   });
 
-  it("rejects a new finding whose facts are grounded in unattached evidence, atomically", () => {
+  it("attaches a new finding's complete fact provenance even when explicit evidence omits it", () => {
     const store = openStore();
     const { runId, artifacts } = claimStep(store);
     writeFileSync(path.join(artifacts, "response.txt"), "fixture evidence E1");
     writeFileSync(path.join(artifacts, "grounding.txt"), "fixture evidence E2 grounding the fact");
     const output = hitOutput();
     output.evidence!.push({ ref: "e2", path: "grounding.txt", description: "Actual fact grounding" });
-    output.facts![0].evidenceRefs = ["e2"];
-    const before = store.snapshot();
-    const eventsBefore = store.events();
-    expect(() => store.applyExecution(runId, output, usage)).toThrow();
-    expect(store.snapshot()).toEqual(before);
-    expect(store.events()).toEqual(eventsBefore);
-    expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
+    output.facts![0].evidenceRefs = ["e1", "e2"];
+    const board = store.applyExecution(runId, output, usage);
+    expect(board.findings[0].evidenceIds).toEqual(board.facts[0].evidenceIds);
+    expect(board.findings[0].evidenceIds).toHaveLength(2);
+    expect(board.findings[0].factIds).toEqual([board.facts[0].id]);
+    expect(board.findings[0]).toMatchObject({ status: "technical_hit", rating: "unrated" });
+    expect(store.runs().find(run => run.id === runId)?.status).toBe("completed");
   });
 
-  it("rejects adding a fact to an existing finding without attaching the fact's new evidence", () => {
+  it("inherits a newly added fact's evidence into an existing finding while retaining prior evidence", () => {
     const store = openStore();
     const first = produceHit(store);
     const { runId, artifacts } = claimStep(store, "Add another grounded observation");
@@ -188,10 +188,62 @@ describe("transactional blackboard", () => {
       facts: [{ ref: "new-f", description: "A fact grounded in new-e", evidenceRefs: ["new-e"] }],
       findings: [{ key: "fixture-ownership", title: "Fixture ownership difference", target: first.findings[0].target, status: "technical_hit", factRefs: ["new-f"], evidenceRefs: [first.evidence[0].id], next: "Review new fact" }],
     };
+    const board = store.applyExecution(runId, output, usage);
+    expect(board.findings).toHaveLength(1);
+    expect(board.findings[0].id).toBe(first.findings[0].id);
+    expect(board.findings[0].factIds).toEqual(board.facts.map(fact => fact.id));
+    expect(board.findings[0].evidenceIds).toEqual(board.evidence.map(evidence => evidence.id));
+    expect(board.findings[0].evidenceIds).toHaveLength(2);
+  });
+
+  it("inherits verified evidence from a previously committed fact without requiring duplicate refs", () => {
+    const store = openStore();
+    const first = produceHit(store);
+    const { runId } = claimStep(store, "Reuse a committed fact in another finding");
+    const board = store.applyExecution(runId, {
+      summary: "Use existing provenance", result: "done",
+      findings: [{ key: "second-observation", title: "Another fixture interpretation", target: "fixture", status: "technical_hit", factRefs: [first.facts[0].id], evidenceRefs: [], pocEvidenceRef: first.evidence[0].id, next: "Review inherited evidence" }],
+    }, usage);
+    expect(board.findings[1].factIds).toEqual([first.facts[0].id]);
+    expect(board.findings[1].evidenceIds).toEqual(first.facts[0].evidenceIds);
+    expect(board.findings[1].pocEvidenceId).toBe(first.evidence[0].id);
+    expect(board.facts).toEqual(first.facts);
+    expect(board.evidence).toEqual(first.evidence);
+  });
+
+  it.each(["unknown fact", "unknown evidence", "unattached PoC"])("still rolls back inherited finding provenance for %s", failure => {
+    const store = openStore();
+    const { runId, artifacts } = claimStep(store);
+    writeFileSync(path.join(artifacts, "response.txt"), "fixture fact evidence");
+    writeFileSync(path.join(artifacts, "unrelated.txt"), "unrelated fixture evidence");
+    const output = hitOutput();
+    output.evidence!.push({ ref: "unrelated", path: "unrelated.txt", description: "Not backing the finding" });
+    output.findings![0].evidenceRefs = failure === "unknown evidence" ? ["missing-e"] : [];
+    if (failure === "unknown fact") output.findings![0].factRefs = ["missing-f"];
+    if (failure === "unattached PoC") output.findings![0].pocEvidenceRef = "unrelated";
     const before = store.snapshot();
-    expect(() => store.applyExecution(runId, output, usage)).toThrow();
+    const eventsBefore = store.events();
+    expect(() => store.applyExecution(runId, output, usage)).toThrow(failure === "unknown fact" ? /Unknown fact reference: missing-f/ : failure === "unknown evidence" ? /Unknown evidence reference: missing-e/ : /PoC evidence must be attached/);
     expect(store.snapshot()).toEqual(before);
-    expect(store.snapshot().findings[0].factIds).toEqual(first.findings[0].factIds);
+    expect(store.events()).toEqual(eventsBefore);
+    expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
+  });
+
+  it.each(["tampered", "missing"])("rejects %s evidence inherited from a previously committed fact", damage => {
+    const store = openStore();
+    const first = produceHit(store);
+    const { runId } = claimStep(store, "Reference a fact with damaged archived evidence");
+    const archive = path.join(store.workspace, first.evidence[0].path);
+    if (damage === "tampered") writeFileSync(archive, "changed fixture archive");
+    else rmSync(archive);
+    const before = store.snapshot();
+    const eventsBefore = store.events();
+    expect(() => store.applyExecution(runId, {
+      summary: "Reuse damaged provenance", result: "done",
+      findings: [{ key: "second-observation", title: "Another fixture interpretation", target: "fixture", status: "technical_hit", factRefs: [first.facts[0].id], evidenceRefs: [], next: "Verify original bytes" }],
+    }, usage)).toThrow(damage === "tampered" ? /Evidence changed/ : /ENOENT/);
+    expect(store.snapshot()).toEqual(before);
+    expect(store.events()).toEqual(eventsBefore);
   });
 
   it("accepts fact provenance already covered by an existing finding's merged evidence", () => {

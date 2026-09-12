@@ -78,6 +78,34 @@ describe("durable execution checkpoints", () => {
     expect(store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
   });
 
+  it("commits partial finding evidence lists using all referenced facts' provenance on the first checkpoint", () => {
+    const store = open();
+    const { runId, artifacts, step } = claim(store);
+    const result = output(artifacts);
+    writeFileSync(path.join(artifacts, "repeat.txt"), "independent repeated fixture observation");
+    writeFileSync(path.join(artifacts, "baseline.txt"), "a different fixture baseline");
+    result.evidence!.push(
+      { ref: "repeat", path: "repeat.txt", description: "Repeat backing the first fact" },
+      { ref: "baseline", path: "baseline.txt", description: "Baseline backing the second fact" },
+    );
+    result.facts![0].evidenceRefs = ["e", "repeat"];
+    result.facts!.push({ ref: "second-f", description: "Second fixture observation", evidenceRefs: ["e", "baseline"] });
+    result.findings = [
+      { key: "first-fixture", title: "First fixture lead", target: "fixture one", status: "lead", factRefs: ["f"], evidenceRefs: ["e"], next: "Review repeated observation" },
+      { key: "second-fixture", title: "Second fixture lead", target: "fixture two", status: "lead", factRefs: ["second-f"], evidenceRefs: ["e"], next: "Review baseline difference" },
+    ];
+    const board = store.applyExecutionCheckpoint(runId, "partial-evidence-lists", result, usage);
+    expect(board).toMatchObject({ usage, completedSteps: 0 });
+    expect(board.steps.find(item => item.id === step.id)?.status).toBe("claimed");
+    expect(board.findings.map(finding => finding.evidenceIds)).toEqual(board.facts.map(fact => fact.evidenceIds));
+    expect(board.findings.map(finding => finding.evidenceIds.length)).toEqual([2, 2]);
+    expect(store.applyExecutionCheckpoint(runId, "partial-evidence-lists", result, usage)).toEqual(board);
+    const final = store.applyExecution(runId, { summary: "All observations already committed", result: "done" }, total);
+    expect(final.findings).toEqual(board.findings);
+    expect(final.usage).toEqual(total);
+    expect(store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+  });
+
   it("rejects reuse of a checkpoint ID for different content without changing authority", () => {
     const store = open();
     const { runId, artifacts } = claim(store);
