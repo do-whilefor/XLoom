@@ -327,7 +327,7 @@ describe("LoopController synthetic protocol flow", () => {
     const before = test.store.snapshot();
     await test.controller.start();
     expect(test.controller.snapshot()).toMatchObject({ status: "error", outcome: null, steps: [history], goals: before.goals });
-    expect(test.controller.snapshot().reason).toMatch(/Only ready steps may be changed/);
+    expect(test.controller.snapshot().reason).toMatch(/Unknown Step reference: S-unknown/);
     expect(test.store.events().filter(event => event.kind === "decision")).toHaveLength(1);
     expect(test.requests).toHaveLength(1);
     expect(test.store.runs().at(-1)?.status).toBe("failed");

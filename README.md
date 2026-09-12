@@ -31,7 +31,7 @@ npm start -- run
 - Pi `0.84.4` 的真实 Agent 内核与工具工厂；普通聊天及 Execute 使用 `read / write / edit / powershell`，Decide / 元认知仅使用 `read`。工具顺序执行；PowerShell 增加语法预检，通过后交给 Pi 原样执行。`read` 的文件与图片读取沿用 Pi，目录读取返回真实的直接条目（不递归），最多 200 条/16 KiB，可用原 `offset` / `limit` 分页。不存在的路径仍报告失败并提示检查父目录，不猜测或替换文件名。
 - 普通聊天保留当前进程内的独立会话，使用相同的私有上下文压缩和一次瞬断续接策略；`/new`、切换模型或凭据会清空会话。聊天不写入黑板，不持久化聊天记录。
 - 本地 Controller 串行调度；每次 Decide、每个 Execute Step、每次元认知都重新创建 Pi Agent，消息数组从空开始。
-- 同一次研究调用接近模型上下文窗口时压缩较早的完整交互，保留初始任务、近期工具结果和私有工作摘要；摘要不成为证据。可识别的模型瞬断在当前 run 内续接一次，最终 JSON 无效或规划引用不存在的 Fact 时尝试一次无工具纠正，仍受取消、超时及显式预算约束。
+- 同一次研究调用接近模型上下文窗口时压缩较早的完整交互，保留初始任务、近期工具结果和私有工作摘要；摘要不成为证据。可识别的模型瞬断在当前 run 内续接一次，最终 JSON 无效或规划实体引用不合法时尝试一次无工具纠正，仍受取消、超时及显式预算约束。
 - FGS 黑板：Fact / Goal / Step，附带 Finding / Evidence / Hint。控制器验证提案后统一提交，Agent 不直接写权威黑板。
 - 按角色投影黑板：提供全部 Fact 的简短索引，按所选依赖补齐 `Fact → 来源 Step → 前置 Facts` 因果链和修正链。旧事实被修正后，依赖它的待办先回到规划复核；共享的是任务事实与证据。
 - Execute 通过原有 `write` 工具向指定 `artifacts/checkpoint.json` 提交阶段结果。事实、证据和累计用量原子入库，可继续调查，也可主动交回 fresh Decide；后续失败保留已提交成果。
@@ -71,7 +71,7 @@ npm start -- run
 | 滚轮 / PageUp / PageDown | 滚动会话区；上翻后新输出不会强制拉回底部 |
 | End | 回到会话底部，恢复自动跟随新输出 |
 
-界面只保留三行头部、会话区、输入框和状态栏；终端高度不足时压缩头部以保留输入，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
+界面只保留三行头部、会话区、输入框和状态栏；头部与正文之间留一行空白，终端高度不足时先移除空白，再压缩头部以保留输入，不常驻显示功能介绍或底部快捷帮助。需要时手动输入 `/help`。剪贴板只在用户触发复制/粘贴时访问，不传给 Agent；Windows 剪贴板操作在隐藏的 PowerShell 子进程中异步、按顺序完成。终端若拦截 Ctrl+Shift+C/V 或 Shift+Insert，则由终端处理原生复制粘贴；建议使用 Windows Terminal。旧控制台若抢占鼠标选择或右键，仍可使用键盘快捷键及 PageUp/PageDown。
 
 普通聊天继续流式显示自然语言；双 Agent 可在工具调用前给出简短进展，原始结果协议默认收起，只有控制器成功提交黑板后的摘要才显示为结果，工具成功不等于目标完成。工具错误仍直接可见；状态栏和耗时尾行保留 token、不显示费用。未知定价说明仅在详情中保留一次，配置的费用预算继续生效。`/` 列表只提供应用已有命令，不新增工具、MCP 或 Skills。候选中的 `/model` 也支持补全角色。
 
@@ -118,6 +118,8 @@ npm start -- run --workspace "D:\Work\my-research"
 ## 模型选择与 Goal 完成
 
 `models.chat`、`models.decide`、`models.execute` 可以配置不同模型；旧配置没有 chat 时回退到 execute，元认知始终复用 decide。模型目录、供应商适配和认证直接使用当前依赖 Pi `0.84.4` 的 `ModelRuntime`，不维护 xloom 模型白名单。`npm start -- models` 列出 Pi 本地内置、缓存及自定义目录，不调用模型；TUI `/model` 也会保留当前配置的内联模型别名。默认模型不代表账户已获调用权限。
+
+普通聊天提示附上当前配置的原始模型 ID 和供应商；询问模型时要求直接回答该 ID，不改名或映射到推测型号，也不硬编码本地问答。配置为 `deepseek-flash` 时提供的身份就是 `deepseek-flash`；这不能证明供应商别名背后的具体权重版本。固定聊天提示为 208 字符，另加这一行动态身份信息；字符数不等于 token，实际请求还包含四工具定义、历史消息和本轮输入，统计也包含模型输出。
 
 复用 Pi 用户目录（默认 `~/.pi/agent`，可由 `PI_CODING_AGENT_DIR` 指定）的 `auth.json`、`models.json` 和模型缓存，支持 Pi 的环境认证、API Key 与 OAuth 登录/刷新。TUI `/apikey` 使用 Pi 的持久凭据接口，只修改选中供应商的凭据，不把密钥写进 xloom.json。此文件与 Pi 共用，不是操作系统密钥库。配置不指定 `apiKeyEnv` 时由 Pi 选择认证；显式指定时该变量必须存在。成功设置同供应商凭据后会清除对应角色的显式环境变量覆盖，让新凭据生效。`doctor` 不发起模型推理请求，但 Pi 的凭据刷新或按需动态目录发现可能需要网络，遵守 `PI_OFFLINE`。
 
@@ -202,13 +204,15 @@ Decide / 元认知保留全部 Goal、待执行 Step、未关闭 Finding、Hint 
 
 Finding 自动继承所引用合法 Fact 的全部支持证据，并校验归档完整性；不再要求模型在 evidenceRefs 中重复列全。未知 Fact / Evidence、证据损坏及不属于 Finding 的 PoC 仍被拒绝，失败批次不会提交。
 
+Finding 的 key 是稳定身份：新 key 必须给 target，更新已有 key 可省略 target 以保留原值，或原样提供已提交 target。新增观察写入 facts / next；不要因扩写描述而另建 key。显式冲突仍拒绝，并返回原 target 和修正方法，避免不同目标的证据混在一起。checkpoint 成功响应同时返回 Finding 的 id / key / target，可供后续批次或最终提交复用。旧任务中已存在的重复线索不会自动合并或删除。
+
 阶段提交是可选的 Execute 协议：使用原有 `write` 写入运行提示中的绝对 `artifacts/checkpoint.json` 路径，内容为 `{ "id": "checkpoint-1", "execution": { "summary": "已保存一批观察", "result": "done", "evidence": [], "facts": [] }, "yieldToDecide": false }`。实际观察仍必须引用本次 artifacts 中的原始证据。工具只有在 Controller 提交成功后才返回 `committed: true` 与公开引用；相同 ID / 内容重复提交幂等，不重复计费。相同 ID 改内容会被拒绝；后续批次使用新 ID 和已返回的证据 / Fact ID。`yieldToDecide: true` 提交后停止执行剩余工具，当前 Step 记为阶段性移交、尚未完整验证，交给 fresh Decide 重新规划。它不表示 Goal 完成。
 
 `Execution.attempts` 记录稳定 `hypothesis`、`scope`、`identity`、`stateVersion`、`baseline`、`changedVariable`、`outcome`、`observation` 和 `evidenceRefs`。新的支持 / 反证结论才算该条件下的进展；`inconclusive` / `blocked` 保留但不凭新增记录重置停滞。观察措辞和原始响应时间戳不参与试验去重；范围、身份和变量保留大小写。变更实际条件后可以重新验证。旧输出没有 attempts 时继续接受，仅按规范化事实和有证据的线索状态判断，不能可靠识别任意语义改写；仅添原始文件、未验证 lead 或重新打开旧结论不算新进展。
 
 正常暂停会取消 Pi 调用及 PowerShell 子进程树；硬杀进程、断电或远端已经产生的效果不能回滚。重新打开时会保留失败/中断信息，由新 Decide 判断下一步，不自动再次执行原步骤。
 
-私有 `continuation.json` 绑定当前 run、角色、Step、工作区和模型身份，在完整消息边界原子保存。仅当前 run 内的已识别模型瞬断可自动续接一次；有未完成工具、身份不匹配、损坏检查点、取消、认证错误或容量错误时不自动续接。最终 JSON 形状不合法，或 Decide / 元认知的 from、combination、factIds 引用了不存在的 Fact 时，最多追加一次无工具纠正请求，指出字段及错误 ID。纠正依据完整已提交黑板校验，不猜测 Evidence 与 Fact ID 的对应关系；仍不合法时保留明确诊断。摘要、失败请求和修复请求的实际 token 都计入用量。重启仍由新 Decide 读取公开状态，不向新 run 或另一个角色注入旧私有会话。
+私有 `continuation.json` 绑定当前 run、角色、Step、工作区和模型身份，在完整消息边界原子保存。仅当前 run 内的已识别模型瞬断可自动续接一次；有未完成工具、身份不匹配、损坏检查点、取消、认证错误或容量错误时不自动续接。最终 JSON 形状不合法，或 Decide / 元认知的实体引用不合法时，最多追加一次无工具纠正请求。校验按完整黑板一次汇总 Fact、Step、Goal、Finding、PoC 引用及其字段位置，支持按提交顺序引用同批新 Goal；不猜测或自动补全 ID。未知 Step 会明确报不存在，实际非 ready Step 则注明状态，已结算历史更新仍由 Controller 过滤。纠正请求复用已有观察，不重跑工具；仍不合法时保留明确诊断。摘要、失败请求和修复请求的实际 token 都计入用量。重启仍由新 Decide 读取公开状态，不向新 run 或另一个角色注入旧私有会话。
 
 失败 Step 的公开视图可带有 `recovery`，仅指向旧调用的 `artifacts` 目录，并标记为未验证。即使工具写入后模型报错、结果尚未入库，Decide 也可安排新 Step 检查残留文件；它们不会自动成为 Fact / Evidence，必须先检查并按正常证据流程提交。这个引用不包含旧聊天或运行日志。
 

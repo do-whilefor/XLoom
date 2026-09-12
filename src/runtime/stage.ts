@@ -48,6 +48,7 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
           // already-submitted evidence instead of inventing or resubmitting IDs.
           facts: board.facts.map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
           evidence: board.evidence.map(item => ({ id: item.id, path: item.path, description: item.description })),
+          findings: board.findings.map(({ id, key, target }) => ({ id, key, target })),
           instruction: yielded ? "Return control to Decide; do not execute further tools." : "Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
         }) }] };
       },

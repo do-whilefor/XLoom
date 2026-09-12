@@ -107,6 +107,55 @@ function assertExactUsage(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("returns finding identities and recovers a conflicting target by omitting it without duplicating findings", async () => {
+    let findingId = "";
+    let factId = "";
+    const target = "local synthetic fixture";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) {
+        const submission = JSON.parse(checkpoint(input));
+        submission.execution.findings = [{ key: "fixture-lead", title: "Synthetic hypothesis", target, status: "lead",
+          factRefs: ["fixture-f"], evidenceRefs: [], next: "Inspect remaining fixture state" }];
+        return write("first-checkpoint", input.checkpointFile!, JSON.stringify(submission));
+      }
+      if (run.contexts.length === 3) {
+        const accepted = JSON.parse(toolText(context));
+        expect(accepted.findings).toEqual([{ id: expect.any(String), key: "fixture-lead", target }]);
+        findingId = accepted.findings[0].id;
+        factId = accepted.facts[0].id;
+      }
+      const finding = { key: "fixture-lead", title: "Synthetic hypothesis", status: "lead" as const,
+        factRefs: [factId], evidenceRefs: [], next: "Review the observed fixture state" };
+      if (run.contexts.length === 4) {
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", isError: true });
+        expect(toolText(context)).toContain(`committed target=${JSON.stringify(target)}`);
+        expect(toolText(context)).toContain("omit target");
+        expect(test.store.snapshot().findings).toHaveLength(1);
+      }
+      if (run.contexts.length <= 4) return write(`update-${run.contexts.length}`, input.checkpointFile!, JSON.stringify({
+        id: "batch-2", execution: { summary: "Clarify the same fixture hypothesis", result: "done",
+          findings: [{ ...finding, ...(run.contexts.length === 3 ? { target: `${target} with expanded observation prose` } : {}) }] },
+      }));
+      expect(JSON.parse(toolText(context))).toMatchObject({ committed: true, checkpoint: "batch-2",
+        findings: [{ id: findingId, key: "fixture-lead", target }] });
+      return json({ summary: "Fixture updates committed; no duplicate records", result: "done",
+        findings: [{ ...finding, next: "Review final fixture observations" }] });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board.status).toBe("paused");
+    expect(board.findings).toHaveLength(1);
+    expect(board.findings[0]).toMatchObject({ id: findingId, target, factIds: [factId], next: "Review final fixture observations" });
+    expect(board.facts).toHaveLength(1);
+    expect(board.evidence).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(2);
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
   it.each(["decide", "metacog"] as const)("retains a %s combination dependency omitted from from after a Fact spelling repair", async mode => {
     let expectedFacts: string[] = [];
     let planningRequests = 0;
@@ -181,7 +230,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board.steps[1]!.from).toEqual([factId]);
     expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
     expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toEqual([]);
-    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("Fact reference"))).toHaveLength(1);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
     expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
     assertExactUsage(test);
   });

@@ -240,7 +240,8 @@ export class BlackboardStore {
       }
       for (const update of decision.updateSteps ?? []) {
         const step = board.steps.find(item => item.id === update.id);
-        assert(step?.status === "ready", "Only ready steps may be changed.");
+        assert(step, `Unknown Step reference: ${update.id}. Copy an exact committed Step ID.`);
+        assert(step.status === "ready", `Only ready steps may be changed. Step ${step.id} has status ${step.status}.`);
         if (update.action === "abandon") { step.status = "abandoned"; step.result = update.reason; }
         else { assert(update.priority !== undefined, "Prioritize requires priority."); step.priority = update.priority; }
       }
@@ -391,13 +392,15 @@ export class BlackboardStore {
         if (pocEvidenceId) assert(evidenceIds.includes(pocEvidenceId), "PoC evidence must be attached to this finding.");
         let finding = board.findings.find(item => item.key === key);
         if (finding) {
-          assert(normalize(finding.target) === normalize(proposal.target), "A finding key cannot be reused for a different target.");
+          assert(proposal.target === undefined || normalize(finding.target) === normalize(proposal.target),
+            `A finding key cannot be reused for a different target: key=${JSON.stringify(key)}, committed target=${JSON.stringify(finding.target)}. To update this finding, omit target or copy its committed value; describe new observations in facts/next. Use a new key only for a distinct hypothesis or target.`);
           finding.evidenceIds = union(finding.evidenceIds, evidenceIds); finding.factIds = union(finding.factIds, factIds);
           finding.status = finding.status === "technical_hit" && proposal.status === "lead" ? "technical_hit" : proposal.status;
           finding.rating = "unrated"; finding.next = proposal.next; delete finding.review;
           if (proposal.impact) finding.impact = proposal.impact;
           if (pocEvidenceId) finding.pocEvidenceId = pocEvidenceId;
         } else {
+          assert(proposal.target !== undefined, `New finding key ${JSON.stringify(key)} requires target. To update an existing finding, copy its exact key.`);
           finding = { id: id("V"), key, target: proposal.target, title: proposal.title, status: proposal.status, rating: "unrated", evidenceIds, factIds, next: proposal.next,
             ...(proposal.impact ? { impact: proposal.impact } : {}), ...(pocEvidenceId ? { pocEvidenceId } : {}) };
           board.findings.push(finding);

@@ -132,7 +132,7 @@ export const executionSchema = z.object({
   findings: z.array(z.object({
     key: id,
     title: text(512),
-    target: text(2_048),
+    target: text(2_048).optional(),
     status: z.enum(["lead", "technical_hit"]),
     factRefs: refs,
     evidenceRefs: refs,

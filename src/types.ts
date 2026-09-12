@@ -83,7 +83,7 @@ export interface Execution {
   attempts?: AttemptProposal[];
   evidence?: { ref: string; path: string; description: string }[];
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];
-  findings?: { key: string; title: string; target: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string }[];
+  findings?: { key: string; title: string; target?: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string }[];
 }
 export interface RunRequest {
   id: string; mode: Mode; snapshot: BoardSnapshot; workspace: string; runDir: string; step?: Step;

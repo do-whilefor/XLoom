@@ -130,7 +130,12 @@ describe("compact built-in prompts", () => {
     expect((mode === "execute" ? executionSchema : decisionSchema).safeParse(example).success).toBe(true);
     const data = JSON.parse(userPrompt.split("\n").at(-1)!);
     expect(data.blackboard.project.goal).toBe("Synthetic prompt fixture");
-    if (mode === "execute") expect(data.artifacts).toBeTypeOf("string");
+    if (mode === "execute") {
+      expect(data.artifacts).toBeTypeOf("string");
+      expect(protocol).toContain("New finding keys require target");
+      expect(protocol).toContain("omit target to retain it or copy it exactly");
+      expect(protocol).toContain("Put new observations in facts/next");
+    }
     else {
       expect(data).not.toHaveProperty("artifacts");
       expect(data).not.toHaveProperty("checkpointFile");

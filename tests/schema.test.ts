@@ -177,6 +177,14 @@ describe("agent output contracts", () => {
     expect(executionSchema.safeParse({ ...execution, findings: [{ ...execution.findings![0], status }] }).success).toBe(true);
   });
 
+  it("accepts omitted finding targets for Store to resolve, but rejects empty explicit targets", () => {
+    const { target: _target, ...update } = execution.findings![0];
+    expect(executionSchema.parse({ ...execution, findings: [update] }).findings![0]).not.toHaveProperty("target");
+    for (const target of ["", "   ", null]) {
+      expect(executionSchema.safeParse({ ...execution, findings: [{ ...update, target }] }).success).toBe(false);
+    }
+  });
+
   it.each(["impact_verified", "closed", "VULN_FOUND"])("prevents Execute from setting status %s", (status) => {
     expect(executionSchema.safeParse({ ...execution, findings: [{ ...execution.findings![0], status }] }).success).toBe(false);
   });

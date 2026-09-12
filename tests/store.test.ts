@@ -139,12 +139,31 @@ describe("transactional blackboard", () => {
       summary: "Attempt to change settled history",
       goals: [{ id: "G1", parentId: "G0", description: "Must roll back with the invalid update" }],
       updateSteps: [{ id: execution.step.id, action, priority: 300, reason: "Historical cleanup is not a ready Step update" }],
-    }, usage)).toThrow("Only ready steps may be changed");
+    }, usage)).toThrow(`Only ready steps may be changed. Step ${execution.step.id} has status blocked.`);
     expect(store.snapshot()).toEqual(before);
     expect(store.events()).toEqual(events);
     expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
     expect(store.snapshot().steps[0]).toMatchObject({ status: "blocked", attempts: 1, runId: execution.runId });
     expect(store.snapshot().evidence).toHaveLength(1);
+  });
+
+  it("distinguishes a truncated Step ID from a real Step's status and rolls back preceding updates", () => {
+    const store = openStore();
+    const planned = runDecision(store, { summary: "Plan ready fixture steps", steps: ["first", "second"].map(description => ({
+      goalId: "G0", from: [], description, successSignal: "Fixture observed", evidencePlan: "Synthetic fixture", priority: 1,
+    })) });
+    const runId = nextRun();
+    store.beginRun(runId, "decide");
+    const before = store.snapshot();
+    const events = store.events();
+    const truncated = planned.steps[1].id.slice(0, -1);
+    expect(() => store.applyDecision(runId, { summary: "One valid update and one truncated ID", updateSteps: [
+      { id: planned.steps[0].id, action: "abandon", reason: "Superseded fixture plan" },
+      { id: truncated, action: "prioritize", priority: 3, reason: "A different fixture condition" },
+    ] }, usage)).toThrow(`Unknown Step reference: ${truncated}. Copy an exact committed Step ID.`);
+    expect(store.snapshot()).toEqual(before);
+    expect(store.events()).toEqual(events);
+    expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
   });
 
   it("rejects unsupported facts and keeps them out of authoritative state", () => {
@@ -409,8 +428,55 @@ describe("findings and outcome gates", () => {
     const store = openStore();
     const first = produceHit(store);
     const { runId } = claimStep(store);
-    expect(() => store.applyExecution(runId, { summary: "Conflicting target", result: "done", findings: [{ key: "fixture-ownership", title: "Other target", target: "unrelated fixture", status: "lead", factRefs: [first.facts[0].id], evidenceRefs: [first.evidence[0].id], next: "Verify" }] }, usage)).toThrow(/different target/);
-    expect(store.snapshot().findings[0].target).toBe(first.findings[0].target);
+    const before = store.snapshot();
+    expect(() => store.applyExecution(runId, { summary: "Conflicting target", result: "done", findings: [{ key: "fixture-ownership", title: "Other target", target: "unrelated fixture", status: "lead", factRefs: [first.facts[0].id], evidenceRefs: [first.evidence[0].id], next: "Verify" }] }, usage))
+      .toThrow(`committed target=${JSON.stringify(first.findings[0].target)}. To update this finding, omit target`);
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  it.each(["final", "checkpoint"] as const)("updates an existing finding without restating target through %s submission", mode => {
+    const store = openStore();
+    const first = produceHit(store);
+    const { runId, artifacts } = claimStep(store, "Inspect a second fixture observation");
+    writeFileSync(path.join(artifacts, "additional.txt"), "SYNTHETIC second observation on the same fixture");
+    const update: Execution = {
+      summary: "Additional fixture observation", result: "done",
+      evidence: [{ ref: "e2", path: "additional.txt", description: "Synthetic second observation" }],
+      facts: [{ ref: "f2", description: "Another result for the same fixture identity", evidenceRefs: ["e2"] }],
+      findings: [{ key: " FIXTURE-OWNERSHIP ", title: "Further fixture observation", status: "technical_hit",
+        factRefs: ["f2"], evidenceRefs: [], next: "Review both original fixture observations" }],
+    };
+    const board = mode === "checkpoint" ? store.applyExecutionCheckpoint(runId, "fixture-update", update, usage) : store.applyExecution(runId, update, usage);
+    expect(board.findings).toHaveLength(1);
+    expect(board.findings[0]).toMatchObject({ id: first.findings[0].id, key: first.findings[0].key, target: first.findings[0].target,
+      status: "technical_hit", rating: "unrated", next: update.findings![0].next });
+    expect(board.findings[0].factIds).toEqual(board.facts.map(fact => fact.id));
+    expect(board.findings[0].evidenceIds).toEqual(board.evidence.map(evidence => evidence.id));
+    expect(board.facts).toHaveLength(2);
+    if (mode === "checkpoint") expect(store.applyExecutionCheckpoint(runId, "fixture-update", update, usage)).toEqual(board);
+  });
+
+  it("retains a target introduced earlier in the same batch when updating its key", () => {
+    const store = openStore();
+    const { runId } = claimStep(store);
+    const lead = { key: "fixture-new", title: "Synthetic hypothesis", status: "lead" as const, factRefs: [], evidenceRefs: [], next: "Inspect fixture" };
+    const board = store.applyExecution(runId, { summary: "Record and clarify a hypothesis", result: "done",
+      findings: [{ ...lead, target: "local fixture" }, { ...lead, next: "Compare another fixture state" }] }, usage);
+    expect(board.findings).toHaveLength(1);
+    expect(board.findings[0]).toMatchObject({ target: "local fixture", next: "Compare another fixture state" });
+  });
+
+  it.each(["final", "checkpoint"] as const)("rejects a new key missing target and atomically rolls back its %s batch", mode => {
+    const store = openStore();
+    const first = produceHit(store);
+    const { runId } = claimStep(store);
+    const before = store.snapshot();
+    const update = { key: "fixture-ownership", title: "Synthetic hypothesis", status: "lead" as const,
+      factRefs: [first.facts[0].id], evidenceRefs: [], next: "This change must roll back" };
+    const output: Execution = { summary: "Mistyped existing key", result: "done", findings: [update, { ...update, key: "fixture-ownershi" }] };
+    expect(() => mode === "checkpoint" ? store.applyExecutionCheckpoint(runId, "invalid-target", output, usage) : store.applyExecution(runId, output, usage))
+      .toThrow('New finding key "fixture-ownershi" requires target');
+    expect(store.snapshot()).toEqual(before);
   });
 
   it("does not treat changing next-action prose as new evidence or progress", () => {
