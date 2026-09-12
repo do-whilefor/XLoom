@@ -106,7 +106,110 @@ function assertExactUsage(test: ReturnType<typeof setup>): void {
   expect(test.controller.snapshot().usage).toEqual({ input: calls * 15, output: calls * 5, cost: 0 });
 }
 
+const fixtureGoals: NonNullable<Decision["goals"]> = [
+  { id: "G2", parentId: "G0", description: "Compare independent synthetic fixture conditions" },
+  { id: "G3", parentId: "G2", description: "Compare the first synthetic fixture label" },
+  { id: "G4", parentId: "G2", description: "Compare the second synthetic fixture label" },
+];
+
+function seedFixtureGoals(test: ReturnType<typeof setup>): void {
+  test.store.setStatus("running", "Seed existing fixture goals without model requests");
+  test.store.beginRun("seed-goals", "decide");
+  test.store.applyDecision("seed-goals", { summary: "Seed synthetic goals", goals: fixtureGoals }, { input: 0, output: 0, cost: 0 });
+}
+
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it.each(["decide", "metacog"] as const)("accepts an identical existing Goal in %s and executes its new Steps without a repair request", async mode => {
+    let planned = false;
+    let planningRequests = 0;
+    const executed: string[] = [];
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        executed.push(input.assignedStep!.goalId);
+        return json({ summary: "Synthetic comparison remains unverified", result: "no_progress" });
+      }
+      const meta = context.systemPrompt?.includes("Fresh metacognitive review") ?? false;
+      if (!planned && meta === (mode === "metacog")) {
+        planned = true;
+        planningRequests++;
+        expect(input.blackboard.goals.find(goal => goal.id === "G2")).toMatchObject({ ...fixtureGoals[0], status: "active" });
+        return json({ summary: "Keep the same parent goal while assigning three fixture checks", goals: [fixtureGoals[0]!],
+          steps: fixtureGoals.map((goal, index) => ({ goalId: goal.id, from: [], description: `Inspect synthetic condition ${index + 1}`,
+            successSignal: "Fixture comparison observed", evidencePlan: "Preserve the synthetic comparison", priority: 50 - index })) });
+      }
+      return json({ summary: "Review current fixture results; no further synthetic plan" });
+    });
+    seedFixtureGoals(test);
+    const originalGoals = test.store.snapshot().goals;
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 3, goals: originalGoals });
+    expect(board.steps).toHaveLength(3);
+    expect(board.steps.every(step => step.attempts === 1 && step.status === "no_progress")).toBe(true);
+    expect(executed).toEqual(["G2", "G3", "G4"]);
+    expect(planningRequests).toBe(1);
+    expect(test.seen.every(run => run.contexts.length === 1)).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(0);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
+  it("repairs a conflicting Goal and wrong Fact together after one read, then commits and executes without overwriting the old Goal", async () => {
+    let factId = "";
+    let repairRequests = 0;
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") {
+        if (input.blackboard.completedSteps === 1) {
+          factId = input.blackboard.facts[0]!.id;
+          if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-before-repair", name: "read",
+            arguments: { path: join(input.workspace, input.blackboard.evidence[0]!.path) } }], "toolUse");
+          const repaired = run.contexts.length === 3;
+          if (repaired) {
+            repairRequests++;
+            expect(context.tools).toEqual([]);
+            const diagnostic = JSON.stringify(context.messages.at(-1));
+            expect(diagnostic).toContain("G2");
+            expect(diagnostic).toContain("goals[0].id");
+            expect(diagnostic).toContain("steps[0].from[0]");
+            expect(diagnostic).toContain("committed IDs");
+            expect(diagnostic).toContain("New Goal IDs must be unused");
+            expect(JSON.stringify(context.messages)).toContain("account=alice; state=v1; control=allowed; changed-object=denied");
+          } else {
+            expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "read-before-repair", isError: false });
+          }
+          const goalId = repaired ? "G5" : "G2";
+          return json({ summary: "Plan a distinct fixture observation without replacing its existing parent", goals: [
+            { id: goalId, parentId: "G0", description: "A different synthetic observation goal" },
+          ], steps: [{ goalId, from: [repaired ? factId : "F-missing"], description: "Inspect a new synthetic fixture condition",
+            successSignal: "New label comparison observed", evidencePlan: "Use the archived synthetic artifact", priority: 1 }] });
+        }
+        return planning(input);
+      }
+      if (input.blackboard.completedSteps) {
+        expect(input.assignedStep).toMatchObject({ goalId: "G5", from: [factId] });
+        return json({ summary: "New synthetic condition remains unverified", result: "no_progress" });
+      }
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      return write("fixture-checkpoint", input.checkpointFile!, checkpoint(input, "fact-before-conflict", true));
+    });
+    seedFixtureGoals(test);
+    const originalGoals = test.store.snapshot().goals;
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 2 });
+    expect(board.goals.slice(0, originalGoals.length)).toEqual(originalGoals);
+    expect(board.goals).toHaveLength(originalGoals.length + 1);
+    expect(board.goals.at(-1)).toMatchObject({ id: "G5", description: "A different synthetic observation goal", parentId: "G0", status: "active" });
+    expect(board.steps[1]).toMatchObject({ goalId: "G5", from: [factId], attempts: 1 });
+    expect(repairRequests).toBe(1);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
+    const toolStarts = test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : []);
+    expect(toolStarts).toEqual(["fixture-write", "fixture-checkpoint", "read-before-repair"]);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it("returns finding identities and recovers a conflicting target by omitting it without duplicating findings", async () => {
     let findingId = "";
     let factId = "";
