@@ -112,6 +112,74 @@ describe("transactional blackboard", () => {
     expect(() => store.applyDecision(runId, { summary: "Duplicate submission" }, usage)).toThrow(/already committed/);
   });
 
+  it("reuses an identical active Goal declaration while committing its new plan", () => {
+    const store = openStore();
+    const goal = { id: "G2", parentId: "G0", description: "Compare synthetic fixture labels" };
+    const first = runDecision(store, { summary: "Create fixture subgoal", goals: [goal] });
+    const board = runDecision(store, { summary: "Continue the existing subgoal", goals: [goal], steps: [{
+      goalId: "G2", from: [], description: "Inspect another fixture label", successSignal: "Label observed", evidencePlan: "Save fixture", priority: 1,
+    }] });
+    expect(board.goals).toEqual(first.goals);
+    expect(board.steps).toHaveLength(1);
+    expect(board.steps[0]).toMatchObject({ goalId: "G2", status: "ready" });
+    expect(store.runs().every(run => run.status === "completed")).toBe(true);
+  });
+
+  it.each(["satisfied", "abandoned"] as const)("retains a repeated %s Goal's state and fact links without reopening it", status => {
+    const store = openStore();
+    const hit = produceHit(store);
+    const goal = { id: "G2", parentId: "G0", description: "Compare synthetic fixture labels" };
+    runDecision(store, { summary: "Create fixture subgoal", goals: [goal] });
+    const previous = runDecision(store, { summary: "Resolve fixture subgoal", updateGoals: [{
+      id: goal.id, status, factIds: [hit.facts[0].id], reason: "Synthetic result recorded",
+    }] });
+    const repeated = runDecision(store, { summary: "Repeat public goal declaration", goals: [goal] });
+    expect(repeated.goals).toEqual(previous.goals);
+    expect(repeated.facts).toEqual(previous.facts);
+    expect(repeated.evidence).toEqual(previous.evidence);
+
+    const runId = nextRun();
+    store.beginRun(runId, "decide");
+    const before = store.snapshot();
+    expect(() => store.applyDecision(runId, { summary: "Cannot reopen history by redeclaring it", goals: [goal], steps: [{
+      goalId: goal.id, from: [], description: "Must not run under a resolved Goal", successSignal: "None", evidencePlan: "None", priority: 1,
+    }] }, usage)).toThrow("Step requires an active goal");
+    expect(store.snapshot()).toEqual(before);
+    expect(() => store.applyDecision(runId, { summary: "Cannot create a child under resolved history", goals: [goal,
+      { id: "G-child", parentId: goal.id, description: "Must not reopen parent" },
+    ] }, usage)).toThrow(`has status ${status}`);
+    expect(store.snapshot()).toEqual(before);
+  });
+
+  it("deduplicates identical same-batch declarations and permits their child Goal", () => {
+    const store = openStore();
+    const goal = { id: "G2", parentId: "G0", description: "Synthetic parent" };
+    const board = runDecision(store, { summary: "Declare parent twice before child", goals: [goal, goal,
+      { id: "G3", parentId: "G2", description: "Synthetic child" },
+    ] });
+    expect(board.goals.map(item => item.id)).toEqual(["G0", "G2", "G3"]);
+    expect(board.goals.every(item => item.status === "active")).toBe(true);
+  });
+
+  it.each(["description", "parent", "same-batch"] as const)("atomically rejects a conflicting Goal %s without replacing existing records", conflict => {
+    const store = openStore();
+    const goal = { id: "G2", parentId: "G0", description: "Existing synthetic subgoal" };
+    if (conflict !== "same-batch") runDecision(store, { summary: "Create fixture subgoal", goals: [goal] });
+    else store.setStatus("running", "Synthetic same-batch conflict");
+    const runId = nextRun();
+    store.beginRun(runId, "decide");
+    const before = store.snapshot();
+    const events = store.events();
+    expect(() => store.applyDecision(runId, { summary: "Invalid declaration after a valid new Goal", goals: [
+      { id: "G-other", parentId: "G0", description: "Must also roll back" },
+      ...(conflict === "same-batch" ? [goal] : []),
+      { ...goal, ...(conflict === "parent" ? { parentId: "G-other" } : { description: "Different synthetic subgoal" }) },
+    ] }, usage)).toThrow("Goal G2 already exists with a different description or parent");
+    expect(store.snapshot()).toEqual(before);
+    expect(store.events()).toEqual(events);
+    expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
+  });
+
   it("rolls back evidence references and step completion for invalid Execute output", () => {
     const store = openStore();
     const { runId, artifacts } = claimStep(store);

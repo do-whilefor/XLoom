@@ -35,6 +35,23 @@ describe("Decision reference validation", () => {
     expect({ snapshot, proposal }).toEqual(original);
   });
 
+  it("aggregates conflicting Goal declarations with all other invalid references before repair", () => {
+    const snapshot = board();
+    snapshot.goals.push({ id: "G2", parentId: "G0", description: "Existing fixture goal", status: "active", factIds: [] });
+    const proposal: Decision = {
+      summary: "Conflicting Goal and incorrect Fact/Step references",
+      goals: [{ id: "G2", parentId: "G0", description: "A different fixture goal" }],
+      steps: [{ goalId: "G2", from: ["F-missing"], description: "Synthetic check", successSignal: "Compare", evidencePlan: "Save", priority: 1 }],
+      updateSteps: [{ id: "S-missing", action: "abandon", reason: "Incorrect fixture ID" }],
+    };
+    const original = structuredClone({ snapshot, proposal });
+    let error: Error | undefined;
+    try { validateDecisionReferences(snapshot, proposal); } catch (failure) { error = failure as Error; }
+    expect(error?.message).toContain("Goal G2 already exists with a different description or parent");
+    for (const field of ["goals[0].id", "steps[0].from[0]", "updateSteps[0].id"]) expect(error?.message).toContain(field);
+    expect({ snapshot, proposal }).toEqual(original);
+  });
+
   it("accepts exact references and goals created earlier in the same proposal", () => {
     const proposal: Decision = {
       summary: "Synthetic reference plan",

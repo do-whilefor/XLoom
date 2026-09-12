@@ -4,6 +4,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync,
 import path from "node:path";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
+import { inspectGoalDeclarations } from "./loop/goals.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -233,11 +234,9 @@ export class BlackboardStore {
       const run = this.finishRun(board, runId, usage, "completed");
       assert(run.mode === "decide" || run.mode === "metacog", "Wrong run channel.");
       const factsExist = (ids: string[]) => assert(ids.every(ref => board.facts.some(fact => fact.id === ref)), "Unknown fact reference.");
-      for (const goal of decision.goals ?? []) {
-        assert(!board.goals.some(item => item.id === goal.id), `Goal ${goal.id} already exists.`);
-        assert(board.goals.some(item => item.id === goal.parentId && item.status === "active"), "Unknown or inactive parent goal.");
-        board.goals.push({ ...goal, status: "active", factIds: [] });
-      }
+      const declarations = inspectGoalDeclarations(board.goals, decision.goals);
+      assert(declarations.errors.length === 0, declarations.errors.join("; "));
+      board.goals.push(...declarations.additions);
       for (const update of decision.updateSteps ?? []) {
         const step = board.steps.find(item => item.id === update.id);
         assert(step, `Unknown Step reference: ${update.id}. Copy an exact committed Step ID.`);

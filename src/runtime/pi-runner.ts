@@ -319,7 +319,7 @@ export class PiRunner implements AgentRunner {
         emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape or reference; requesting one tool-free repair using existing results." });
         agent.state.tools = [];
         agent.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
-        await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, IDs, findings, or completion. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
+        await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, committed IDs, findings, or completion. New Goal IDs must be unused. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
         request.signal.throwIfAborted();
         if (budget.error) throw new Error(budget.error);
         if (finalMessage?.stopReason !== "stop") throw new Error(finalMessage?.errorMessage ?? "Protocol repair did not finish.");

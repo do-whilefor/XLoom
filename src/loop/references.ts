@@ -1,23 +1,18 @@
 import type { BoardSnapshot, Decision } from "../types.js";
+import { inspectGoalDeclarations } from "./goals.js";
 
 /** Check all explicit references against the complete board before the one repair
  * request. Report every bad reference together; never guess replacement IDs. */
 export function validateDecisionReferences(board: BoardSnapshot, decision: Decision): void {
   const facts = new Set(board.facts.map(fact => fact.id));
-  const goals = new Set(board.goals.map(goal => goal.id));
+  const { goals, errors } = inspectGoalDeclarations(board.goals, decision.goals);
   const steps = new Map(board.steps.map(step => [step.id, step]));
   const findings = new Map(board.findings.map(finding => [finding.id, finding]));
   const evidence = new Set(board.evidence.map(item => item.id));
-  const errors: string[] = [];
   const check = (known: { has(ref: string): boolean }, kind: string, ref: string, field: string) => {
     if (!known.has(ref)) errors.push(`Unknown ${kind} reference: ${field}=${JSON.stringify(ref)}`);
   };
   const checkFacts = (refs: string[], field: string) => refs.forEach((ref, index) => check(facts, "fact", ref, `${field}[${index}]`));
-  // Store creates goals in proposal order, so a parent can be an earlier new goal.
-  decision.goals?.forEach((goal, index) => {
-    check(goals, "Goal", goal.parentId, `goals[${index}].parentId`);
-    goals.add(goal.id);
-  });
   decision.steps?.forEach((step, index) => {
     check(goals, "Goal", step.goalId, `steps[${index}].goalId`);
     checkFacts(step.from, `steps[${index}].from`);
