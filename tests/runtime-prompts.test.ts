@@ -106,6 +106,7 @@ describe("compact built-in prompts", () => {
       expect(protocol).toContain("updateSteps changes ready Steps only");
       expect(protocol).toContain("done/no_progress/blocked/failed/abandoned are history");
       expect(protocol).toContain("inspect results and propose a new Step");
+      expect(protocol).toContain("Fact IDs, merged into from");
     }
   });
 });

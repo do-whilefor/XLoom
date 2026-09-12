@@ -107,6 +107,46 @@ function assertExactUsage(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it.each(["decide", "metacog"] as const)("retains a %s combination dependency omitted from from after a Fact spelling repair", async mode => {
+    let expectedFacts: string[] = [];
+    let planningRequests = 0;
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") {
+        const meta = context.systemPrompt?.includes("Fresh metacognitive review");
+        if (input.blackboard.completedSteps === 1 && meta === (mode === "metacog")) {
+          expectedFacts = input.blackboard.facts.map(fact => fact.id);
+          expect(expectedFacts).toHaveLength(2);
+          planningRequests++;
+          if (run.contexts.length === 2) expect(context.tools).toEqual([]);
+          return json({ summary: "Check two recorded fixture conditions together", steps: [{ goalId: "G0",
+            from: [run.contexts.length === 1 ? "F-misspelled" : expectedFacts[0]!],
+            description: "Compare the joint fixture conditions", successSignal: "Joint label comparison observed", evidencePlan: "Use archived fixture", priority: 1,
+            combination: { requires: expectedFacts, missing: ["same identity compatibility"], scope: "local fixture", stateVersion: "v1", expectedCapability: "joint fixture comparison" },
+          }] });
+        }
+        return planning(input);
+      }
+      if (input.blackboard.completedSteps) {
+        expect(input.assignedStep!.from).toEqual(expectedFacts);
+        expect(input.assignedStep!.combination!.requires).toEqual(expectedFacts);
+        return json({ summary: "Joint fixture condition remains unverified", result: "no_progress" });
+      }
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      const submission = JSON.parse(checkpoint(input, "two-facts", true));
+      submission.execution.facts.push({ ref: "fixture-control", description: "Synthetic control label is allowed for alice in state v1", evidenceRefs: ["fixture-e"] });
+      return write("two-fact-checkpoint", input.checkpointFile!, JSON.stringify(submission));
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 2 });
+    expect(board.steps[1]!.from).toEqual(expectedFacts);
+    expect(planningRequests).toBe(2); // Only the ID spelling needed a model correction.
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start")).toHaveLength(2);
+    assertExactUsage(test);
+  });
+
   it("inherits a checkpoint finding's Fact evidence and repairs a later metacog reference before SQLite commit", async () => {
     let factId = "";
     let evidenceId = "";
