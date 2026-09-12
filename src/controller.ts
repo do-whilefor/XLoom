@@ -124,6 +124,20 @@ export class LoopController {
         if (mode === "execute") committed = this.store.applyExecution(runId, result.output, result.usage);
         else {
           const decision = decisionSchema.parse(result.output);
+          if (decision.updateSteps) {
+            // Finished attempts are history, not pending work to clean up. Keep
+            // valid planning operations without rewriting or replaying them.
+            const statuses = new Map(snapshot.steps.map(step => [step.id, step.status]));
+            decision.updateSteps = decision.updateSteps.filter(update => {
+              const status = statuses.get(update.id);
+              if (status && ["done", "no_progress", "blocked", "failed", "abandoned"].includes(status)) {
+                this.notice(`Ignored Step ${update.id} ${update.action}: status is ${status}; history retained.`);
+                return false;
+              }
+              if (status === "ready" && update.action === "abandon") statuses.set(update.id, "abandoned");
+              return true; // Unknown IDs and claimed Steps still fail Store validation.
+            });
+          }
           if (decision.conclusion?.outcome === "NEED_INPUT") {
             // A planner can mistake the absent output of an unexecuted Step for
             // missing external input. Keep its plan, but do not let an unsupported

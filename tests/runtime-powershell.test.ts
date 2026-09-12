@@ -118,6 +118,7 @@ $items | ConvertTo-Json -Compress`;
     expect(tool.description).toContain(powerShellPrompt);
     expect(tool.description).toContain("Backslash does not escape PowerShell quotes");
     expect(tool.description).toContain("do not assume python3 exists on Windows");
+    expect(tool.description).toContain("pipe loops via & { ... }");
     for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) expect(prompt).not.toContain(powerShellPrompt);
   });
 
@@ -131,6 +132,17 @@ $items | ConvertTo-Json -Compress`;
 });
 
 describe.runIf(process.platform === "win32")("PowerShell syntax regressions on Windows", () => {
+  it("captures loop output through a script block without running a redirection as a command", async () => {
+    const directory = await workspace();
+    const tool = createCheckedPowerShellTool(directory);
+    const command = `& { foreach ($item in 1, 2) { Write-Output ('fixture-' + $item) } } 2>&1 | Out-File -LiteralPath 'captured.txt' -Encoding utf8
+Get-Content -LiteralPath 'captured.txt'`;
+    const result = await tool.execute("capture-loop", { command, timeout: 10 });
+    const output = result.content.filter(part => part.type === "text").map(part => part.text).join("");
+    expect(output.trim().split(/\r?\n/)).toEqual(["fixture-1", "fixture-2"]);
+    expect((await readFile(join(directory, "captured.txt"), "utf8")).trim().split(/\r?\n/)).toEqual(["fixture-1", "fixture-2"]);
+  });
+
   it("rejects the reported triple-double-quote list before any file side effect", async () => {
     const directory = await workspace();
     const tool = createCheckedPowerShellTool(directory);

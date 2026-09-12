@@ -1,6 +1,7 @@
 import { stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentHandoff, BoardSnapshot, LoopEvent, Mode, RuntimeEvent, Usage } from "../types.js";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
+import { retainToolOutput } from "./tool-output.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -271,7 +272,7 @@ export class EventFeed {
       const entry: FeedEntry = existing ?? { kind: "tool", key, label: names[event.toolName ?? ""] ?? compact(event.toolName ?? "Tool", 40),
         text: event.type === "tool_start" ? toolTarget(event) : "", details: event.type === "tool_start" ? plainText(event.text).slice(0, 9000) : undefined,
         startedAt: event.type === "tool_start" ? this.now() : undefined };
-      if (event.type !== "tool_start") entry.output = plainText(event.text).slice(0, 9000);
+      if (event.type !== "tool_start") entry.output = retainToolOutput(plainText(event.text), event.isError === true);
       entry.state = state;
       if (event.type === "tool_end") entry.endedAt = this.now();
       entry.error = event.isError;

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalPowerShellOperations, createPowerShellTool, type PowerShellOperations } from "@earendil-works/pi-coding-agent";
 
-export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Backslash does not escape PowerShell quotes. Use single-quoted literals: '"' for a double quote, 'it''s' for an apostrophe. Put complex data/scripts in files. Fix syntax errors before retrying; inspect runtime side effects before replaying. Discover executables; do not assume python3 exists on Windows.`;
+export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Backslash does not escape PowerShell quotes. Use single-quoted literals: '"' for a double quote, 'it''s' for an apostrophe. Put complex scripts in files; pipe loops via & { ... }. Fix syntax errors before retrying; inspect runtime side effects before replaying. Discover executables; do not assume python3 exists on Windows.`;
 
 const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;

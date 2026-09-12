@@ -103,6 +103,9 @@ describe("compact built-in prompts", () => {
       expect(systemPrompt).toContain("Read listed evidence paths, not guessed plan outputs");
       expect(protocol).toContain("omit conclusion while work remains");
       expect(protocol).toContain("pending work or its unwritten files are not missing input");
+      expect(protocol).toContain("updateSteps changes ready Steps only");
+      expect(protocol).toContain("done/no_progress/blocked/failed/abandoned are history");
+      expect(protocol).toContain("inspect results and propose a new Step");
     }
   });
 });

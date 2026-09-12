@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { hyperlink, Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { compact, EventFeed, fitLines, plainText, type FeedEntry } from "./model.js";
+import { summarizeToolFailure } from "./tool-output.js";
 import { groupActivities, summarizeActivity, type ActivityGroup } from "./activity.js";
 
 const coral = chalk.hex("#D98B73");
@@ -130,14 +131,14 @@ export class FeedView implements Component {
       const color = state === "error" ? chalk.red : state === "done" ? chalk.green : coral;
       if (state === "error" && !expanded) {
         const summary = entry.label === "PowerShell" && /ParserError/i.test(entry.output ?? "") ? "PowerShell 语法错误（展开查看详情）"
-          : `${label}: ${compact(entry.output || "工具执行失败；展开查看输入与详情。", 240)}`;
+          : `${label}: ${summarizeToolFailure(plainText(entry.output || "工具执行失败；展开查看输入与详情。"))}`;
         line(margin + chalk.red(`✕ ${summary}`));
         return;
       }
       const icon = state === "error" ? "✕" : state === "done" ? "✓" : "●";
       const elapsed = Number.isFinite(entry.startedAt) && entry.durationKnown !== false ? ` · ${this.duration(entry)}` : "";
       line(margin + color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""));
-      if (expanded) detail([entry.details ?? entry.text, entry.output]);
+      if (expanded) detail([...(state === "error" ? [summarizeToolFailure(plainText(entry.output || "工具执行失败。"))] : []), entry.details ?? entry.text, entry.output]);
     };
     const group = (activity: ActivityGroup): void => {
       const summary = summarizeActivity(activity, this.now());

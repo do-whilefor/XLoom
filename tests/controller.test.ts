@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,7 @@ import { projectContext } from "../src/loop/context.js";
 import { defaultLoopPolicy } from "../src/loop/policy.js";
 import { projectConfigSchema } from "../src/schema.js";
 import { BlackboardStore } from "../src/store.js";
-import type { Decision, Execution, LoopEvent, ProjectConfig, RunRequest, RunResult, Usage } from "../src/types.js";
+import type { Decision, Execution, LoopEvent, ProjectConfig, RunRequest, RunResult, Step, Usage } from "../src/types.js";
 
 const roots: string[] = [];
 const stores: BlackboardStore[] = [];
@@ -49,6 +49,33 @@ function fixtureExecution(request: RunRequest): Execution {
     facts: [{ ref: "fixture-f", description: "Synthetic fixture contains expected allow/deny labels", evidenceRefs: ["fixture-e"] }],
     findings: [{ key: "synthetic-ownership", title: "Synthetic hypothesis", target: "local fixture", status: "lead", factRefs: ["fixture-f"], evidenceRefs: ["fixture-e"], next: "Close protocol-test hypothesis after synthetic review" }],
   };
+}
+
+function seedHistoryStep(store: BlackboardStore, status: "done" | "no_progress" | "blocked" | "failed" | "abandoned"): Step {
+  store.setStatus("running", "Seed historical synthetic attempt");
+  store.beginRun("seed-plan", "decide");
+  const step = store.applyDecision("seed-plan", plan("Historical synthetic attempt"), standardUsage).steps[0]!;
+  if (status === "abandoned") {
+    store.beginRun("seed-abandon", "decide");
+    store.applyDecision("seed-abandon", { summary: "Retire unused fixture plan", updateSteps: [
+      { id: step.id, action: "abandon", reason: "Fixture plan was superseded before execution" },
+    ] }, standardUsage);
+  } else {
+    store.beginRun("seed-execute", "execute", step.id);
+    if (status === "failed") store.failRun("seed-execute", "Synthetic interrupted attempt", standardUsage);
+    else {
+      const output: Execution = { summary: `Historical fixture result: ${status}`, result: status };
+      if (status === "done") {
+        const artifactDir = path.join(store.dataDir, "runs", "seed-execute", "artifacts");
+        mkdirSync(artifactDir, { recursive: true });
+        writeFileSync(path.join(artifactDir, "history.txt"), "Original synthetic observation; must remain unchanged");
+        output.evidence = [{ ref: "history-e", path: "history.txt", description: "Original historical fixture" }];
+        output.facts = [{ ref: "history-f", description: "Historical fixture observation", evidenceRefs: ["history-e"] }];
+      }
+      store.applyExecution("seed-execute", output, standardUsage);
+    }
+  }
+  return store.snapshot().steps[0]!;
 }
 
 function closure(request: RunRequest): Decision {
@@ -185,6 +212,126 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.controller.snapshot().reason).toContain("no executable step");
     expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
     expect(test.events.some(event => event.type === "result" && event.result?.outcome === "NEED_INPUT")).toBe(false);
+  });
+
+  it.each((["done", "no_progress", "blocked", "failed", "abandoned"] as const).flatMap(status =>
+    (["abandon", "prioritize"] as const).map(action => ({ status, action }))))(
+    "ignores $action of a $status Step while executing the valid new plan once", async ({ status, action }) => {
+      const test = setup(request => {
+        if (request.mode === "execute") return result(fixtureExecution(request));
+        if (request.snapshot.steps.length > 1) return result(closure(request));
+        return result({ ...plan("Follow up under changed fixture conditions"), updateSteps: [
+          { id: request.snapshot.steps[0]!.id, action, priority: 75, reason: "Erroneous historical cleanup" },
+        ] });
+      });
+      const history = seedHistoryStep(test.store, status);
+      const before = test.store.snapshot();
+      await test.controller.start();
+      const board = test.controller.snapshot();
+      expect(board).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED" });
+      expect(board.steps[0]).toEqual(history);
+      expect(board.steps[1]).toMatchObject({ status: "done", attempts: 1 });
+      expect(board.evidence.slice(0, before.evidence.length)).toEqual(before.evidence);
+      expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+      expect(test.requests[0]!.snapshot.steps[0]).toEqual(history);
+      expect(board.usage.input - before.usage.input).toBe(4 * standardUsage.input);
+      expect(board.usage.output - before.usage.output).toBe(4 * standardUsage.output);
+      expect(board.usage.cost - before.usage.cost).toBeCloseTo(4 * standardUsage.cost);
+      expect(test.events).toContainEqual(expect.objectContaining({ type: "notice",
+        message: `Ignored Step ${history.id} ${action}: status is ${status}; history retained.` }));
+    });
+
+  it("keeps checkpoint evidence after a yield and commits ready updates and new work despite abandoning the blocked history", async () => {
+    let yieldedHistory: Step | undefined;
+    let checkpointEvidence: unknown;
+    const test = setup(async request => {
+      if (request.mode === "execute") {
+        if (!request.snapshot.completedSteps) {
+          const checkpoint = await request.onCheckpoint!("fixture-batch", fixtureExecution(request), standardUsage);
+          checkpointEvidence = checkpoint.evidence[0];
+          return { ...result({ summary: "Partial fixture checkpoint handed to Decide", result: "blocked" }), yielded: true };
+        }
+        return result(fixtureExecution(request));
+      }
+      if (!request.snapshot.completedSteps) return result({ ...plan(), steps: [
+        { ...plan("Initial fixture extraction").steps![0]!, priority: 100 },
+        { ...plan("Remaining independent fixture check").steps![0]!, priority: 50 },
+      ] });
+      if (request.snapshot.completedSteps === 1) {
+        expect(request.mode).toBe("decide");
+        yieldedHistory = request.snapshot.steps[0]!;
+        expect(yieldedHistory.status).toBe("blocked");
+        return result({ ...plan("Follow up from the committed partial fixture"), steps: [
+          { ...plan("Follow up from the committed partial fixture").steps![0]!, from: [request.snapshot.facts[0]!.id], priority: 90 },
+        ], updateSteps: [
+          { id: yieldedHistory.id, action: "abandon", reason: "The old partial attempt needs replacement work" },
+          { id: request.snapshot.steps[1]!.id, action: "prioritize", priority: 80, reason: "Keep the independent check" },
+        ] });
+      }
+      return result(request.snapshot.completedSteps === 2 ? { summary: "Continue the remaining ready fixture check" } : closure(request));
+    }, { metacogEvery: 9 });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "completed", completedSteps: 3, outcome: "NOT_REPRODUCED" });
+    expect(board.steps[0]).toEqual(yieldedHistory);
+    expect(board.evidence[0]).toEqual(checkpointEvidence);
+    expect(board.steps[1]).toMatchObject({ status: "no_progress", priority: 80, attempts: 1 });
+    expect(test.requests.filter(request => request.mode === "execute").map(request => request.step!.description)).toEqual([
+      "Initial fixture extraction", "Follow up from the committed partial fixture", "Remaining independent fixture check",
+    ]);
+    expect(test.requests.map(request => request.mode)).toEqual(["decide", "execute", "decide", "execute", "decide", "execute", "decide", "metacog"]);
+    expect(board.usage).toEqual({ input: 80, output: 40, cost: 0.008 });
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    const replanning = test.store.events().filter(event => event.kind === "decision").map(event => JSON.parse(event.payload))
+      .find(event => event.decision.summary === plan().summary && event.decision.updateSteps?.length);
+    expect(replanning.decision.updateSteps).toEqual([
+      { id: board.steps[1]!.id, action: "prioritize", priority: 80, reason: "Keep the independent check" },
+    ]);
+  });
+
+  it("processes ready updates in order and ignores duplicate updates after a same-batch abandon", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (request.snapshot.completedSteps) return result(closure(request));
+      const [discard, keep] = request.snapshot.steps;
+      return result({ summary: "Retire one pending fixture and keep the other", updateSteps: [
+        { id: discard!.id, action: "prioritize", priority: 85, reason: "Initial ordering" },
+        { id: discard!.id, action: "abandon", reason: "Retire pending fixture" },
+        { id: discard!.id, action: "abandon", reason: "Duplicate cleanup must not replace the reason" },
+        { id: discard!.id, action: "prioritize", priority: 99, reason: "Stale ordering must not revive the plan" },
+        { id: keep!.id, action: "prioritize", priority: 75, reason: "Keep useful pending work" },
+      ] });
+    });
+    test.store.setStatus("running", "Seed pending fixtures");
+    test.store.beginRun("seed-plan", "decide");
+    test.store.applyDecision("seed-plan", { ...plan(), steps: [
+      ...plan("Discard pending fixture").steps!, ...plan("Keep pending fixture").steps!,
+    ] }, standardUsage);
+    await test.controller.start();
+    expect(test.controller.snapshot()).toMatchObject({ status: "completed", completedSteps: 1 });
+    expect(test.controller.snapshot().steps[0]).toMatchObject({ status: "abandoned", priority: 85, attempts: 0, result: "Retire pending fixture" });
+    expect(test.controller.snapshot().steps[1]).toMatchObject({ status: "done", priority: 75, attempts: 1 });
+    expect(test.requests[0]!.snapshot.steps.every(step => step.status === "ready" && step.priority === 50)).toBe(true);
+    expect(test.events.filter(event => event.type === "notice" && event.message?.includes("history retained"))).toHaveLength(2);
+    expect(test.requests.filter(request => request.mode === "execute").map(request => request.step!.description)).toEqual(["Keep pending fixture"]);
+  });
+
+  it("still rejects unknown Step updates and rolls back otherwise valid parts of the decision", async () => {
+    const test = setup(request => result({ ...plan("Must not be committed"), goals: [
+      { id: "G-new", parentId: "G0", description: "Must also roll back" },
+    ], updateSteps: [
+      { id: request.snapshot.steps[0]!.id, action: "abandon", reason: "Ignore this historical cleanup" },
+      { id: "S-unknown", action: "abandon", reason: "Unknown references are still invalid" },
+    ] }));
+    const history = seedHistoryStep(test.store, "done");
+    const before = test.store.snapshot();
+    await test.controller.start();
+    expect(test.controller.snapshot()).toMatchObject({ status: "error", outcome: null, steps: [history], goals: before.goals });
+    expect(test.controller.snapshot().reason).toMatch(/Only ready steps may be changed/);
+    expect(test.store.events().filter(event => event.kind === "decision")).toHaveLength(1);
+    expect(test.requests).toHaveLength(1);
+    expect(test.store.runs().at(-1)?.status).toBe("failed");
+    expect(test.events.some(event => event.type === "result")).toBe(false);
   });
 
   it.each(["decide", "execute", "metacog"] as const)("does not emit a result for an invalid %s proposal", async invalidMode => {

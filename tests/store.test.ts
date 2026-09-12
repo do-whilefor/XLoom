@@ -126,6 +126,27 @@ describe("transactional blackboard", () => {
     expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
   });
 
+  it.each(["abandon", "prioritize"] as const)("keeps Store strict and rolls back direct %s of a settled blocked Step", action => {
+    const store = openStore();
+    const execution = claimStep(store);
+    writeFileSync(path.join(execution.artifacts, "response.txt"), "SYNTHETIC LOCAL FIXTURE ONLY");
+    store.applyExecution(execution.runId, { ...hitOutput(), result: "blocked" }, usage);
+    const runId = nextRun();
+    store.beginRun(runId, "decide");
+    const before = store.snapshot();
+    const events = store.events();
+    expect(() => store.applyDecision(runId, {
+      summary: "Attempt to change settled history",
+      goals: [{ id: "G1", parentId: "G0", description: "Must roll back with the invalid update" }],
+      updateSteps: [{ id: execution.step.id, action, priority: 300, reason: "Historical cleanup is not a ready Step update" }],
+    }, usage)).toThrow("Only ready steps may be changed");
+    expect(store.snapshot()).toEqual(before);
+    expect(store.events()).toEqual(events);
+    expect(store.runs().find(run => run.id === runId)?.status).toBe("running");
+    expect(store.snapshot().steps[0]).toMatchObject({ status: "blocked", attempts: 1, runId: execution.runId });
+    expect(store.snapshot().evidence).toHaveLength(1);
+  });
+
   it("rejects unsupported facts and keeps them out of authoritative state", () => {
     const store = openStore();
     const { runId } = claimStep(store);
