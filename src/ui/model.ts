@@ -1,4 +1,4 @@
-import { stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentHandoff, BoardSnapshot, LoopEvent, Mode, RuntimeEvent, Usage } from "../types.js";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 
@@ -39,7 +39,7 @@ export const HELP = [
   "Enter 提交 · Alt+Enter / Shift+Enter 换行 · ↑/↓ 上一条 / 下一条输入（保留草稿）",
   "输入 / 显示命令候选；↑/↓ 选择，Tab / Enter 补全，再按 Enter 执行；Esc 关闭候选",
   "/details 或 Ctrl+O 展开 / 收起工具详情和协议输出；默认只显示工具摘要与已提交结果",
-  "点击 Thought / Thinking 标题展开真实思考内容；Ctrl+T 切换最近一段（模型需返回思考流）",
+  "点击活动摘要展开思考和工具详情；Ctrl+T 切换最近一组（思考内容需模型返回）",
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
   "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
@@ -66,13 +66,17 @@ export function fitLines(value: string, width: number): string[] {
   return wrapTextWithAnsi(clean, width).map((line) => truncateToWidth(line, width, ""));
 }
 
-export function statusLine(board: BoardSnapshot, session?: SessionInfo, pricingUnknown = false): string {
-  if (session?.mode === "chat") return `chat · ${session.status ?? (session.busy ? "running" : "idle")} · ${compact(session.model, 120)}` +
-    (session.usage ? ` · ${(session.usage.input + session.usage.output).toLocaleString("en-US")} tokens · ${pricingUnknown ? "费用未知" : `$${session.usage.cost.toFixed(3)}`}` : pricingUnknown ? " · 费用未知" : "");
-  const tokens = board.usage.input + board.usage.output;
-  return `${session ? "run · " : ""}${board.status} · r${board.revision} · step ${board.completedSteps}` +
-    ` · ${tokens.toLocaleString("en-US")} tokens · ${pricingUnknown ? "费用未知" : `$${board.usage.cost.toFixed(3)}`}` +
-    (board.outcome ? ` · ${board.outcome}` : "");
+export function statusLine(board: BoardSnapshot, session?: SessionInfo, pendingTokens = 0, width = Infinity): string {
+  const chat = session?.mode === "chat";
+  const usage = chat ? session.usage : board.usage;
+  const tokens = `${((usage?.input ?? 0) + (usage?.output ?? 0) + pendingTokens).toLocaleString("en-US")} tokens`;
+  const status = chat ? session.status ?? (session.busy ? "running" : "idle") : board.status;
+  const full = chat ? `chat · ${status} · ${compact(session.model, 120)} · ${tokens}`
+    : `${session ? "run · " : ""}${status} · r${board.revision} · step ${board.completedSteps} · ${tokens}${board.outcome ? ` · ${board.outcome}` : ""}`;
+  // Model names and revision metadata must not push token accounting off-screen.
+  if (visibleWidth(full) <= width) return full;
+  const short = `${session ? `${session.mode} · ` : ""}${status} · ${tokens}`;
+  return visibleWidth(short) <= width ? short : tokens;
 }
 
 export function formatBoard(board: BoardSnapshot): string {
@@ -101,12 +105,18 @@ export interface FeedEntry {
   details?: string; output?: string; state?: "running" | "done" | "error";
   startedAt?: number; endedAt?: number; expanded?: boolean; durationKnown?: boolean;
   workStatus?: "running" | "done" | "error" | "paused" | "stopped";
+  tokens?: number;
+  messageId?: string;
 }
 
 export function formatRunError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/^Request timed out\.?$/i.test(message)) return "模型服务请求超时。请检查模型服务或网络后重试；已执行的工具操作不会自动回滚。";
   if (message.startsWith("Chat response timed out;")) return "本次回复达到本地时间限制。请先检查已执行的工具操作，再决定是否重试。";
+  const budgetDetail = /^.*?budget reached before[^;(]*\(([^)]*)\)/.exec(message)?.[1];
+  const diagnostic = budgetDetail ? `（${budgetDetail}）` : "";
+  if (message.startsWith("Agent budget reached before")) return `本次 Agent 调用达到配置的回合或资源上限${diagnostic}，尚未提交最终结果。\n这不等于 Goal 已完成；已执行的操作保留，请先检查黑板和产物再继续。`;
+  if (message.startsWith("Chat response budget reached before")) return `本次聊天调用达到配置的回合或资源上限${diagnostic}，尚未收到最终回复。\n已执行的工具操作保留，请检查产物后再决定是否继续。`;
   return message;
 }
 
@@ -132,14 +142,18 @@ export class EventFeed {
   readonly entries: FeedEntry[] = [];
   private pricingNoticeShown = false;
   private work?: FeedEntry;
+  private stream?: FeedEntry;
+  private pendingTokens = 0;
   constructor(private readonly maxEntries = 160, private readonly maxText = 3200, private readonly now = Date.now) {}
   get pricingUnknown(): boolean { return this.pricingNoticeShown; }
   get working(): boolean { return this.work !== undefined; }
+  get uncommittedTokens(): number { return this.pendingTokens; }
+  usageCommitted(): void { this.pendingTokens = 0; }
 
   beginWork(): void {
     if (this.work) return;
     this.breakStream();
-    this.work = { kind: "work", label: "xloom", text: "", startedAt: this.now(), workStatus: "running" };
+    this.work = { kind: "work", label: "xloom", text: "", startedAt: this.now(), workStatus: "running", tokens: 0 };
     this.entries.push(this.work);
     this.trim();
   }
@@ -160,7 +174,6 @@ export class EventFeed {
     this.trim();
   }
 
-  private tail(): FeedEntry | undefined { return this.entries.at(this.work ? -2 : -1); }
   private endThinking(): void {
     for (const entry of this.entries) if (entry.kind === "thinking" && entry.endedAt === undefined) entry.endedAt = this.now();
   }
@@ -197,12 +210,39 @@ export class EventFeed {
 
   runtime(event: RuntimeEvent): void {
     const label = roleLabel(event.mode);
-    if (event.type === "thinking_start" || event.type === "thinking" || event.type === "thinking_end") {
+    if (event.type === "usage") {
+      const input = event.usage?.input;
+      const output = event.usage?.output;
+      if (typeof input === "number" && typeof output === "number" && Number.isFinite(input) && Number.isFinite(output) && input >= 0 && output >= 0) {
+        const tokens = input + output;
+        if (Number.isFinite(tokens)) {
+          this.pendingTokens += tokens;
+          if (this.work) this.work.tokens = (this.work.tokens ?? 0) + tokens;
+        }
+      }
+    } else if (event.type === "narration") {
+      this.endThinking();
+      // Relocate only this model message's public pre-tool prose ahead of its
+      // thought/tool summary. This UI ordering never changes Agent history.
+      const matchesMessage = (entry: FeedEntry): boolean => Boolean(event.messageId && entry.messageId === event.messageId && entry.label === label);
+      const first = event.messageId ? this.entries.find(matchesMessage) : undefined;
+      let index = first ? this.entries.indexOf(first) : -1;
+      const streams = event.messageId ? this.entries.filter(entry => matchesMessage(entry) && (entry.kind === "message" || entry.kind === "protocol"))
+        : this.stream && this.entries.includes(this.stream) ? [this.stream] : [];
+      for (const entry of streams) this.entries.splice(this.entries.indexOf(entry), 1);
+      this.breakStream();
+      const message: FeedEntry = { kind: "message", label, text: plainText(event.text).slice(0, 9000), messageId: event.messageId };
+      if (index < 0) {
+        index = this.work ? this.entries.indexOf(this.work) : this.entries.length;
+        while (index > 0 && ["thinking", "protocol"].includes(this.entries[index - 1]!.kind ?? "")) index--;
+      }
+      this.entries.splice(index, 0, message);
+    } else if (event.type === "thinking_start" || event.type === "thinking" || event.type === "thinking_end") {
       this.breakStream();
       const key = `thinking:${event.mode}:${event.blockId ?? "current"}`;
       let entry = this.entries.findLast(item => item.kind === "thinking" && item.key === key && item.endedAt === undefined);
       if (!entry && event.type === "thinking_end") return;
-      if (!entry) { entry = { kind: "thinking", label, text: "", key, startedAt: this.now(), durationKnown: !event.replayed }; this.append(entry); }
+      if (!entry) { entry = { kind: "thinking", label, text: "", key, startedAt: this.now(), durationKnown: !event.replayed, messageId: event.messageId }; this.append(entry); }
       if (event.type === "thinking") {
         const text = entry.text + plainText(event.text);
         entry.text = text.length > this.maxText ? `…${text.slice(-this.maxText)}` : text;
@@ -210,12 +250,13 @@ export class EventFeed {
       if (event.type === "thinking_end") entry.endedAt = this.now();
     } else if (event.type === "text") {
       this.endThinking();
-      const last = this.tail();
-      if (last?.label === label && last.key === "stream") {
+      const last = this.stream && this.entries.includes(this.stream) ? this.stream : undefined;
+      if (last?.label === label && last.key === "stream" && last.messageId === event.messageId) {
         const joined = last.text + plainText(event.text);
         last.text = joined.length > this.maxText ? `…${joined.slice(-this.maxText)}` : joined;
       } else {
-        this.append({ kind: event.mode === "chat" ? "message" : "protocol", label, text: plainText(event.text).slice(-this.maxText), key: "stream" });
+        this.stream = { kind: event.mode === "chat" ? "message" : "protocol", label, text: plainText(event.text).slice(-this.maxText), key: "stream", messageId: event.messageId };
+        this.append(this.stream);
       }
     } else if (event.type === "notice") {
       this.notice(compact(event.text, 700), event.isError);
@@ -228,9 +269,11 @@ export class EventFeed {
       const state = event.type === "tool_start" ? "running" : event.type === "tool_end" ? (event.isError ? "error" : "done") : "running";
       const names: Record<string, string> = { read: "Read", write: "Write", edit: "Edit", powershell: "PowerShell" };
       const entry: FeedEntry = existing ?? { kind: "tool", key, label: names[event.toolName ?? ""] ?? compact(event.toolName ?? "Tool", 40),
-        text: event.type === "tool_start" ? toolTarget(event) : "", details: event.type === "tool_start" ? plainText(event.text).slice(0, 9000) : undefined };
+        text: event.type === "tool_start" ? toolTarget(event) : "", details: event.type === "tool_start" ? plainText(event.text).slice(0, 9000) : undefined,
+        startedAt: event.type === "tool_start" ? this.now() : undefined };
       if (event.type !== "tool_start") entry.output = plainText(event.text).slice(0, 9000);
       entry.state = state;
+      if (event.type === "tool_end") entry.endedAt = this.now();
       entry.error = event.isError;
       if (!existing) this.append(entry);
     }
@@ -238,8 +281,9 @@ export class EventFeed {
   }
 
   breakStream(): void {
-    const last = this.tail();
+    const last = this.stream;
     if (last?.key === "stream") delete last.key;
+    this.stream = undefined;
   }
 
   private trim(): void {

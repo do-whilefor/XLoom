@@ -76,13 +76,37 @@ function launch(options: { now?: () => number; restoredReason?: string } = {}) {
 }
 
 describe("ordinary chat and dual-agent task UI", () => {
+  it("renders live tokens in a narrow footer and replaces pending tokens with committed usage once", async () => {
+    const app = launch();
+    app.terminal.columns = 40;
+    const usage = { input: 100, output: 20, cost: 3 };
+    app.controller.getSessionInfo.mockImplementation(() => ({ ...app.info, usage }));
+    const emit = (event: LoopEvent): void => { for (const listener of app.listeners) listener(event); };
+    const screen = (): string => { app.terminal.output = ""; app.tui.renderNow(true); return plainText(app.terminal.output); };
+    let finish!: () => void;
+    app.controller.chat.mockImplementation(async () => { app.info.busy = true; await new Promise<void>(resolve => { finish = resolve; }); });
+    app.submit("inspect local tests");
+    emit({ type: "runtime", runtime: { type: "usage", mode: "chat", text: "", usage: { input: 40, output: 10, cost: 1 } } });
+    expect(screen()).toContain("chat · running · 170 tokens");
+    expect(screen()).not.toMatch(/费用|\$/);
+    usage.input += 40;
+    usage.output += 10;
+    app.info.busy = false;
+    emit({ type: "session" });
+    finish();
+    await app.settled();
+    expect(screen()).toContain("chat · idle · 170 tokens");
+    expect(screen()).not.toContain("220 tokens");
+  });
+
   it("shows chat status without resurrecting the stored task and labels chat runtime distinctly", () => {
     const app = launch();
     app.tui.renderNow(true);
     expect(plainText(app.terminal.output)).toContain("chat · idle");
     expect(plainText(app.terminal.output)).not.toContain("stored task");
     expect(statusLine(app.board, app.info)).toContain("deepseek-v4-flash");
-    expect(statusLine(app.board, { ...app.info, usage: { input: 7, output: 5, cost: 0.1 } })).toContain("12 tokens · $0.100");
+    expect(statusLine(app.board, { ...app.info, usage: { input: 7, output: 5, cost: 0.1 } })).toContain("12 tokens");
+    expect(statusLine(app.board, { ...app.info, usage: { input: 7, output: 5, cost: 0.1 } })).not.toMatch(/\$|费用/);
     const feed = new EventFeed();
     feed.runtime({ type: "text", mode: "chat", text: "hello" });
     feed.runtime({ type: "tool_start", mode: "chat", toolName: "read", text: "read file" });

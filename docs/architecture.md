@@ -82,6 +82,10 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 累计时间、Token、费用预算默认 null，只在用户显式设置时作为资源暂停条件；旧 maxSteps 加载时丢弃。单次调用的回合/超时限制仍保留。资源耗尽、调用失败、取消和没有可执行计划是操作状态，不强行映射到研究结论。
 
+`runtime/run-budget.ts` 为聊天及研究调用共享计数策略。`maxTurnsPerRun` 包含一个无工具收尾回合；通过 Pi `prepareNextTurnWithContext` 替换下一轮的工具列表和提示，保留本次上下文与工具结果，不增加回合、不重放工具。最后仍要求正常 stop 和既有结果契约。配置为 1 时首轮就禁用工具；Chat 每次 send 重置工具和预算闭包。资源预算在整轮结束后检查，已达到阈值或发生取消时不追加请求。
+
+`runtime/powershell.ts` 包装 Pi PowerShell operations：临时源码文件交给同解释器 AST parser，仅执行语法检查，通过后原始 command 执行一次。预检与执行共享取消信号及总工具超时，finally 清理临时源码。语法预检不是运行时成功保证，也不修改源码含义。TUI 使用同一模型消息的 messageId 关联正文、真实思考和进展叙述，活动聚合仅影响呈现；usage 事件更新即时 token，权威用量提交后清除待计部分。
+
 旧库迁移只修复根 Goal 与任务完成状态的不一致：未完成却 inactive 的根 Goal 恢复 active；completed 但根 Goal 未 satisfied 的旧任务转 paused 等待复核。迁移有独立审计，不自动执行模型/步骤，不删除研究证据，也不改动已符合新条件的完成状态。
 
 ## Pi 模型复用

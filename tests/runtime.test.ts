@@ -153,7 +153,7 @@ describe("Pi runtime isolation", () => {
         prompt: async () => {
           const pending = source.map(event => Promise.resolve(listener(event, input.signal)));
           // This assertion runs before any appendFile promise can complete.
-          try { expect(observed.map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end", "tool_start", "tool_end", "thinking_start", "thinking", "thinking_end"]); }
+          try { expect(observed.map(event => event.type)).toEqual(["thinking_start", "thinking", "thinking_end", "usage", "tool_start", "tool_end", "thinking_start", "thinking", "thinking_end", "usage"]); }
           finally { await Promise.all(pending); }
         },
         abort() {}, waitForIdle: async () => {},
@@ -322,6 +322,143 @@ function thinkingStream(response: AssistantMessage, chunks?: string[], noDeltas 
   };
 }
 
+describe.each(["chat", "decide"] as const)("completed-message narration and reported usage in %s", kind => {
+  const answer = kind === "chat" ? "The local fixture is verified." : '{"summary":"The local fixture is verified."}';
+  const sumUsage = (events: RuntimeEvent[]) => events.filter(event => event.type === "usage").reduce((total, event) => ({
+    input: total.input + event.usage!.input, output: total.output + event.usage!.output, cost: total.cost + event.usage!.cost,
+  }), { input: 0, output: 0, cost: 0 });
+
+  it("identifies one message across interleaved text, thoughts and narration without reusing IDs across rounds", async () => {
+    let calls = 0;
+    const test = await thinkingHarness(kind, (selected, context, options) => {
+      const response = ++calls === 1 ? message([
+        { type: "text", text: "I will inspect a local fixture." },
+        { type: "thinking", thinking: "Provider-returned thought." },
+        { type: "text", text: "I will keep the observed result." },
+        { type: "toolCall", id: "id-write", name: "write", arguments: { path: "id-fixture.txt", content: "fixture" } },
+      ], "toolUse") : message([
+        { type: "thinking", thinking: "Next provider-returned thought." },
+        { type: "text", text: answer },
+      ]);
+      return thinkingStream(response)(selected, context, options);
+    });
+    await test.completed;
+    const boundary = test.events.findIndex(event => event.type === "tool_start");
+    const belongsToMessage = (event: RuntimeEvent) => ["text", "narration", "thinking_start", "thinking", "thinking_end"].includes(event.type);
+    const first = test.events.slice(0, boundary).filter(belongsToMessage);
+    const second = test.events.slice(boundary).filter(belongsToMessage);
+    expect(first.map(event => event.type)).toEqual(["text", "thinking_start", "thinking", "thinking_end", "text", "narration"]);
+    expect(new Set(first.map(event => event.messageId)).size).toBe(1);
+    expect(new Set(second.map(event => event.messageId)).size).toBe(1);
+    expect(first[0]!.messageId).toEqual(expect.any(String));
+    expect(second[0]!.messageId).toEqual(expect.any(String));
+    expect(first[0]!.messageId).not.toBe(second[0]!.messageId);
+  });
+
+  it("emits actual pre-tool prose once and reports one usage event per assistant message, not per tool", async () => {
+    let calls = 0;
+    const narration = "I will write a local fixture and then read it back.";
+    const test = await thinkingHarness(kind, stream(context => {
+      if (++calls === 1) return message([
+        { type: "text", text: narration },
+        { type: "toolCall", id: "narration-write", name: "write", arguments: { path: "narration-fixture.txt", content: "LOCAL FIXTURE ONLY" } },
+        { type: "toolCall", id: "narration-read", name: "read", arguments: { path: "narration-fixture.txt" } },
+      ], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      const response = message([{ type: "text", text: answer }]);
+      response.usage = { input: 20, output: 6, cacheRead: 3, cacheWrite: 4, totalTokens: 33,
+        cost: { input: 0.03, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.05 } };
+      return response;
+    }));
+    const completed = await test.completed;
+    expect(test.events.filter(event => event.type === "narration")).toEqual([{ type: "narration", mode: kind, messageId: expect.any(String), text: narration }]);
+    expect(test.events.filter(event => event.type === "usage")).toEqual([
+      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 27, output: 6, cost: 0.05 } },
+    ]);
+    expect(sumUsage(test.events)).toEqual("usage" in completed ? completed.usage : completed);
+    expect(test.events.filter(event => event.type === "tool_start")).toHaveLength(2);
+    expect(test.events.findIndex(event => event.type === "narration")).toBeLessThan(test.events.findIndex(event => event.type === "tool_start"));
+    expect(test.events.findIndex(event => event.type === "usage")).toBeLessThan(test.events.findIndex(event => event.type === "tool_start"));
+    expect(await readFile(join(test.input.workspace, "narration-fixture.txt"), "utf8")).toBe("LOCAL FIXTURE ONLY");
+  });
+
+  it.each([
+    ["raw object", '{"summary":"machine protocol"}'],
+    ["raw array", '[{"action":"read"}]'],
+    ["JSON fence", '```json\n{"summary":"machine protocol"}\n```'],
+    ["plain JSON fence", '```\n{"summary":"machine protocol"}\n```'],
+    ["array JSON fence", '```json\n["machine protocol"]\n```'],
+    ["raw JSON scalar", "42"],
+    ["scalar JSON fence", '```json\n42\n```'],
+  ])("does not turn %s into natural-language narration", async (_label, protocol) => {
+    let calls = 0;
+    const test = await thinkingHarness(kind, stream(() => ++calls === 1 ? message([
+      { type: "text", text: protocol! },
+      { type: "toolCall", id: "protocol-write", name: "write", arguments: { path: "protocol-fixture.txt", content: "fixture" } },
+    ], "toolUse") : message([{ type: "text", text: answer }])));
+    await test.completed;
+    expect(test.events.filter(event => event.type === "narration")).toEqual([]);
+    expect(test.events.filter(event => event.type === "usage")).toHaveLength(2);
+  });
+
+  it("never invents pre-tool narration for a pure tool call or final JSON", async () => {
+    let calls = 0;
+    const finalJson = '{"summary":"Only structured final output"}';
+    const test = await thinkingHarness(kind, stream(() => ++calls === 1 ? message([
+      { type: "toolCall", id: "silent-write", name: "write", arguments: { path: "silent-fixture.txt", content: "fixture" } },
+    ], "toolUse") : message([{ type: "text", text: finalJson }])));
+    const completed = await test.completed;
+    expect(test.events.filter(event => event.type === "narration")).toEqual([]);
+    expect(test.events.filter(event => event.type === "usage")).toHaveLength(2);
+    expect(sumUsage(test.events)).toEqual("usage" in completed ? completed.usage : completed);
+  });
+
+  it("redacts known model credentials in actual streamed narration", async () => {
+    let calls = 0;
+    const test = await thinkingHarness(kind, (selected, context, options) => {
+      const response = ++calls === 1 ? message([
+        { type: "text", text: "I will inspect the fixture using credential-secret." },
+        { type: "toolCall", id: "redacted-narration-write", name: "write", arguments: { path: "redacted-fixture.txt", content: "fixture" } },
+      ], "toolUse") : message([{ type: "text", text: answer }]);
+      return thinkingStream(response)(selected, context, options);
+    }, ["credential-secret"]);
+    await test.completed;
+    expect(test.events.filter(event => event.type === "narration")).toEqual([
+      { type: "narration", mode: kind, messageId: expect.any(String), text: "I will inspect the fixture using [MODEL_CREDENTIAL_REDACTED]." },
+    ]);
+    expect(JSON.stringify(test.events)).not.toContain("credential-secret");
+  });
+
+  it.each(["error", "aborted"] as const)("reports known usage for an assistant %s instead of inventing missing consumption", async stopReason => {
+    const abort = new AbortController();
+    let calls = 0;
+    const test = await thinkingHarness(kind, (_model, _context, options) => {
+      if (++calls === 1) return stream(() => message([
+        { type: "toolCall", id: "usage-write", name: "write", arguments: { path: "usage-fixture.txt", content: "fixture" } },
+      ], "toolUse"))(_model, _context, options);
+      const output = new AssistantMessageEventStream();
+      const failure = { ...message([], stopReason), errorMessage: "Synthetic provider interruption" };
+      failure.usage = { input: 7, output: 1, cacheRead: 2, cacheWrite: 3, totalTokens: 13,
+        cost: { input: 0.02, output: 0.01, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
+      const finish = () => { output.push({ type: "error", reason: stopReason, error: failure }); output.end(); };
+      if (stopReason === "aborted") {
+        options?.signal?.addEventListener("abort", finish, { once: true });
+        queueMicrotask(() => abort.abort());
+      } else queueMicrotask(finish);
+      return output;
+    }, [], abort);
+    const failure = await test.completed.catch(error => error);
+    expect(failure).toBeInstanceOf(RuntimeRunError);
+    expect(test.events.filter(event => event.type === "usage")).toEqual([
+      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 12, output: 1, cost: 0.03 } },
+    ]);
+    expect(sumUsage(test.events)).toEqual(failure.usage);
+    expect(test.events.filter(event => event.type === "narration")).toEqual([]);
+  });
+});
+
 describe.each(["chat", "decide"] as const)("Pi-returned thinking in %s", kind => {
   const answer = kind === "chat" ? "Ordinary answer." : '{"summary":"Ordinary answer."}';
 
@@ -475,8 +612,8 @@ describe("private Pi chat session", () => {
     expect(JSON.stringify(seen[1])).toContain("A natural language reply, not JSON.");
     expect(seen[0].systemPrompt).not.toContain("Return one JSON object");
     expect(events.filter(event => event.type === "text")).toEqual([
-      { type: "text", mode: "chat", text: "A natural language reply, not JSON." },
-      { type: "text", mode: "chat", text: "A natural language reply, not JSON." },
+      { type: "text", mode: "chat", messageId: expect.any(String), text: "A natural language reply, not JSON." },
+      { type: "text", mode: "chat", messageId: expect.any(String), text: "A natural language reply, not JSON." },
     ]);
   });
 

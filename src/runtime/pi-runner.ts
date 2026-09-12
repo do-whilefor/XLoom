@@ -2,11 +2,13 @@ import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentOptions } from "@earendil-works/pi-agent-core";
-import { createReadTool, createWriteTool, createEditTool, createPowerShellTool } from "@earendil-works/pi-coding-agent";
+import { createReadTool, createWriteTool, createEditTool } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
 import { buildRunPrompt } from "./prompts.js";
 import { resolveModel, type ModelResolver } from "./models.js";
+import { createRunBudget } from "./run-budget.js";
+import { createCheckedPowerShellTool } from "./powershell.js";
 
 export class RuntimeRunError extends Error {
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions) { super(message, options); this.name = "RuntimeRunError"; }
@@ -22,7 +24,7 @@ export function parseFinalJson(text: string): Record<string, unknown> {
 }
 
 export function executeTools(workspace: string) {
-  return [createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createPowerShellTool(workspace)];
+  return [createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createCheckedPowerShellTool(workspace)];
 }
 
 export function contentText(value: unknown): string {
@@ -31,6 +33,12 @@ export function contentText(value: unknown): string {
   const content = (value as { content?: unknown }).content;
   if (!Array.isArray(content)) return "";
   return content.flatMap((part) => part && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n");
+}
+
+function isProtocolText(value: string): boolean {
+  if (/^(?:\{|\[|```(?:json)?\s*[\[{]|```json\b)/i.test(value)) return true;
+  const body = value.replace(/^```\s*\n/, "").replace(/\n```$/, "");
+  try { JSON.parse(body); return true; } catch { return false; }
 }
 
 export function runtimeEvent(event: AgentEvent, mode: RuntimeEvent["mode"]): RuntimeEvent | undefined {
@@ -50,6 +58,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
   redact: (value: string) => string, secrets: () => readonly string[], fallbackText = false) {
   const prefix = randomUUID();
   let messageIndex = 0;
+  const messageId = () => `${prefix}:${messageIndex}`;
   let pendingText = "";
   let sawText = false;
   type Thought = { id: string; pending: string; sawDelta: boolean; ended: boolean; replayed: boolean };
@@ -59,7 +68,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
   const emitText = (delta: string, flush = false) => {
     pendingText = redact(pendingText + delta);
     const available = availableText(pendingText, flush);
-    if (available) emit({ type: "text", mode, text: pendingText.slice(0, available) });
+    if (available) emit({ type: "text", mode, messageId: messageId(), text: pendingText.slice(0, available) });
     pendingText = pendingText.slice(available);
   };
   const begin = (index: number, replayed = false): Thought => {
@@ -68,7 +77,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
       emitText("", true);
       thought = { id: `${prefix}:${messageIndex}:${index}`, pending: "", sawDelta: false, ended: false, replayed };
       thoughts.set(index, thought);
-      emit({ type: "thinking_start", mode, blockId: thought.id, text: "", ...(replayed ? { replayed: true } : {}) });
+      emit({ type: "thinking_start", mode, messageId: messageId(), blockId: thought.id, text: "", ...(replayed ? { replayed: true } : {}) });
     }
     return thought;
   };
@@ -76,14 +85,14 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
     if (thought.ended) return;
     thought.pending = redact(thought.pending + value);
     const available = availableText(thought.pending, flush);
-    if (available) emit({ type: "thinking", mode, blockId: thought.id, text: thought.pending.slice(0, available), ...(thought.replayed ? { replayed: true } : {}) });
+    if (available) emit({ type: "thinking", mode, messageId: messageId(), blockId: thought.id, text: thought.pending.slice(0, available), ...(thought.replayed ? { replayed: true } : {}) });
     thought.pending = thought.pending.slice(available);
   };
   const end = (thought: Thought) => {
     if (thought.ended) return;
     delta(thought, "", true);
     thought.ended = true;
-    emit({ type: "thinking_end", mode, blockId: thought.id, text: "", ...(thought.replayed ? { replayed: true } : {}) });
+    emit({ type: "thinking_end", mode, messageId: messageId(), blockId: thought.id, text: "", ...(thought.replayed ? { replayed: true } : {}) });
   };
   const finish = () => { for (const thought of thoughts.values()) end(thought); };
   return {
@@ -118,6 +127,18 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
         });
         finish();
         if (fallbackText && !sawText) emitText(contentText(event.message));
+        emitText("", true);
+        // Only actual, completed tool-use narration is public progress. Final JSON
+        // still belongs to the controller's result contract; never invent prose.
+        const narration = contentText(event.message).trim();
+        if (event.message.stopReason === "toolUse" && event.message.content.some(part => part.type === "toolCall")
+          && narration && !isProtocolText(narration)) {
+          emit({ type: "narration", mode, messageId: messageId(), text: redact(narration) });
+        }
+        const usage = event.message.usage;
+        emit({ type: "usage", mode, text: "", usage: {
+          input: usage.input + usage.cacheRead + usage.cacheWrite, output: usage.output, cost: usage.cost.total,
+        } });
       }
       const outgoing = runtimeEvent(event, mode);
       if (outgoing?.type === "text") { finish(); sawText = true; emitText(outgoing.text); }
@@ -140,8 +161,6 @@ export class PiRunner implements AgentRunner {
     let unsubscribe: (() => void) | undefined;
     let detachAbort: (() => void) | undefined;
     let finalMessage: AssistantMessage | undefined;
-    let turns = 0;
-    let budgetStop = false;
     let forward: ReturnType<typeof createRuntimeForwarder> | undefined;
     try {
       request.signal.throwIfAborted();
@@ -155,27 +174,20 @@ export class PiRunner implements AgentRunner {
       const secrets = () => [...new Set([...(selected.secrets ?? []), ...configuredSecrets])].sort((a, b) => b.length - a.length);
       redact = (value) => secrets().reduce((clean, secret) => secret ? clean.split(secret).join("[MODEL_CREDENTIAL_REDACTED]") : clean, value);
       await mkdir(join(request.runDir, "artifacts"), { recursive: true });
+      const budget = createRunBudget(request.snapshot.config.limits, usage, request.snapshot.usage, "agent", request.signal);
       const prompt = buildRunPrompt(request);
+      prompt.systemPrompt += `\n\n${budget.instruction}`;
       await writeFile(join(request.runDir, "input.json"), redact(JSON.stringify({ mode: request.mode, ...prompt }, null, 2)), { flag: "wx" });
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
-        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: executeTools(request.workspace) },
+        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: budget.toolsAllowed ? executeTools(request.workspace) : [] },
         streamFn: selected.streamFn,
         toolExecution: "sequential",
         sessionId: request.id,
-        shouldStopAfterTurn: ({ message }) => {
-          turns++;
-          const hasToolCalls = message.content.some((part) => part.type === "toolCall");
-          const { limits } = request.snapshot.config;
-          const spent = request.snapshot.usage;
-          const exhausted = turns >= limits.maxTurnsPerRun
-            || (limits.maxTokens !== null && spent.input + spent.output + usage.input + usage.output >= limits.maxTokens)
-            || (limits.maxCost !== null && spent.cost + usage.cost >= limits.maxCost);
-          budgetStop = exhausted && hasToolCalls;
-          return exhausted;
-        },
+        shouldStopAfterTurn: budget.shouldStopAfterTurn,
+        prepareNextTurnWithContext: budget.prepareNextTurnWithContext,
       });
       unsubscribe = agent.subscribe(async (event) => {
         if (event.type === "message_end" && event.message.role === "assistant") {
@@ -199,7 +211,7 @@ export class PiRunner implements AgentRunner {
       if (request.signal.aborted) agent.abort();
       await running;
       request.signal.throwIfAborted();
-      if (budgetStop) throw new Error("Agent budget reached before a final result; the Step may have partial side effects. Inspect artifacts before retrying.");
+      if (budget.error) throw new Error(budget.error);
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
       if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
       const output = parseFinalJson(redact(contentText(finalMessage)));

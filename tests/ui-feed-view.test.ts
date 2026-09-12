@@ -36,7 +36,7 @@ describe("compact Claude-like feed presentation", () => {
     expect(output).not.toMatch(/Assistant|Decide|Execute|You → Task/);
   });
 
-  it("renders tools as consecutive compact rows and separates role handoff groups", () => {
+  it("summarizes completed tools and keeps only the active tool beneath its role group", () => {
     const { screen } = setup([
       { kind: "activity", label: "Decide", text: "规划", details: "LONG_PRIVATE_REASON" },
       { kind: "tool", label: "Read", text: "README.md", state: "running", output: "ENTIRE_DOCUMENT_BODY" },
@@ -44,13 +44,12 @@ describe("compact Claude-like feed presentation", () => {
       { kind: "activity", label: "Execute", text: "验证" },
     ]);
     const rows = screen().split("\n");
-    expect(rows).toHaveLength(5);
     expect(rows[0]).toContain("● Decide · 规划");
-    expect(rows[1]).toContain("● Read README.md");
-    expect(rows[2]).toContain("✓ PowerShell Get-ChildItem -Recurse");
-    expect(rows[3]).toBe("");
-    expect(rows[4]).toContain("● Execute · 验证");
-    expect(rows.join("\n")).not.toMatch(/LONG_PRIVATE_REASON|ENTIRE_DOCUMENT_BODY|ALL_FILE_NAMES/);
+    expect(rows.join("\n")).toContain("● Read README.md");
+    expect(rows.join("\n")).toMatch(/ran 1 shell command/i);
+    expect(rows.at(-2)).toBe("");
+    expect(rows.at(-1)).toContain("● Execute · 验证");
+    expect(rows.join("\n")).not.toMatch(/Get-ChildItem|LONG_PRIVATE_REASON|ENTIRE_DOCUMENT_BODY|ALL_FILE_NAMES/);
   });
 
   it("keeps a bounded error summary visible while tool details are folded", () => {
@@ -59,7 +58,8 @@ describe("compact Claude-like feed presentation", () => {
     ]);
     const rows = screen().split("\n");
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toContain("✕ Read missing.txt");
+    expect(rows[0]).toContain("failed");
+    expect(rows[1]).toContain("✕ Read:");
     expect(rows[1]).toContain("ENOENT: file is missing");
     expect(rows[1]!.length).toBeLessThanOrEqual(90);
     expect(rows.join("\n")).not.toContain("long detail ".repeat(10));
@@ -67,7 +67,8 @@ describe("compact Claude-like feed presentation", () => {
 
   it("honors error=true even when an inconsistent tool state says done", () => {
     const { screen } = setup([{ kind: "tool", label: "PowerShell", text: "command", state: "done", error: true, output: "Command failed" }]);
-    expect(screen()).toContain("✕ PowerShell command");
+    expect(screen()).toContain("✕ PowerShell:");
+    expect(screen()).toContain("failed");
     expect(screen()).toContain("Command failed");
     expect(screen()).not.toContain("✓");
   });
@@ -170,7 +171,7 @@ describe("feed rendering safety and narrow terminals", () => {
     for (const visible of [false, true]) {
       view.detailsVisible = visible;
       const rendered = view.render(90).join("\n");
-      const withoutSgr = rendered.replace(/\x1b\[[0-9;]*m/g, "");
+      const withoutSgr = rendered.replace(/\x1b\]8;;(?:xloom-thinking:\d+)?\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, "");
       expect(withoutSgr).not.toContain("\x1b");
       expect(withoutSgr).not.toContain("\x00");
       expect(withoutSgr).not.toContain("SECRET");
@@ -247,9 +248,9 @@ describe("real provider thinking blocks and response duration", () => {
     let current = 7600;
     const entry: FeedEntry = { kind: "thinking", label: "Decide", text: "provider text", startedAt: 1000 };
     const { screen } = setup([entry], () => current);
-    expect(screen()).toContain("Thinking… 6s");
+    expect(screen()).toContain("Thinking for 6s");
     current = 10000;
-    expect(screen()).toContain("Thinking… 9s");
+    expect(screen()).toContain("Thinking for 9s");
     entry.endedAt = 7600;
     current = 50000;
     expect(screen()).toContain("Thought for 6s");
@@ -268,7 +269,7 @@ describe("real provider thinking blocks and response duration", () => {
     expect(screen()).toContain("▾ Thinking…");
     expect(screen()).not.toContain("6s");
     entry.durationKnown = true;
-    expect(screen()).toContain("▾ Thinking… 6s");
+    expect(screen()).toContain("▾ Thinking for 6s");
   });
 
   it("uses a compact terminal work marker with total seconds and local end time", () => {
@@ -306,11 +307,12 @@ describe("real provider thinking blocks and response duration", () => {
   it("handles missing, invalid or future timestamps without NaN or negative durations", () => {
     const { screen } = setup([
       { kind: "thinking", label: "Assistant", text: "", startedAt: 9000, endedAt: 1000 },
+      { kind: "message", label: "Assistant", text: "Summary boundary." },
       { kind: "thinking", label: "Assistant", text: "", startedAt: Number.NaN, endedAt: Infinity },
       { kind: "work", label: "Assistant", text: "", startedAt: undefined, workStatus: "running" },
     ], () => Number.NaN);
     expect(screen()).toContain("Thought for 0s");
-    expect(screen()).toContain("Thinking… 0s");
+    expect(screen()).toContain("▸ Thinking…");
     expect(screen()).toContain("Working… 0s");
     expect(screen()).not.toMatch(/NaN|Infinity|-\ds/);
   });
@@ -346,6 +348,7 @@ describe("real provider thinking blocks and response duration", () => {
   it("supports keyboard toggling of only the latest thought and global detail resets", () => {
     const { view, screen } = setup([
       { kind: "thinking", label: "Assistant", text: "FIRST_THINKING", startedAt: 0, endedAt: 6000 },
+      { kind: "message", label: "Assistant", text: "Summary boundary." },
       { kind: "thinking", label: "Assistant", text: "LATEST_THINKING", startedAt: 6000, endedAt: 9000 },
     ]);
     expect(view.toggleLatestThinking()).toBe(true);
@@ -393,5 +396,146 @@ describe("real provider thinking blocks and response duration", () => {
       { kind: "work", label: "Assistant", text: "", startedAt: 0, endedAt: 6000, workStatus: "done" },
     ]);
     for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+  });
+});
+
+describe("Claude-style collapsed activity groups", () => {
+  it("folds thinking and successful read/shell calls into one truthful summary row", () => {
+    const { screen } = setup([
+      { kind: "thinking", label: "Assistant", text: "PRIVATE_PROVIDER_TEXT", startedAt: 0, endedAt: 6000 },
+      { kind: "tool", label: "Read", text: "PRIVATE_SOURCE.md", state: "done", output: "PRIVATE_FILE_BODY" },
+      { kind: "tool", label: "PowerShell", text: "PRIVATE_COMMAND_ONE", state: "done" },
+      { kind: "tool", label: "PowerShell", text: "PRIVATE_COMMAND_TWO", state: "done" },
+      { kind: "message", label: "Assistant", text: "The requested checks are complete." },
+    ]);
+    const output = screen();
+    expect(output).toContain("▸ Thought for 6s, read 1 file, ran 2 shell commands");
+    expect(output).toContain("The requested checks are complete.");
+    expect(output).not.toMatch(/PRIVATE_PROVIDER_TEXT|PRIVATE_SOURCE|PRIVATE_FILE_BODY|PRIVATE_COMMAND/);
+    expect(output).not.toMatch(/✓ Read|✓ PowerShell/);
+  });
+
+  it("opens the full activity through the retained internal link instead of revealing only thinking", () => {
+    const { view, screen } = setup([
+      { kind: "thinking", label: "Assistant", text: "**provider thought**", startedAt: 0, endedAt: 6000 },
+      { kind: "tool", label: "Read", text: "source.md", state: "done", details: '{"path":"source.md"}', output: "READ_BODY" },
+      { kind: "tool", label: "PowerShell", text: "Get-ChildItem", state: "done", output: "COMMAND_OUTPUT" },
+    ]);
+    const links = thoughtLinks(view);
+    expect(links).toHaveLength(1);
+    expect(view.toggleThinkingLink(links[0]!)).toBe(true);
+    expect(screen()).toContain("▾ Thought for 6s");
+    expect(screen()).toContain("∴ **provider thought**");
+    expect(screen()).toContain("✓ Read source.md");
+    expect(screen()).toContain('{"path":"source.md"}');
+    expect(screen()).toContain("READ_BODY");
+    expect(screen()).toContain("Get-ChildItem");
+    expect(screen()).toContain("COMMAND_OUTPUT");
+    expect(view.toggleThinkingLink(links[0]!)).toBe(true);
+    expect(screen()).not.toMatch(/READ_BODY|COMMAND_OUTPUT|Get-ChildItem/);
+  });
+
+  it("supports a tool-only activity without fabricating provider thinking", () => {
+    const { view, screen } = setup([{ kind: "tool", label: "Read", text: "source.md", state: "done", output: "SOURCE_BODY" }]);
+    expect(screen()).toMatch(/read 1 file/i);
+    expect(screen()).not.toMatch(/Thought|Thinking|SOURCE_BODY/);
+    expect(view.toggleLatestThinking()).toBe(true);
+    expect(screen()).toContain("SOURCE_BODY");
+    expect(screen()).not.toMatch(/Thought|Thinking/);
+  });
+
+  it("shows only the latest live tool command with real elapsed minutes under the summary", () => {
+    const { screen } = setup([
+      { kind: "thinking", label: "Assistant", text: "HIDDEN_THOUGHT", startedAt: 0, endedAt: 1000 },
+      { kind: "tool", label: "Read", text: "EARLIER_ACTIVE_FILE", state: "running", startedAt: 0 },
+      { kind: "tool", label: "PowerShell", text: "CURRENT_COMMAND", state: "running", startedAt: 1000 },
+      { kind: "tool", label: "Read", text: "DONE_FILE", state: "done", startedAt: 0, endedAt: 1000 },
+    ], () => 117000);
+    expect(screen()).toContain("● PowerShell · 1m56s CURRENT_COMMAND");
+    expect(screen()).not.toMatch(/EARLIER_ACTIVE_FILE|DONE_FILE|HIDDEN_THOUGHT/);
+    expect(screen().split("\n").filter(row => row.includes("● "))).toHaveLength(1);
+  });
+
+  it("keeps failed counts and concise actual failure reasons visible without treating them as successful reads", () => {
+    const { screen } = setup([
+      { kind: "tool", label: "Read", text: "good.md", state: "done" },
+      { kind: "tool", label: "Read", text: "denied.md", state: "error", output: "读取失败：访问被拒绝" },
+    ]);
+    expect(screen()).toMatch(/read 1 file/i);
+    expect(screen()).toContain("1 failed");
+    expect(screen()).toContain("✕ Read: 读取失败：访问被拒绝");
+    expect(screen()).not.toContain("read 2 files");
+    expect(screen()).not.toContain("✓");
+  });
+
+  it("summarizes PowerShell parser errors in Chinese while retaining exact error evidence in details", () => {
+    const raw = "ParserError: unexpected token PRIVATE_SCRIPT_FRAGMENT\nCLIXML_PAYLOAD";
+    const { view, screen } = setup([{ kind: "tool", label: "PowerShell", text: "PRIVATE_COMMAND_SOURCE", state: "error", output: raw }]);
+    expect(screen()).toContain("1 failed");
+    expect(screen()).toContain("✕ PowerShell 语法错误（展开查看详情）");
+    expect(screen()).not.toMatch(/PRIVATE_SCRIPT_FRAGMENT|CLIXML_PAYLOAD|PRIVATE_COMMAND_SOURCE/);
+    view.toggleLatestThinking();
+    expect(screen()).toContain("PRIVATE_COMMAND_SOURCE");
+    expect(screen()).toContain("ParserError: unexpected token PRIVATE_SCRIPT_FRAGMENT");
+    expect(screen()).toContain("CLIXML_PAYLOAD");
+  });
+
+  it("does not attribute a non-shell parser failure to PowerShell", () => {
+    const { screen } = setup([{ kind: "tool", label: "Read", text: "broken-file", state: "error", output: "ParserError: invalid document" }]);
+    expect(screen()).toContain("✕ Read: ParserError: invalid document");
+    expect(screen()).not.toContain("PowerShell");
+  });
+
+  it("keeps the failed count at the visible start of an overlong activity title", () => {
+    const { view } = setup([
+      { kind: "thinking", label: "Assistant", text: "thinking", startedAt: 0, endedAt: 6000 },
+      ...["Read", "Write", "Edit", "PowerShell"].map(label => ({ kind: "tool" as const, label, text: "hidden input", state: "done" as const })),
+      { kind: "tool", label: "PowerShell", text: "failed", state: "error", output: "访问失败" },
+    ]);
+    expect(plainText(view.render(32)[0]!)).toContain("▸ 1 failed");
+  });
+
+  it("preserves natural-language, user and error-notice boundaries instead of swallowing them into a group", () => {
+    const { view, screen } = setup([
+      { kind: "message", label: "Assistant", text: "I will inspect the files." },
+      { kind: "tool", label: "Read", text: "one.md", state: "done" },
+      { kind: "notice", label: "xloom", text: "User-visible recovery instruction", error: true },
+      { kind: "message", label: "You", text: "Please continue." },
+      { kind: "tool", label: "Read", text: "two.md", state: "done" },
+      { kind: "message", label: "Assistant", text: "Here is the result." },
+    ]);
+    expect(thoughtLinks(view)).toHaveLength(2);
+    const output = screen();
+    expect(output).toContain("I will inspect the files.");
+    expect(output).toContain("User-visible recovery instruction");
+    expect(output).toContain("❯ Please continue.");
+    expect(output).toContain("Here is the result.");
+    expect(output.indexOf("I will inspect")).toBeLessThan(output.toLowerCase().indexOf("read 1 file"));
+    expect(output.indexOf("User-visible recovery")).toBeLessThan(output.indexOf("❯ Please continue"));
+  });
+
+  it("globally opens tool-only groups and protocol while keeping local toggles independent", () => {
+    const { view, screen } = setup([
+      { kind: "tool", label: "Read", text: "one.md", state: "done", output: "FIRST_TOOL_BODY" },
+      { kind: "protocol", label: "Decide", text: "RAW_PROTOCOL" },
+      { kind: "message", label: "Assistant", text: "Boundary." },
+      { kind: "tool", label: "Read", text: "two.md", state: "done", output: "SECOND_TOOL_BODY" },
+    ]);
+    view.toggleDetails();
+    expect(screen()).toContain("FIRST_TOOL_BODY");
+    expect(screen()).toContain("SECOND_TOOL_BODY");
+    expect(screen()).toContain("RAW_PROTOCOL");
+    view.toggleLatestThinking();
+    expect(screen()).toContain("FIRST_TOOL_BODY");
+    expect(screen()).not.toContain("SECOND_TOOL_BODY");
+    view.toggleDetails();
+    expect(screen()).not.toMatch(/FIRST_TOOL_BODY|SECOND_TOOL_BODY|RAW_PROTOCOL/);
+  });
+
+  it("keeps total work time and model token count without cost or unimplemented background controls", () => {
+    const { screen } = setup([{ kind: "work", label: "xloom", text: "", startedAt: 1000, endedAt: 117000, workStatus: "done", tokens: 12345 }]);
+    expect(screen()).toContain("Worked for 1m56s");
+    expect(screen()).toContain("12,345 tokens");
+    expect(screen()).not.toMatch(/\$|cost|后台|Agent|ctrl\+b/i);
   });
 });

@@ -26,10 +26,13 @@ describe.runIf(process.platform === "win32")("Windows Pi built-ins", () => {
     const powershell = executeTools(directory)[3];
     const controller = new AbortController();
     let childPid: number | undefined;
-    const timer = setTimeout(() => controller.abort(), 8000);
+    // Cancellation is triggered by the child's ready message, not by a fixed
+    // startup delay. Allow both parser and shell to start under full-suite load;
+    // this watchdog only prevents a broken readiness path from hanging the test.
+    const timer = setTimeout(() => controller.abort(), 20000);
     const command = "$worker = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru\nWrite-Output \"child:$($worker.Id)\"\nStart-Sleep -Seconds 30";
     try {
-      const result = powershell.execute("abort-test", { command, timeout: 12 } as never, controller.signal, (update) => {
+      const result = powershell.execute("abort-test", { command, timeout: 25 } as never, controller.signal, (update) => {
         const match = JSON.stringify(update.content).match(/child:(\d+)/);
         if (match) { childPid = Number(match[1]); controller.abort(); }
       });
@@ -41,5 +44,5 @@ describe.runIf(process.platform === "win32")("Windows Pi built-ins", () => {
       controller.abort();
       if (childPid !== undefined) { try { process.kill(childPid); } catch { /* Already terminated by Pi's process tree cancellation. */ } }
     }
-  });
+  }, 30000);
 });

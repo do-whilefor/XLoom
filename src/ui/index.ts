@@ -26,10 +26,10 @@ const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
 
 class StatusView implements Component {
-  constructor(private readonly content: () => string, private readonly color = muted) {}
+  constructor(private readonly content: (width: number) => string, private readonly color = muted) {}
   invalidate(): void {}
   render(width: number): string[] {
-    return [this.color(truncateToWidth(plainText(this.content()), Math.max(0, width), width > 3 ? "…" : ""))];
+    return [this.color(truncateToWidth(plainText(this.content(width)), Math.max(0, width), width > 3 ? "…" : ""))];
   }
 }
 
@@ -100,6 +100,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const finishWork = (status: Exclude<FeedEntry["workStatus"], "running" | undefined>, generation = workGeneration): void => {
     if (generation !== workGeneration) return;
     feed.finishWork(status);
+    feed.usageCommitted();
     if (workTimer) clearInterval(workTimer);
     workTimer = undefined;
     tui.requestRender();
@@ -225,22 +226,24 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     { component: new StatusView(() => ` ${snapshot.config.title.startsWith("xloom") ? compact(snapshot.config.title, 100) : `xloom  ·  ${compact(snapshot.config.title, 100)}`}`, coral), basis: 1, shrink: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
-    { component: new StatusView(() => ` ${statusLine(snapshot, controller.getSessionInfo?.(), feed.pricingUnknown)}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
+    { component: new StatusView(width => ` ${statusLine(snapshot, controller.getSessionInfo?.(), feed.uncommittedTokens, Math.max(0, width - 1))}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
   ]));
   tui.setFocus(input);
 
   const unsubscribe = controller.subscribe((event) => {
+    if (event.snapshot && event.snapshot.usage.input + event.snapshot.usage.output > snapshot.usage.input + snapshot.usage.output) feed.usageCommitted();
     if (event.snapshot) snapshot = event.snapshot;
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
     else if (event.type === "handoff" && event.handoff) { beginWork(); feed.handoff(event.handoff); }
     else if (event.type === "notice" && event.message) feed.notice(event.message);
-    else if (event.type === "result" && event.result) feed.result(event.result.mode, event.result.summary, event.result.outcome);
+    else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome); }
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {
       feed.breakStream();
       // Routine running/revision updates belong in the status bar, not the transcript.
-      if (snapshot.status !== "running" && controller.getSessionInfo?.().mode !== "chat" && !closing) print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${snapshot.reason}` : ""}`, snapshot.status === "error");
+      if (snapshot.status !== "running" && controller.getSessionInfo?.().mode !== "chat" && !closing) print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${formatRunError(snapshot.reason)}` : ""}`, snapshot.status === "error");
     }
+    else if (event.type === "session" && !controller.getSessionInfo?.().busy) feed.usageCommitted();
     if ((event.type === "result" || event.type === "state") && snapshot.status !== "running" && feed.working && !active && controller.getSessionInfo?.().mode !== "chat") {
       const status = completedStatus("run");
       const generation = workGeneration;

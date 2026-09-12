@@ -205,13 +205,14 @@ describe("TUI slash candidates and compact transcript", () => {
     app.terminal.output = "";
     app.tui.renderNow(true);
     const compactScreen = plainText(app.terminal.output);
-    expect(compactScreen).toContain("Read");
-    expect(compactScreen).toContain("README.md");
+    expect(compactScreen).toContain("Read 1 file");
+    expect(compactScreen).not.toContain("README.md");
     expect(compactScreen).toContain("已提交计划");
     expect(compactScreen).not.toMatch(/RAW_FILE_BODY|RAW_PROTOCOL|Starting a fresh|Verbose planning/);
     app.terminal.input("\x0f");
     app.terminal.output = "";
     app.tui.renderNow(true);
+    expect(plainText(app.terminal.output)).toContain("README.md");
     expect(plainText(app.terminal.output)).toContain("RAW_FILE_BODY");
     expect(plainText(app.terminal.output)).toContain("RAW_PROTOCOL");
     expect(plainText(app.terminal.output)).toContain("Verbose planning reason");
@@ -232,7 +233,8 @@ describe("TUI slash candidates and compact transcript", () => {
     app.tui.renderNow(true);
     const screen = plainText(app.terminal.output);
     expect(screen).not.toContain("当前端点未提供定价");
-    expect(screen).toContain("费用未知");
+    expect(screen).not.toMatch(/费用|\$/);
+    expect(screen).toContain("180 tokens");
     expect(screen).toContain("File not found");
     app.terminal.input("\x0f");
     app.terminal.output = "";

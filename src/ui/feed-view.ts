@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { hyperlink, Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { compact, EventFeed, fitLines, plainText, type FeedEntry } from "./model.js";
+import { groupActivities, summarizeActivity, type ActivityGroup } from "./activity.js";
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
@@ -57,20 +58,20 @@ export class FeedView implements Component {
   invalidate(): void { this.markdown = new WeakMap(); }
   toggleDetails(): boolean {
     this.detailsVisible = !this.detailsVisible;
-    for (const entry of this.feed.entries) if (entry.kind === "thinking") delete entry.expanded;
+    for (const item of groupActivities(this.feed.entries)) if (item.kind === "group") delete item.anchor.expanded;
     return this.detailsVisible;
   }
   /** Only exact, renderer-generated IDs can toggle thought blocks; no browser navigation. */
   toggleThinkingLink(url: string): boolean {
     const entry = this.thoughtLinks.get(url);
-    if (!entry || entry.kind !== "thinking" || !this.feed.entries.includes(entry)) return false;
+    if (!entry || !groupActivities(this.feed.entries).some(item => item.kind === "group" && item.anchor === entry && summarizeActivity(item, this.now()).text)) return false;
     entry.expanded = !(entry.expanded ?? this.detailsVisible);
     return true;
   }
   toggleLatestThinking(): boolean {
-    const entry = this.feed.entries.findLast(item => item.kind === "thinking");
-    if (!entry) return false;
-    entry.expanded = !(entry.expanded ?? this.detailsVisible);
+    const group = groupActivities(this.feed.entries).findLast(item => item.kind === "group" && summarizeActivity(item, this.now()).text);
+    if (!group || group.kind !== "group") return false;
+    group.anchor.expanded = !(group.anchor.expanded ?? this.detailsVisible);
     return true;
   }
   private thoughtLink(entry: FeedEntry): string {
@@ -83,7 +84,9 @@ export class FeedView implements Component {
     const current = this.now();
     const end = Number.isFinite(entry.endedAt) ? entry.endedAt! : Number.isFinite(current) ? current : 0;
     const start = Number.isFinite(entry.startedAt) ? entry.startedAt! : end;
-    return `${Math.floor(Math.max(0, end - start) / 1000)}s`;
+    const seconds = Math.floor(Math.max(0, end - start) / 1000);
+    return seconds >= 3600 ? `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m${seconds % 60}s`
+      : seconds >= 60 ? `${Math.floor(seconds / 60)}m${seconds % 60}s` : `${seconds}s`;
   }
   private endedClock(entry: FeedEntry): string {
     if (!Number.isFinite(entry.endedAt)) return "";
@@ -120,41 +123,72 @@ export class FeedView implements Component {
     const detail = (values: (string | undefined)[]): void => {
       for (const text of boundedDetails(values, available)) line(margin + " ".repeat(prefixWidth) + muted(text));
     };
-    for (const entry of this.feed.entries) {
+    const toolState = (entry: FeedEntry): "running" | "done" | "error" => entry.error ? "error" : entry.state ?? "running";
+    const tool = (entry: FeedEntry, expanded: boolean): void => {
+      const state = toolState(entry);
+      const label = compact(entry.label, 60);
+      const color = state === "error" ? chalk.red : state === "done" ? chalk.green : coral;
+      if (state === "error" && !expanded) {
+        const summary = entry.label === "PowerShell" && /ParserError/i.test(entry.output ?? "") ? "PowerShell 语法错误（展开查看详情）"
+          : `${label}: ${compact(entry.output || "工具执行失败；展开查看输入与详情。", 240)}`;
+        line(margin + chalk.red(`✕ ${summary}`));
+        return;
+      }
+      const icon = state === "error" ? "✕" : state === "done" ? "✓" : "●";
+      const elapsed = Number.isFinite(entry.startedAt) && entry.durationKnown !== false ? ` · ${this.duration(entry)}` : "";
+      line(margin + color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""));
+      if (expanded) detail([entry.details ?? entry.text, entry.output]);
+    };
+    const group = (activity: ActivityGroup): void => {
+      const summary = summarizeActivity(activity, this.now());
+      if (!summary.text) {
+        if (this.detailsVisible) for (const entry of activity.entries) detail([entry.text, entry.details, entry.output]);
+        return;
+      }
+      const expanded = activity.anchor.expanded ?? this.detailsVisible;
+      if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
+      const normalTitle = plainText(summary.text);
+      const successParts = summary.failed ? normalTitle.replace(/(?:,\s*)?\d+ failed$/, "").trim() : normalTitle;
+      // Keep the failure count visible even when a long activity summary is truncated.
+      const title = summary.failed ? `${summary.failed} failed${successParts ? ` · ${successParts}` : ""}` : normalTitle;
+      const heading = `${expanded ? "▾" : "▸"} ${title}`;
+      line(margin + hyperlink((summary.failed ? chalk.red : muted)(heading), this.thoughtLink(activity.anchor)));
+      if (expanded) {
+        for (const entry of activity.entries) {
+          if (entry.kind === "thinking") {
+            const thought = boundedDetails([entry.text], available);
+            for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text));
+          } else if (entry.kind === "tool") tool(entry, true);
+          else detail([entry.text, entry.details, entry.output]);
+        }
+      } else {
+        const running = activity.entries.findLast(entry => entry.kind === "tool" && toolState(entry) === "running");
+        if (running) tool(running, false);
+        for (const entry of activity.entries) if (entry.kind === "tool" && toolState(entry) === "error") tool(entry, false);
+      }
+    };
+    for (const item of groupActivities(this.feed.entries)) {
+      if (item.kind === "group") { group(item); continue; }
+      const entry = item;
       const label = compact(entry.label, 100);
       const kind = entry.kind ?? (entry.key?.startsWith("tool:") ? "tool" : /^(?:You|Assistant|Decide|Execute)(?:\b|\s)/.test(label) ? "message" : "notice");
       if (kind === "protocol" || kind === "diagnostic") {
         if (this.detailsVisible) detail([entry.text, entry.details, entry.output]);
         continue;
       }
-      if (kind === "thinking") {
-        if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
-        const expanded = entry.expanded ?? this.detailsVisible;
-        const ended = Number.isFinite(entry.endedAt);
-        const title = entry.durationKnown === false ? ended ? "Thought" : "Thinking…" : `${ended ? "Thought for" : "Thinking…"} ${this.duration(entry)}`;
-        const heading = `${expanded ? "▾" : "▸"} ${title}`;
-        line(margin + hyperlink(muted(heading), this.thoughtLink(entry)));
-        if (expanded) {
-          const thought = boundedDetails([entry.text], available);
-          for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text));
-        }
-      } else if (kind === "work") {
+      if (kind === "work") {
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
         const status = entry.error ? "error" : entry.workStatus ?? (Number.isFinite(entry.endedAt) ? "stopped" : "running");
         const active = status === "running" && !Number.isFinite(entry.endedAt);
-        const text = active ? `✻ Working… ${this.duration(entry)}` : `✻ Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`;
+        const tokens = Number.isFinite(entry.tokens) && entry.tokens! >= 0 ? ` · ${Math.floor(entry.tokens!).toLocaleString("en-US")} tokens` : "";
+        const text = (active ? `✻ Working… ${this.duration(entry)}` : `✻ Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`) + tokens;
         line(margin + (status === "error" ? chalk.red : muted)(text));
       } else if (kind === "activity") {
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
         line(margin + coral("● ") + muted(`${label}${entry.text ? ` · ${compact(entry.text, 240)}` : ""}`));
         if (this.detailsVisible) detail([entry.details, entry.output]);
       } else if (kind === "tool") {
-        const state = entry.error ? "error" : entry.state ?? "running";
-        const color = state === "error" ? chalk.red : state === "done" ? chalk.green : coral;
-        const icon = state === "error" ? "✕" : state === "done" ? "✓" : "●";
-        line(margin + color(`${icon} ${label}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""));
-        if (state === "error" && entry.output && !this.detailsVisible) line(margin + " ".repeat(prefixWidth) + chalk.red(compact(entry.output, 180)));
-        if (this.detailsVisible) detail([entry.details, entry.output]);
+        tool(entry, this.detailsVisible);
       } else if (kind === "notice") {
         const summary = compact(entry.text, 500);
         line(margin + (entry.error ? chalk.red : muted)(summary));

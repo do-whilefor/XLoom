@@ -262,8 +262,105 @@ describe("response timeline model", () => {
     expect(formatRunError(new Error("Request timed out."))).not.toMatch(/API Key|密钥|180|已修复/);
     expect(formatRunError(new Error("Chat response timed out; tool side effects may remain."))).toContain("本地时间限制");
     expect(formatRunError(new Error("other failure"))).toBe("other failure");
-    expect(statusLine(snapshot(), undefined, true)).toContain("费用未知");
-    expect(statusLine(snapshot(), undefined, true)).not.toContain("$");
+    expect(statusLine(snapshot(), undefined, 20)).toContain("200 tokens");
+    expect(statusLine(snapshot(), undefined, 20)).not.toMatch(/\$|费用/);
+  });
+
+  it("moves only actual pre-tool narration ahead of its thought summary without duplication", () => {
+    const feed = new EventFeed();
+    feed.add("You", "检查测试");
+    feed.runtime({ type: "thinking", mode: "chat", text: "provider thinking", blockId: "a" });
+    feed.runtime({ type: "thinking_end", mode: "chat", text: "", blockId: "a" });
+    feed.runtime({ type: "text", mode: "chat", text: "先检查测试入口。" });
+    feed.runtime({ type: "narration", mode: "chat", text: "先检查测试入口。" });
+    feed.runtime({ type: "tool_start", mode: "chat", toolName: "read", toolCallId: "r", text: '{"path":"README.md"}' });
+    feed.runtime({ type: "tool_end", mode: "chat", toolName: "read", toolCallId: "r", text: "read output" });
+    feed.runtime({ type: "thinking", mode: "chat", text: "next thought", blockId: "b" });
+    feed.runtime({ type: "text", mode: "chat", text: "接着运行测试。" });
+    feed.runtime({ type: "narration", mode: "chat", text: "接着运行测试。" });
+    expect(feed.entries.map(entry => entry.kind)).toEqual(["message", "message", "thinking", "tool", "message", "thinking"]);
+    expect(feed.entries.filter(entry => entry.text === "先检查测试入口。")).toHaveLength(1);
+    expect(feed.entries[4]!.text).toBe("接着运行测试。");
+  });
+
+  it("retains red-team protocol unless its completed tool-use message supplies public narration", () => {
+    const feed = new EventFeed();
+    feed.beginWork();
+    feed.runtime({ type: "thinking", mode: "decide", text: "real thought", blockId: "a" });
+    feed.runtime({ type: "text", mode: "decide", text: "先核对工具结果。" });
+    feed.runtime({ type: "narration", mode: "decide", text: "先核对工具结果。" });
+    expect(feed.entries[0]).toMatchObject({ kind: "message", text: "先核对工具结果。" });
+    expect(feed.entries.some(entry => entry.kind === "protocol")).toBe(false);
+    feed.runtime({ type: "tool_start", mode: "decide", toolName: "read", toolCallId: "r", text: "path" });
+    feed.runtime({ type: "tool_end", mode: "decide", toolName: "read", toolCallId: "r", text: "output" });
+    feed.runtime({ type: "text", mode: "decide", text: '{"summary":"not committed"}' });
+    expect(feed.entries.at(-2)!.kind).toBe("protocol");
+    expect(feed.entries.at(-1)!.kind).toBe("work");
+  });
+
+  it("replaces all text blocks of a completed message after replayed thinking without duplicating narration", () => {
+    const feed = new EventFeed();
+    feed.beginWork();
+    feed.runtime({ type: "text", mode: "chat", text: "Earlier answer.", messageId: "previous" });
+    feed.runtime({ type: "text", mode: "chat", text: "先检查入口。", messageId: "current" });
+    feed.runtime({ type: "thinking_start", mode: "chat", text: "", blockId: "replay", messageId: "current", replayed: true });
+    feed.runtime({ type: "thinking", mode: "chat", text: "actual returned thought", blockId: "replay", messageId: "current", replayed: true });
+    feed.runtime({ type: "thinking_end", mode: "chat", text: "", blockId: "replay", messageId: "current", replayed: true });
+    feed.runtime({ type: "text", mode: "chat", text: "然后运行测试。", messageId: "current" });
+    feed.runtime({ type: "narration", mode: "chat", text: "先检查入口。\n然后运行测试。", messageId: "current" });
+    expect(feed.entries.map(entry => entry.kind)).toEqual(["message", "message", "thinking", "work"]);
+    expect(feed.entries[0]!.text).toBe("Earlier answer.");
+    expect(feed.entries[1]!.text).toBe("先检查入口。\n然后运行测试。");
+    expect(feed.entries[2]).toMatchObject({ text: "actual returned thought", durationKnown: false });
+    feed.runtime({ type: "text", mode: "chat", text: "Next answer.", messageId: "next" });
+    expect(feed.entries.at(-2)!.text).toBe("Next answer.");
+  });
+
+  it("keeps token accounting visible when long model names or narrow terminals hide metadata", () => {
+    const info = { mode: "chat" as const, busy: true, model: "provider/" + "long-model-name".repeat(10), usage: { input: 11000, output: 2000, cost: 4 } };
+    expect(statusLine(snapshot(), info, 45, 45)).toBe("chat · running · 13,045 tokens");
+    expect(statusLine(snapshot(), info, 45, 15)).toBe("13,045 tokens");
+    expect(statusLine(snapshot(), undefined, 20, 30)).toBe("idle · 200 tokens");
+    expect(statusLine(snapshot(), info, 45)).toContain("long-model-name");
+  });
+
+  it("counts reported usage live without creating tool entries or double-counting committed usage", () => {
+    const feed = new EventFeed();
+    feed.beginWork();
+    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 100, output: 25, cost: 1 } });
+    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 120, output: 30, cost: 2 } });
+    expect(feed.uncommittedTokens).toBe(275);
+    expect(feed.entries).toHaveLength(1);
+    expect(feed.entries[0]!.tokens).toBe(275);
+    feed.usageCommitted();
+    expect(feed.uncommittedTokens).toBe(0);
+    expect(feed.entries[0]!.tokens).toBe(275);
+    feed.finishWork("done");
+    feed.beginWork();
+    expect(feed.entries.at(-1)!.tokens).toBe(0);
+    for (const input of [-1, NaN, Infinity]) feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input, output: 3, cost: 0 } });
+    expect(feed.uncommittedTokens).toBe(0);
+  });
+
+  it("keeps actual tool start/end times for running summaries", () => {
+    let now = 1000;
+    const feed = new EventFeed(160, 3200, () => now);
+    feed.runtime({ type: "tool_start", mode: "execute", toolName: "powershell", toolCallId: "t", text: "Get-Date" });
+    now = 117000;
+    feed.runtime({ type: "tool_end", mode: "execute", toolName: "powershell", toolCallId: "t", text: "result" });
+    expect(feed.entries[0]).toMatchObject({ startedAt: 1000, endedAt: 117000, state: "done" });
+    feed.runtime({ type: "tool_end", mode: "execute", toolName: "read", toolCallId: "orphan", text: "late result" });
+    expect(feed.entries[1]!.startedAt).toBeUndefined();
+  });
+
+  it("explains a bounded Agent call without treating it as Goal completion or API quota", () => {
+    const error = formatRunError("Agent budget reached before a final result; the Step may have partial side effects.");
+    expect(error).toContain("回合或资源上限");
+    expect(error).toContain("不等于 Goal 已完成");
+    expect(error).not.toMatch(/余额|API.*额度|自动重试/);
+    expect(formatRunError("Chat response budget reached before a final reply;")).not.toContain("Goal");
+    expect(formatRunError("Agent budget reached before a final result (maxTurnsPerRun=12, turns=12); the Step may have partial side effects.")).toContain("maxTurnsPerRun=12, turns=12");
+    expect(formatRunError("Chat response budget reached before a final reply (maxTokens=5000, tokens=5001); tool side effects may remain.")).toContain("maxTokens=5000, tokens=5001");
   });
 });
 
