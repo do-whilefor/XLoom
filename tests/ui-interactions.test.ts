@@ -102,6 +102,19 @@ describe("TUI layout and input history", () => {
     expect(app.editor.getExpandedText()).toBe("short draft");
   });
 
+  it("drops the header separator before its information rows when only eight rows fit", () => {
+    const app = launch(undefined, 90, 8);
+    app.emit({ type: "notice", message: "FIRST_TRANSCRIPT_LINE" });
+    app.editor.setText("short draft");
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
+      .map(match => [Number(match[1]), plainText(match[2]!).trim()]));
+    expect(rows.get(3)).toContain(process.cwd());
+    expect(rows.get(4)).toContain("FIRST_TRANSCRIPT_LINE");
+    expect(plainText(app.terminal.output)).toContain("short draft");
+  });
+
   it("uses Up/Down for previous/next submissions and restores a multiline unsent draft", () => {
     const app = launch();
     app.submit("第一条信息");

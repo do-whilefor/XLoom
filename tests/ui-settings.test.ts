@@ -92,6 +92,19 @@ function launchAuthDialogs() {
 }
 
 describe("ordinary chat and dual-agent task UI", () => {
+  it("leaves one blank screen row between the header and the first user message", async () => {
+    const app = launch();
+    app.submit("你是什么模型？");
+    await app.settled();
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
+      .map(match => [Number(match[1]), plainText(match[2]!).trim()]));
+    expect(rows.get(3)).toContain(process.cwd());
+    expect(rows.get(4)).toBe("");
+    expect(rows.get(5)).toBe("❯ 你是什么模型？");
+  });
+
   it("renders live tokens in a narrow footer and replaces pending tokens with committed usage once", async () => {
     const app = launch();
     app.terminal.columns = 40;
@@ -246,16 +259,16 @@ describe("Claude-style response timeline", () => {
     emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "click", text: "CLICK_THOUGHT" } });
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "click", text: "" } });
     screen(app);
-    // Empty chat: the three-line header precedes the first thought on row 4.
-    app.terminal.input("\x1b[<0;5;4M");
-    app.terminal.input("\x1b[<0;5;4m");
+    // Empty chat: three header rows and a blank separator precede thought row 5.
+    app.terminal.input("\x1b[<0;5;5M");
+    app.terminal.input("\x1b[<0;5;5m");
     expect(screen(app)).toContain("CLICK_THOUGHT");
     expect(app.clipboard.writeText).not.toHaveBeenCalled();
     expect(app.controller.chat).not.toHaveBeenCalled();
     // Moving while held is selection, not a toggle.
-    app.terminal.input("\x1b[<0;5;4M");
-    app.terminal.input("\x1b[<32;10;4M");
-    app.terminal.input("\x1b[<0;10;4m");
+    app.terminal.input("\x1b[<0;5;5M");
+    app.terminal.input("\x1b[<32;10;5M");
+    app.terminal.input("\x1b[<0;10;5m");
     await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
     expect(screen(app)).toContain("CLICK_THOUGHT");
   });
@@ -341,8 +354,8 @@ describe("Claude-style response timeline", () => {
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "scroll", text: "" } });
     screen(app);
     expect(app.tui.viewportTop).toBeGreaterThan(0);
-    // Header + 40 one-line notices + blank group separator + thought header.
-    const row = 45 - app.tui.viewportTop;
+    // Header + blank separator + 40 notices + blank group separator + thought header.
+    const row = 46 - app.tui.viewportTop;
     app.terminal.input(`\x1b[<0;5;${row}M`);
     app.terminal.input(`\x1b[<0;5;${row}m`);
     expect(screen(app)).toContain("SCROLLED_THOUGHT");

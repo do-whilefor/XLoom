@@ -7,12 +7,13 @@ const workspace = "D:\\工作区\\Xloom";
 const info = { model: "fixture/deepseek-flash", modelName: "deepseek-flash", contextWindow: 1_048_576, authLabel: "API Key", workspace };
 
 describe("pixel X session header", () => {
-  it("renders actual version, model capacity, authentication and workspace in three aligned rows", () => {
+  it("renders three aligned information rows with a blank separator before the transcript", () => {
     const header = new HeaderView(() => info, "ignored");
     expect(header.render(90).map(plainText)).toEqual([
       ` ▀█▄ ▄█▀   Xloom v${XLOOM_VERSION}`,
       "   ███     deepseek-flash[1M] · API Key",
       " ▄█▀ ▀█▄   D:\\工作区\\Xloom",
+      "",
     ]);
     expect(header.render(90).map(plainText).join("\n")).not.toMatch(/Claude|Usage Billing/);
   });
@@ -30,7 +31,8 @@ describe("pixel X session header", () => {
 
   it.each([0, 1, 3, 8, 20, 31, 32, 90])("keeps every row within a %i-column terminal", width => {
     const rows = new HeaderView(() => ({ ...info, modelName: "测试模型".repeat(100), workspace: workspace.repeat(100) }), workspace).render(width);
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
+    expect(rows.at(-1)).toBe("");
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     if (width < 32) expect(rows.map(plainText).join("\n")).not.toContain("▀█▄");
   });

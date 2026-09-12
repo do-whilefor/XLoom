@@ -26,6 +26,7 @@ export class HeaderView implements Component {
     const model = `${compact(info.modelName ?? info.model, 240)}${contextLabel(info.contextWindow)}`;
     const rows = [`Xloom v${XLOOM_VERSION}`, `${model}${info.authLabel ? ` · ${compact(info.authLabel, 80)}` : ""}`, compact(info.workspace ?? this.workspace, 4096)];
     const logo = width >= 32;
-    return rows.map((row, index) => truncateToWidth(`${logo ? ` ${coral(PIXEL_X[index]!)}   ` : ""}${index === 0 ? chalk.bold(row) : chalk.gray(row)}`, Math.max(0, width), width > 3 ? "…" : ""));
+    // Keep the transcript clear of the logo; layout drops this last row first when height is tight.
+    return [...rows.map((row, index) => truncateToWidth(`${logo ? ` ${coral(PIXEL_X[index]!)}   ` : ""}${index === 0 ? chalk.bold(row) : chalk.gray(row)}`, Math.max(0, width), width > 3 ? "…" : "")), ""];
   }
 }
