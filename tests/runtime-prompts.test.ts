@@ -148,7 +148,7 @@ describe("compact built-in prompts", () => {
   });
 
   it.each([
-    ["decide", 760, 2_700, 870], ["execute", 660, 1_650, 580], ["metacog", 960, 2_700, 920],
+    ["decide", 760, 2_820, 900], ["execute", 660, 1_650, 580], ["metacog", 960, 2_820, 950],
   ] as const)("keeps %s instructions compact while retaining a valid JSON output contract", (mode, systemLimit, protocolLimit, tokenLimit) => {
     const request = promptFixture(mode);
     const { systemPrompt, userPrompt } = buildRunPrompt(request);

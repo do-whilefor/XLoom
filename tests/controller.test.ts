@@ -290,6 +290,28 @@ describe("LoopController synthetic protocol flow", () => {
     ]);
   });
 
+  it.each([true, false])("publishes a checkpoint once on retry and avoids repeating its body at settlement (yield: %s)", yielded => {
+    const summary = "One saved synthetic observation; this must appear in the public feed only once.";
+    const test = setup(async request => {
+      if (request.mode === "execute") {
+        const output: Execution = { ...fixtureExecution(request), summary };
+        await request.onCheckpoint!("same-checkpoint", output, standardUsage);
+        await request.onCheckpoint!("same-checkpoint", output, standardUsage);
+        return { ...result({ summary: yielded ? `${summary} Partial checkpoint handed to Decide; Step success remains unverified.` : summary, result: yielded ? "blocked" : "done" }), yielded };
+      }
+      return request.snapshot.completedSteps ? result({ summary: "Fixture ends without a new plan" }) : result(plan());
+    });
+    return test.controller.start().then(() => {
+      const results = test.events.flatMap(event => event.result ? [event.result] : []);
+      expect(results.filter(item => item.summary.includes(summary))).toHaveLength(1);
+      expect(results.filter(item => item.kind === "checkpoint")).toHaveLength(1);
+      expect(results.find(item => item.kind === "transition")?.summary).toContain(yielded ? "尚未验证完成" : "阶段结果见上方");
+      expect(test.store.snapshot().steps[0]!.result).toContain(summary);
+      expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+      expect(test.store.snapshot().facts).toHaveLength(1);
+    });
+  });
+
   it("processes ready updates in order and ignores duplicate updates after a same-batch abandon", async () => {
     const test = setup(request => {
       if (request.mode === "execute") return result(fixtureExecution(request));

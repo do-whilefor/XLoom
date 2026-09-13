@@ -116,7 +116,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const showError = (error: unknown): void => {
     if (closing) return;
     if (interrupted) print("xloom", interrupted === "paused" ? "已暂停；已执行的工具操作保留。" : "已停止；已执行的工具操作保留。");
-    else print("xloom", formatRunError(error), true);
+    else { feed.failure(error); tui.requestRender(); }
   };
   const quit = (): void => {
     if (closing) return;
@@ -239,12 +239,15 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
     else if (event.type === "handoff" && event.handoff) { beginWork(); feed.handoff(event.handoff); }
     else if (event.type === "notice" && event.message) feed.notice(event.message);
-    else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome, event.result.final); }
+    else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome, event.result.final, event.result); }
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {
       feed.breakStream();
       // Routine running/revision updates belong in the status bar, not the transcript.
-      if (snapshot.status !== "running" && controller.getSessionInfo?.().mode !== "chat" && !closing) print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${formatRunError(snapshot.reason)}` : ""}`, snapshot.status === "error");
+      if (snapshot.status !== "running" && controller.getSessionInfo?.().mode !== "chat" && !closing) {
+        if (snapshot.status === "error") feed.failure(snapshot.reason);
+        else print("Loop", `${snapshot.status}${snapshot.reason ? ` · ${formatRunError(snapshot.reason)}` : ""}`);
+      }
     }
     else if (event.type === "session" && !controller.getSessionInfo?.().busy) feed.usageCommitted();
     if ((event.type === "result" || event.type === "state") && snapshot.status !== "running" && feed.working && !active && controller.getSessionInfo?.().mode !== "chat") {
@@ -336,7 +339,10 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   process.once("SIGINT", signalHandler);
   if (!controller.getSessionInfo || controller.getSessionInfo().mode === "run") {
     feed.add("xloom", snapshot.config.goal);
-    if (snapshot.reason && snapshot.status !== "idle") feed.add("恢复状态", snapshot.reason);
+    if (snapshot.reason && snapshot.status !== "idle") {
+      if (snapshot.status === "error") feed.failure(snapshot.reason);
+      else feed.add("恢复状态", snapshot.reason);
+    }
   }
   try {
     tui.start();

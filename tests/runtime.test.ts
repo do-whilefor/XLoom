@@ -107,6 +107,38 @@ function stream(response: string | ((context: Context) => AssistantMessage), see
 }
 
 describe("Pi runtime isolation", () => {
+  it("accepts misplaced combination fields and unused Step IDs in one request while preserving conditions", async () => {
+    const input = await request();
+    input.snapshot.goals = [{ id: "G0", description: "Fixture", parentId: null, status: "active", factIds: [] }];
+    input.snapshot.facts = [{ id: "F-fixture", description: "Fixture", stepId: null, evidenceIds: [] }, { id: "F-counter", description: "Counter fixture", stepId: null, evidenceIds: [] }];
+    const combination = { requires: ["F-fixture"], missing: ["Fixture prerequisite"], scope: "local fixture", stateVersion: "v1", expectedCapability: "Fixture result", counterEvidence: ["F-counter"] };
+    const output = { summary: "Plan new fixture work", steps: [{ id: "S-model-label", goalId: "G0", from: ["F-fixture"], description: "Inspect fixture", successSignal: "Fixture result", evidencePlan: "Fixture evidence", priority: 50, ...combination }] };
+    const seen: Context[] = [], events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(JSON.stringify(output), seen) }) });
+    const result = await runner.run(input);
+    expect((result.output as Decision).steps![0]!.combination).toEqual(combination);
+    expect((result.output as Decision).steps![0]).not.toHaveProperty("id");
+    expect(seen).toHaveLength(1);
+    expect(events.filter(event => event.type === "notice" && event.text.includes("tool-free repair"))).toEqual([]);
+    expect(events.some(event => event.text.startsWith("Decision format normalized"))).toBe(true);
+    expect(JSON.parse(await readFile(join(input.runDir, "output.json"), "utf8")).output).toEqual(result.output);
+  });
+
+  it("gives a single tool-free repair precise Step guidance and retains conflicting values for the model", async () => {
+    const input = await request(); let calls = 0;
+    const invalid = { summary: "Fixture", steps: [{ goalId: "G0", from: [], description: "Fixture", successSignal: "Fixture", evidencePlan: "Fixture", priority: 1, missing: ["RETAIN_TOP_LEVEL"], combination: { missing: ["RETAIN_NESTED"] } }] };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "text", text: JSON.stringify(invalid) }]);
+      expect(context.tools).toEqual([]);
+      const repair = JSON.stringify(context.messages.at(-1));
+      expect(repair).toContain("Omit id"); expect(repair).toContain("inside combination"); expect(repair).toContain("Preserve all prerequisite");
+      expect(JSON.stringify(context.messages)).toContain("RETAIN_TOP_LEVEL"); expect(JSON.stringify(context.messages)).toContain("RETAIN_NESTED");
+      return message([{ type: "text", text: JSON.stringify(invalid) }]);
+    }) }) });
+    await expect(runner.run(input)).rejects.toThrow(/Final response protocol validation failed after one repair.*Conflicting/);
+    expect(calls).toBe(2); await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
   it("creates fresh independent Agents with exact tool capabilities and uses Decide for metacog", async () => {
     const seen: Context[] = [];
     const options: AgentOptions[] = [];

@@ -5,6 +5,7 @@ import { BlackboardStore } from "./store.js";
 import { decisionSchema, usageSchema } from "./schema.js";
 import { pendingStepReviews, projectContext, type ContextProjector } from "./loop/context.js";
 import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
+import { normalizeDecisionInput } from "./loop/decision-input.js";
 import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
 
 /** Code-level extension seams, not dynamically loaded plugins or Agent tools. */
@@ -105,6 +106,8 @@ export class LoopController {
       let result: RunResult | undefined;
       let needsCompletionReview = false;
       let hintsChanged = false;
+      const publishedCheckpoints = new Set<string>();
+      let lastCheckpointSummary: string | undefined;
       try {
         const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
           wikiProjectionError: this.store.wikiProjectionError ?? undefined,
@@ -114,7 +117,11 @@ export class LoopController {
           const committed = this.store.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage);
           request.wikiProjectionError = this.store.wikiProjectionError ?? undefined;
           this.board();
-          this.emit({ type: "result", result: { mode: "execute", summary: committed.reason } });
+          if (!publishedCheckpoints.has(checkpointId)) {
+            publishedCheckpoints.add(checkpointId);
+            lastCheckpointSummary = committed.reason;
+            this.emit({ type: "result", result: { mode: "execute", summary: committed.reason, kind: "checkpoint", runId, checkpointId } });
+          }
           return committed;
         };
         request.context = this.projectContext(request);
@@ -126,7 +133,7 @@ export class LoopController {
         let committed: BoardSnapshot;
         if (mode === "execute") committed = this.store.applyExecution(runId, result.output, result.usage);
         else {
-          const decision = decisionSchema.parse(result.output);
+          const decision = decisionSchema.parse(normalizeDecisionInput(result.output, snapshot).value);
           if (decision.updateSteps) {
             // Finished attempts are history, not pending work to clean up. Keep
             // valid planning operations without rewriting or replaying them.
@@ -163,7 +170,12 @@ export class LoopController {
           committed = this.store.applyDecision(runId, decision, result.usage);
         }
         this.board();
-        this.emit({ type: "result", result: { mode, summary: committed.reason, ...(committed.outcome ? { outcome: committed.outcome } : {}) } });
+        const repeatedCheckpoint = !committed.outcome && committed.reason === lastCheckpointSummary;
+        this.emit({ type: "result", result: { mode, summary: result.yielded && publishedCheckpoints.size
+          ? "阶段结果已保存。\n交给 Decide 继续规划；当前步骤尚未验证完成。"
+          : repeatedCheckpoint ? "本轮执行已结束，阶段结果见上方。"
+          : committed.reason, ...((result.yielded || repeatedCheckpoint) ? { kind: "transition" as const } : {}),
+          ...(committed.outcome ? { outcome: committed.outcome } : {}) } });
       } catch (error) {
         const partial = usageSchema.safeParse(error && typeof error === "object" && "usage" in error ? error.usage : undefined);
         const completedUsage = usageSchema.safeParse(result?.usage);

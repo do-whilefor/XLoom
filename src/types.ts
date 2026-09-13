@@ -128,5 +128,5 @@ export interface LoopEvent {
   type: "state" | "board" | "runtime" | "notice" | "handoff" | "session" | "result";
   snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff;
   /** Public summary of an already-committed proposal, never the raw model response. */
-  result?: { mode: Mode; summary: string; outcome?: Outcome; final?: boolean };
+  result?: { mode: Mode; summary: string; outcome?: Outcome; final?: boolean; kind?: "checkpoint" | "transition"; runId?: string; checkpointId?: string };
 }

@@ -897,6 +897,12 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     const handoffs = test.events.flatMap(event => event.handoff ? [event.handoff] : []);
     expect(handoffs[2]).toMatchObject({ mode: "decide", trigger: { kind: "execution_result" } });
     expect(handoffs[2]?.trigger.reason).toContain("partial checkpoint");
+    const results = test.events.flatMap(event => event.result ? [event.result] : []);
+    const savedSummary = "Partial fixture comparison committed; remaining conditions are still unverified";
+    expect(results.filter(result => result.summary.includes(savedSummary))).toHaveLength(1);
+    expect(results.find(result => result.kind === "checkpoint")).toMatchObject({ summary: savedSummary, checkpointId: "yield-batch" });
+    expect(results.find(result => result.kind === "transition")?.summary).toContain("尚未验证完成");
+    expect(test.controller.snapshot().steps[0]?.result).toContain(savedSummary);
     expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 1, noProgressCount: 0 });
     expect(test.controller.snapshot().steps[0]?.status).toBe("blocked");
     expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);

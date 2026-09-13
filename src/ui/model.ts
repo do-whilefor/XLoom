@@ -4,6 +4,7 @@ import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { retainToolOutput } from "./tool-output.js";
 import type { TaskInfo } from "../workspace.js";
 import { cvssIssues } from "../scoring/cvss.js";
+import { progressNotice, protocolFailure } from "./diagnostics.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -120,6 +121,8 @@ export interface FeedEntry {
 
 export function formatRunError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  const protocol = protocolFailure(message);
+  if (protocol) return protocol;
   if (/^Request timed out\.?$/i.test(message)) return "模型服务请求超时。请检查模型服务或网络后重试；已执行的工具操作不会自动回滚。";
   if (message.startsWith("Chat response timed out;")) return "本次回复达到本地时间限制。请先检查已执行的工具操作，再决定是否重试。";
   const budgetDetail = /^.*?budget reached before[^;(]*\(([^)]*)\)/.exec(message)?.[1];
@@ -194,6 +197,12 @@ export class EventFeed {
   }
 
   notice(text: string, error = false): void {
+    const friendly = !error && progressNotice(text);
+    if (friendly) {
+      this.breakStream();
+      this.append({ kind: "message", label: "xloom", text: friendly, details: plainText(text).slice(0, 9000) });
+      return;
+    }
     if (!error && text.startsWith("Endpoint pricing is unknown;")) {
       if (this.pricingNoticeShown) return;
       this.pricingNoticeShown = true;
@@ -203,8 +212,25 @@ export class EventFeed {
     this.add("xloom", text, error);
   }
 
-  result(mode: Mode | "chat", summary: string, outcome?: string, final = false): void {
+  failure(reason: unknown): void {
     this.endThinking();
+    this.breakStream();
+    const raw = plainText(reason instanceof Error ? reason.message : String(reason));
+    const text = formatRunError(raw);
+    this.append({ kind: "message", label: "Loop", text: text.slice(0, 9000), error: true,
+      ...(text !== raw ? { details: raw.slice(0, 9000) } : {}) });
+  }
+
+  result(mode: Mode | "chat", summary: string, outcome?: string, final = false, source?: LoopEvent["result"]): void {
+    this.endThinking();
+    const key = !final && source?.kind === "checkpoint" && source.runId && source.checkpointId
+      ? `checkpoint:${source.runId}:${source.checkpointId}` : undefined;
+    if (key && this.entries.some(entry => entry.key === key)) return;
+    if (!final && (key || source?.kind === "transition")) {
+      this.breakStream();
+      this.append({ kind: "message", label: roleLabel(mode), text: plainText(summary), ...(key ? { key } : {}) });
+      return;
+    }
     if (!final) {
       this.add(roleLabel(mode), `${outcome ? `${outcome}\n\n` : ""}${summary}`);
       return;
@@ -275,7 +301,7 @@ export class EventFeed {
         this.append(this.stream);
       }
     } else if (event.type === "notice") {
-      this.notice(compact(event.text, 700), event.isError);
+      this.notice(event.text, event.isError);
     } else {
       this.endThinking();
       this.breakStream();

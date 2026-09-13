@@ -14,6 +14,7 @@ import { decisionSchema, executionSchema, formatValidationError } from "../schem
 import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure } from "./continuity.js";
 import { stageWriter } from "./stage.js";
 import { validateDecisionReferences } from "../loop/references.js";
+import { decisionRepairGuidance, normalizeDecisionInput } from "../loop/decision-input.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
 import { createWorkspaceReadTool } from "./read.js";
 import { validateFinalJson } from "./protocol.js";
@@ -353,6 +354,7 @@ export class PiRunner implements AgentRunner {
       }
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
       if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
+      let normalizationChanges: string[] = [];
       const validateText = (text: string) => validateFinalJson(redact(text), parsed => {
         if (request.mode === "execute") {
           const validated = executionSchema.safeParse(parsed);
@@ -362,9 +364,11 @@ export class PiRunner implements AgentRunner {
           validateCvssExecution(stage?.snapshot ?? request.snapshot, validated.data);
           return validated.data;
         }
-        const validated = decisionSchema.safeParse(parsed);
+        const normalized = normalizeDecisionInput(parsed, request.snapshot);
+        const validated = decisionSchema.safeParse(normalized.value);
         if (!validated.success) throw new Error(formatValidationError(validated.error));
         validateDecisionReferences(request.snapshot, validated.data);
+        normalizationChanges = normalized.changes;
         return validated.data;
       });
       const validate = () => {
@@ -381,7 +385,7 @@ export class PiRunner implements AgentRunner {
       let output: unknown;
       try { output = validate(); }
       catch (error) {
-        if (!canRequest()) throw error;
+        if (!canRequest()) throw new Error(`Final response protocol validation failed: ${error instanceof Error ? error.message : String(error)}`);
         const reason = error instanceof Error ? error.message : String(error);
         emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape or reference; requesting one tool-free repair using existing results." });
         agent.state.tools = [];
@@ -390,13 +394,15 @@ export class PiRunner implements AgentRunner {
         completingJson = false;
         responseText = undefined;
         jsonBaseMessages = undefined;
-        await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, committed IDs, findings, or completion. New Goal IDs must be unused. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
+        await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}.${request.mode !== "execute" ? decisionRepairGuidance(reason) : ""} Tools are unavailable. Use only observations already present; do not invent evidence, files, committed IDs, findings, or completion. New Goal IDs must be unused. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
         await recoverResponse();
         request.signal.throwIfAborted();
         if (budget.error) throw new Error(budget.error);
         if (finalMessage?.stopReason !== "stop") throw new Error(finalMessage?.errorMessage ?? "Protocol repair did not finish.");
-        output = validate();
+        try { output = validate(); }
+        catch (error) { throw new Error(`Final response protocol validation failed after one repair: ${error instanceof Error ? error.message : String(error)}`); }
       }
+      if (normalizationChanges.length) emit({ type: "notice", mode: request.mode, text: `Decision format normalized without another model request: ${normalizationChanges.join("; ")}` });
       await writeFile(join(request.runDir, "output.json"), JSON.stringify({ output, usage }, null, 2), { flag: "wx" });
       return { output, usage };
     } catch (error) {

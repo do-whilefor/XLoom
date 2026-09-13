@@ -26,6 +26,26 @@ describe("readable assistant prose", () => {
     expect(formatted.replace(/\s+/g, "")).toBe(text.replace(/\s+/g, ""));
   });
 
+  it("formats dense resource summaries with placeholders, inline code and quoted strings without changing tokens", () => {
+    const text = "Extracted the synthetic resources referenced by the local fixture and recorded their metadata. "
+      + "The fixture client describes GET /fixture/search?name=\\<name> and an internal route with a deliberately synthetic header. "
+      + "Its comments mention 'mobile fixture', `VALUE=one; two. three` and {fixture,session}; all recorded conditions still require review. "
+      + "The original fixture bytes were retained locally, with no statement about a live target or verified impact.";
+    const formatted = readableProse(text);
+    expect(formatted).toContain("\n\n");
+    expect(formatted.replace(/\s+/g, " ")).toBe(text);
+    expect(formatted).toContain("`VALUE=one; two. three`");
+    expect(formatted).toContain("'mobile fixture'"); expect(formatted).toContain("\\<name>");
+    const feed = new EventFeed(); feed.result("execute", text);
+    const rows = new FeedView(feed).render(90).map(row => plainText(row).trimEnd());
+    expect(rows).toContain(""); expect(feed.entries[0]!.text).toBe(text);
+  });
+
+  it.each(["<div>", "<span>html</span> ", "`unclosed ", "'unclosed "])("keeps authored markup or unfinished spans intact: %s", prefix => {
+    const text = prefix + dense;
+    expect(readableProse(text)).toBe(text);
+  });
+
   it("formats completed narration and results without mutating feed, user input or streaming content", () => {
     const feed = new EventFeed();
     feed.result("execute", dense);
