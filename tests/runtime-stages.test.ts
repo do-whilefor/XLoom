@@ -1,7 +1,7 @@
 import { taskDirectory } from "../src/workspace.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import { defaultConfig } from "../src/config.js";
@@ -20,7 +20,7 @@ const model: Model<"openai-completions"> = {
   id: "offline", name: "offline", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
   reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64_000, maxTokens: 2_000,
 };
-interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string }
+interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string; wiki?: { indexFile: string; authoringGuide?: string } }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
 
@@ -121,6 +121,59 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("authors a sourced Wiki through checkpoint and final output, then reads it in a fresh role with existing tools", async () => {
+    let factId = "", reviewed = false;
+    const note = (id: string, title: string) => ({ id: "WK-flow", title, blocks: [{ id: "B-context", title: "Scope and gap",
+      text: "Synthetic observation only; the consumer remains unverified.", sources: [{ kind: "fact" as const, id }] }] });
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (run.contexts.length === 1) return message([{ type: "toolCall", id: "wiki-guide", name: "read", arguments: { path: input.wiki!.authoringGuide } }], "toolUse");
+        if (run.contexts.length === 2) {
+          expect(toolText(context)).toContain("wikiPages");
+          return write("wiki-raw", join(input.artifacts, "fixture.txt"), artifactBody);
+        }
+        if (run.contexts.length === 3) return write("wiki-checkpoint", input.checkpointFile!, JSON.stringify({ id: "wiki-batch", execution: {
+          summary: "Synthetic observation and explanation", result: "done", evidence: [{ ref: "e", path: join(input.artifacts, "fixture.txt"), description: "Synthetic fixture" }],
+          facts: [{ ref: "f", description: "Observed synthetic label", evidenceRefs: ["e"] }], wikiPages: [note("f", "Initial explanation")],
+        } }));
+        if (run.contexts.length === 4) {
+          const checkpoint = JSON.parse(toolText(context));
+          expect(checkpoint.wikiPages).toEqual([{ id: "WK-flow", revision: 1 }]);
+          factId = checkpoint.facts[0].id;
+          const proposal = note(factId, "Revised explanation");
+          proposal.blocks.push({ ...proposal.blocks[0]!, id: "B-unsupported", sources: [{ kind: "fact", id: "F-missing" }] });
+          return json({ summary: "Revision with one invalid source", result: "no_progress", wikiPages: [proposal] });
+        }
+        expect(context.tools).toEqual([]);
+        expect(JSON.stringify(context.messages.at(-1))).toContain("wikiPages[0].blocks[1].sources[0]");
+        expect(JSON.stringify(context.messages.at(-1))).not.toContain(`Unknown fact \\"${factId}`);
+        return json({ summary: "Revised only the sourced explanation", result: "no_progress", wikiPages: [note(factId, "Revised explanation")] });
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      if (reviewed) return json({ summary: "Retain the unverified fixture state" });
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "wiki-index", name: "read", arguments: { path: input.wiki!.indexFile } }], "toolUse");
+      if (run.contexts.length === 2) {
+        const file = toolText(context).match(/\(pages\/(note-[a-f0-9]+\.md)\)/)![1]!;
+        return message([{ type: "toolCall", id: "wiki-note", name: "read", arguments: { path: join(dirname(input.wiki!.indexFile), "pages", file) } }], "toolUse");
+      }
+      expect(toolText(context)).toContain("Revised explanation");
+      expect(toolText(context)).toContain("consumer remains unverified");
+      reviewed = true;
+      return json({ summary: "Read the sourced explanation; no impact conclusion" });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", outcome: null, completedSteps: 1 });
+    expect(board.wikiPages![0]).toMatchObject({ id: "WK-flow", revision: 2, history: [{ revision: 1 }] });
+    expect(board.wikiPages![0]!.blocks[0]!.sources).toEqual([{ kind: "fact", id: factId }]);
+    expect(board.evidence).toHaveLength(1); expect(board.facts).toHaveLength(1); expect(board.findings).toEqual([]);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId)).toEqual(["wiki-guide", "wiki-raw", "wiki-checkpoint", "wiki-index", "wiki-note"]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it.each(["closed_rating", "lead_promotion"] as const)("repairs %s with the bad reference in one request before Store commit", async kind => {
     let corrected = false;
     const followup = "Validate the still-unverified synthetic lead";

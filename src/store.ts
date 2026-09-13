@@ -9,6 +9,8 @@ import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
 import { findingReviewErrors } from "./loop/reviews.js";
 import { evidenceNavigationRecords } from "./loop/finding-context.js";
+import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
+import { wikiMarker, writeWiki } from "./wiki/projection.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -28,6 +30,7 @@ export class BlackboardStore {
   readonly dataDir: string;
   readonly projectionPath: string;
   projectionError: string | null = null;
+  wikiProjectionError: string | null = null;
   private db!: DatabaseSync;
   private lockPath: string;
   private lockToken = randomUUID();
@@ -312,12 +315,13 @@ export class BlackboardStore {
       assert(run.mode === "execute", "Wrong run channel.");
       const step = board.steps.find(item => item.id === run.stepId);
       assert(step?.status === "claimed" && step.runId === runId, "Step claim does not match run.");
-      const newProgress = this.applyExecutionRecords(board, runId, step, output);
-      const progress = newProgress || this.accountedRun(runId).progressed;
+      const records = this.applyExecutionRecords(board, runId, step, output);
+      const progress = records.progress || this.accountedRun(runId).progressed;
       step.status = output.result === "blocked" ? "blocked" : progress ? "done" : "no_progress";
       step.result = output.summary; step.leaseUntil = null;
       board.completedSteps++; board.noProgressCount = progress ? 0 : board.noProgressCount + 1;
       board.reason = output.summary;
+      applyWikiPages(board, records.wikiPages, ref => ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
     });
   }
 
@@ -339,17 +343,18 @@ export class BlackboardStore {
       const step = board.steps.find(item => item.id === run.stepId);
       assert(step?.status === "claimed" && step.runId === runId, "Step claim does not match run.");
       this.accountUsage(board, runId, cumulativeUsage, true);
-      const progress = this.applyExecutionRecords(board, runId, step, output);
-      if (progress) {
+      const records = this.applyExecutionRecords(board, runId, step, output);
+      if (records.progress) {
         this.db.prepare("UPDATE run_progress SET progressed=1 WHERE runId=?").run(runId);
         board.noProgressCount = 0;
       }
       board.reason = output.summary;
+      applyWikiPages(board, records.wikiPages, ref => ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       this.db.prepare("INSERT INTO execution_checkpoints VALUES (?,?,?)").run(runId, checkpointId, payloadHash);
     });
   }
 
-  private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): boolean {
+  private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): { progress: boolean; wikiPages: WikiPageProposal[] } {
       const before = legacyProgressMarkers(board);
       const evidenceMap = new Map<string, string>();
       const factMap = new Map<string, string>();
@@ -423,7 +428,10 @@ export class BlackboardStore {
           if (proposal.outcome === "supports" || proposal.outcome === "refutes") attemptProgress = true;
         }
       }
-      return output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker));
+      const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks.map(block => ({ ...block,
+        sources: block.sources.map(ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id })),
+      })) }));
+      return { progress: output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker)), wikiPages };
   }
 
   private ingestEvidence(runId: string, stepId: string, source: string, description: string): Evidence {
@@ -433,6 +441,7 @@ export class BlackboardStore {
     assert(inside(artifactDir, canonical), "Evidence must be a regular file inside this run's artifacts directory.");
     assert(statSync(canonical).isFile() && statSync(canonical).size <= 10 * 1024 * 1024, "Evidence must be a regular file at most 10 MiB.");
     const data = readFileSync(canonical);
+    assert(!data.toString("utf8").trimStart().startsWith(wikiMarker), "Generated Wiki pages are derived explanations, not original evidence. Reference their underlying Facts/Evidence instead.");
     assert(data.length > 0 && data.length <= 10 * 1024 * 1024, "Evidence must contain 1 byte–10 MiB.");
     const sha256 = hash(data);
     const targetDir = path.join(this.dataDir, "evidence");
@@ -495,6 +504,8 @@ export class BlackboardStore {
       renameSync(temporary, file);
       this.projectionError = null;
     } catch (error) { this.projectionError = (error as Error).message; }
+    try { writeWiki(this.snapshot(), this.dataDir, this.workspace); this.wikiProjectionError = null; }
+    catch (error) { this.wikiProjectionError = (error as Error).message; }
   }
 }
 
@@ -504,5 +515,6 @@ export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspac
   rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
   if (board.findings.length) rows.push("## Evidence navigation index", "", "Registered references only; not proof of support or current applicability.", "", "```jsonl",
     ...evidenceNavigationRecords(board).map(record => JSON.stringify(record)), "```", "");
+  rows.push("## Research Wiki", "", `[Wiki index](<${path.join(dataDir, "wiki", "index.md").replaceAll("\\", "/")}>) — generated navigation and sourced explanations; not original evidence.`, "");
   return rows.join("\n");
 }

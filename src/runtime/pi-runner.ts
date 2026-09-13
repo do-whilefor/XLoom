@@ -17,6 +17,7 @@ import { validateDecisionReferences } from "../loop/references.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
 import { createWorkspaceReadTool } from "./read.js";
 import { validateFinalJson } from "./protocol.js";
+import { validateWikiReferences } from "../wiki/model.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -354,6 +355,7 @@ export class PiRunner implements AgentRunner {
         if (request.mode === "execute") {
           const validated = executionSchema.safeParse(parsed);
           if (!validated.success) throw new Error(formatValidationError(validated.error));
+          validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
           return validated.data;
         }
         const validated = decisionSchema.safeParse(parsed);

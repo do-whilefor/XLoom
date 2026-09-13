@@ -31,6 +31,7 @@ export class LoopController {
   private board(type: "board" | "state" = "board"): void {
     this.emit({ type, snapshot: this.snapshot() });
     if (this.store.projectionError) this.emit({ type: "notice", message: `Blackboard view could not be updated: ${this.store.projectionError}` });
+    if (this.store.wikiProjectionError) this.emit({ type: "notice", message: `Wiki view could not be updated; committed state was retained: ${this.store.wikiProjectionError}` });
   }
   private notice(message: string): void { this.emit({ type: "notice", message }); }
   hint(content: string): void { this.store.hint(content); this.board(); this.notice("Hint saved to blackboard; read at the next fresh planning boundary."); }
@@ -106,10 +107,12 @@ export class LoopController {
       let hintsChanged = false;
       try {
         const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
+          wikiProjectionError: this.store.wikiProjectionError ?? undefined,
           signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
         if (mode === "execute") request.onCheckpoint = (checkpointId, output, cumulativeUsage) => {
           cancellation.signal.throwIfAborted();
           const committed = this.store.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage);
+          request.wikiProjectionError = this.store.wikiProjectionError ?? undefined;
           this.board();
           this.emit({ type: "result", result: { mode: "execute", summary: committed.reason } });
           return committed;

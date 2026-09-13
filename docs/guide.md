@@ -223,6 +223,8 @@ checkpoint 在覆盖文件前先检查 JSON 语法与字段结构；检查失败
 
 Finding 审查的状态规则也在同一次纠正前检查，并与 Store 共用校验：`closed` 必须 `unrated`；只有 `technical_hit` / `impact_verified` 能进入影响验证，且需评级、影响字段、所属 PoC 和有证据的事实。已有大量证据不自动把 lead 升级为 technical_hit；应暂缓审查并由 Execute 沿原 key 完成技术验证。诊断同时报告字段位置与非法引用，避免修正 ID 后才在提交时暴露状态错误。文件哈希仍在 Store 内校验，不为纠正而重跑工具或改写历史。
 
+研究任务还会生成 `wiki/index.md` 及按记录组织的页面。Execute 可按需读取提示中的 Wiki 编写说明，用原有输出或 checkpoint 保存带来源的解释页；来源修订后显示待复核，旧解释保留。Wiki 编辑本身不增加研究进展、不验证 Finding。普通聊天不参与，详见 [Wiki 与来源关系](wiki.md)。
+
 失败 Step 的公开视图可带有 `recovery`，仅指向旧调用的 `artifacts` 目录，并标记为未验证。即使工具写入后模型报错、结果尚未入库，Decide 也可安排新 Step 检查残留文件；它们不会自动成为 Fact / Evidence，必须先检查并按正常证据流程提交。这个引用不包含旧聊天或运行日志。
 
 升级旧黑板时，若旧任务尚未完成却提前关闭了根 Goal，会恢复根 Goal 为 active；旧任务标记 completed 但根 Goal 没有 satisfied 的，会改为 paused 并提示重新复核。原结论记录进审计，证据、事实、线索和计数保留；迁移不会自动调用模型或重放步骤。

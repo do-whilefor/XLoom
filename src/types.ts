@@ -1,5 +1,6 @@
 import type { Api } from "@earendil-works/pi-ai";
 import type { BlackboardContext } from "./loop/context.js";
+import type { WikiPage, WikiPageProposal } from "./wiki/model.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
@@ -69,6 +70,7 @@ export interface BoardSnapshot {
   goals: Goal[]; facts: Fact[]; steps: Step[]; findings: Finding[]; evidence: Evidence[]; hints: Hint[];
   usage: Usage; completedSteps: number; noProgressCount: number; lastMetaStep: number; lastMetaRevision: number; elapsedMs?: number;
   attempts?: Attempt[];
+  wikiPages?: WikiPage[];
 }
 export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[] }
 export interface Decision {
@@ -82,6 +84,7 @@ export interface Decision {
 }
 export interface Execution {
   summary: string; result: "done" | "no_progress" | "blocked";
+  wikiPages?: WikiPageProposal[];
   attempts?: AttemptProposal[];
   evidence?: { ref: string; path: string; description: string }[];
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];
@@ -93,6 +96,7 @@ export interface RunRequest {
   context?: BlackboardContext;
   trigger?: OuterLoopTrigger;
   blackboardPath?: string;
+  wikiProjectionError?: string;
   onCheckpoint?: (checkpointId: string, output: unknown, cumulativeUsage: Usage) => Promise<BoardSnapshot> | BoardSnapshot;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }

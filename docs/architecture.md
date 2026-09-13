@@ -56,6 +56,8 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 当前角色选中的 Finding 另有 `findingContext` 导航：复用正式证据关联，列出明确引用关系产生的未关联候选、事实替代、声明反证、条件和相关尝试。补充索引按 ID 去重，不复制原始正文；省略项可通过现有 `blackboard.md` 的完整引用索引补查。它不自动关联证据、评定影响或保存第二份状态，详见 [Finding 证据视图](finding-context.md)。
 
+任务 Wiki 从同一 SQLite 黑板生成自动记录页，Execute 可通过现有最终输出 / checkpoint 提交 `wikiPages` 作者解释。稳定页面与块 ID、来源签名及历史保存在原黑板中；来源变化只产生页面待复核标记。研究调用拿到 Wiki 首页和按需编写说明的路径，普通聊天不加载；没有引入检索引擎或额外 Agent / 工具。见 [Wiki 与来源关系](wiki.md)。
+
 `pendingStepReviews(snapshot)` 找出 ready Step 对已修正事实的直接或间接依赖，包括来源链和组合反证。公开 `projection.stepReviews` 给出旧事实与替代事实 ID；Policy 不选取这些旧计划，Controller 先交 fresh Decide 重新规划。若复核后仍只有失效计划，则保留未完成状态并暂停，不能因该队列为空而宣称 Goal 完成。
 
 失败 Step 可带公开 `recovery`，只提供历史产物目录和 `evidenceStatus: unverified`，不暴露聊天日志入口。新 Decide 可将检查该目录作为新 Step；恢复引用本身不能充当证据。这样既保留写入后失败的检查路径，也不自动重放旧操作。

@@ -19,6 +19,7 @@ export function stagePath(request: RunRequest): string { return join(request.run
 export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: RunRequest, usage: Usage, redact: (value: string) => string = value => value) {
   let yielded = false;
   let summary = "";
+  let snapshot = request.snapshot;
   const clean = (value: unknown): unknown => {
     if (typeof value === "string") return redact(value);
     if (Array.isArray(value)) return value.map(clean);
@@ -28,6 +29,7 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
   return {
     get yielded() { return yielded; },
     get summary() { return summary; },
+    get snapshot() { return snapshot; },
     tool: {
       ...tool,
       async execute(...args: Parameters<typeof tool.execute>) {
@@ -57,6 +59,7 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
           throw new Error("Checkpoint file changed after write; this proposal was not committed. Inspect the file before submitting again with write.");
         }
         const board = await request.onCheckpoint(submission.id, submission.execution, { ...usage });
+        snapshot = board;
         yielded = submission.yieldToDecide ?? false;
         summary = submission.execution.summary;
         return { ...result, content: [{ type: "text" as const, text: JSON.stringify({
@@ -66,6 +69,8 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
           facts: board.facts.map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
           evidence: board.evidence.map(item => ({ id: item.id, path: evidencePath(item, dirname(dirname(request.runDir)), request.workspace), description: item.description })),
           findings: board.findings.map(({ id, key, target }) => ({ id, key, target })),
+          ...(board.wikiPages?.length ? { wikiPages: board.wikiPages.map(({ id, revision }) => ({ id, revision })) } : {}),
+          ...(request.wikiProjectionError ? { wikiProjection: { status: "unavailable", reason: request.wikiProjectionError } } : {}),
           instruction: yielded ? "Return control to Decide; do not execute further tools." : "Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
         }) }] };
       },

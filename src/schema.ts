@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { stepMethodIdsSchema } from "./methods.js";
+import { wikiPagesSchema } from "./wiki/model.js";
 
 const text = (max = 8_000) => z.string().trim().min(1).max(max).refine((value) => !value.includes("\0"), "Must not contain NUL characters");
 const id = text(256);
@@ -123,6 +124,7 @@ export const decisionSchema = z.object({
 export const executionSchema = z.object({
   summary: text(),
   result: z.enum(["done", "no_progress", "blocked"]),
+  wikiPages: wikiPagesSchema.optional(),
   attempts: z.array(attemptSchema).max(128).optional(),
   evidence: z.array(z.object({ ref: id, path: text(4_096), description: text() }).strict()).max(128).optional(),
   facts: z.array(z.object({
