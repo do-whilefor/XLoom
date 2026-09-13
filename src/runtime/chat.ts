@@ -158,20 +158,35 @@ export class ChatSession {
       agent.state.messages = await compactMessages(agent.state.messages);
       await agent.prompt(redact(request.text));
       signal.throwIfAborted();
-      // One transient provider failure may resume from the same private transcript.
-      // Removing the failed assistant tail leaves completed tool results intact;
-      // Agent.continue requests only a model response and never replays old tools.
-      if (isTransientModelFailure(finalMessage) && canRequest() && !agent.state.pendingToolCalls.size) {
-        agent.state.messages = recoverableMessages(agent.state.messages);
+      let recoveredTransient = false;
+      while (!agent.state.pendingToolCalls.size) {
+        const truncated = finalMessage?.stopReason === "length";
+        const transient = !recoveredTransient && isTransientModelFailure(finalMessage);
+        if (!truncated && !transient) break;
+        if (!canRequest()) {
+          if (truncated) requireRequest();
+          break;
+        }
+        // Keep truncated text/thinking and completed tool results in history.
+        // Only transient failures discard their failed assistant tail, once.
+        if (transient) {
+          recoveredTransient = true;
+          agent.state.messages = recoverableMessages(agent.state.messages);
+        }
         agent.state.messages = await compactMessages(agent.state.messages);
         requireRequest();
         if (request.limits.maxTurnsPerRun !== null && modelRequests === request.limits.maxTurnsPerRun - 1) {
           agent.state.tools = [];
           agent.state.systemPrompt += "\nThis is the final allowed model request. Report only completed results; no tools are available.";
         }
-        emit({ type: "notice", mode: "chat", text: "The model connection failed temporarily. Continuing once from completed private results without replaying tools." });
+        emit({ type: "notice", mode: "chat", text: truncated
+          ? "The provider stopped at its response output limit. Continuing the remaining reply from private history without replaying completed tools."
+          : "The model connection failed temporarily. Continuing once from completed private results without replaying tools." });
         finalMessage = undefined;
-        await agent.continue();
+        // Pi cannot continue from an assistant tail. A short follow-up retains
+        // the partial answer and requests only its remainder, not a replacement.
+        if (truncated) await agent.prompt("The previous response reached the provider's output limit. Continue where it stopped: output only the remaining content, without repeating earlier text or rerunning completed tools.");
+        else await agent.continue();
         signal.throwIfAborted();
       }
       if (budget.error) throw new Error(budget.error);
