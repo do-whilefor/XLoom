@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { AssistantMessageEventStream, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
-import { CONTEXT_SUMMARY_MARKER, createContextSummarizer, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint,
+import { CONTEXT_SUMMARY_MARKER, createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint,
   type CheckpointIdentity, type CheckpointState } from "../src/runtime/continuity.js";
 
 const model: Model<"openai-completions"> = {
@@ -32,6 +32,29 @@ async function location() {
   const state: CheckpointState = { identity, messages: [user(), ...batch("completed")], pendingToolCalls: [], usage: { input: 35, output: 10, cost: 0.02 } };
   return { directory, path: join(directory, "private-checkpoint.json"), identity, state };
 }
+
+describe("provider failure classification", () => {
+  it.each(["Anthropic stream ended before message_stop", "Request timed out."])("recognizes the provider's incomplete response: %s", errorMessage => {
+    expect(isTransientModelFailure({ ...assistant([], "error"), errorMessage })).toBe(true);
+    for (const stopReason of ["stop", "length", "toolUse", "aborted"] as const) {
+      expect(isTransientModelFailure({ ...assistant([], stopReason), errorMessage })).toBe(false);
+    }
+  });
+
+  it.each(["401 Unauthorized", "403 Forbidden", "Invalid API key", "context window exceeded", "too many tokens", "Request aborted", "Request cancelled"])("preserves deterministic failure precedence: %s", cause => {
+    for (const failure of ["Anthropic stream ended before message_stop", "Request timed out."]) {
+      expect(isTransientModelFailure({ ...assistant([], "error"), errorMessage: `${cause}: ${failure}` })).toBe(false);
+    }
+  });
+
+  it("does not treat arbitrary early termination or missing diagnostics as a transient model failure", () => {
+    for (const errorMessage of ["", "Stream ended", "Missing message_stop handler", "Agent stopped without a complete result: length"]) {
+      expect(isTransientModelFailure({ ...assistant([], "error"), errorMessage })).toBe(false);
+    }
+    expect(isTransientModelFailure(assistant([], "error"))).toBe(false);
+    expect(isTransientModelFailure(undefined)).toBe(false);
+  });
+});
 
 describe("long-running context maintenance", () => {
   it("does not summarize below model capacity pressure", async () => {

@@ -119,6 +119,46 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it.each([false, true])("recovers an Anthropic stream EOF after a completed write without committing its failed JSON tail (complete JSON: %s)", async completeJson => {
+    const interruptedMarker = "UNCOMMITTED_INTERRUPTED_FIXTURE_RECORD";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      if (run.contexts.length === 1) return write("artifact-once", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) {
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "artifact-once", isError: false });
+        return { ...message([
+          { type: "thinking", thinking: "Synthetic interrupted private reasoning fixture" },
+          { type: "text", text: completeJson ? JSON.stringify({ summary: interruptedMarker, result: "no_progress" })
+            : `{"summary":"${interruptedMarker}","result":"done","facts":[` },
+        ], "error"), errorMessage: "Anthropic stream ended before message_stop" };
+      }
+      expect(run.contexts).toHaveLength(3);
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "artifact-once", isError: false });
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(JSON.stringify(context.messages)).not.toContain(interruptedMarker);
+      expect(JSON.stringify(context.messages)).not.toContain("Anthropic stream ended before message_stop");
+      expect(context.messages.filter(entry => entry.role === "toolResult" && entry.toolCallId === "artifact-once")).toHaveLength(1);
+      return json({ summary: "Retain the completed synthetic artifact after stream recovery", result: "done",
+        evidence: [{ ref: "fixture-e", path: join(input.artifacts, "fixture.txt"), description: "Synthetic artifact written before the interrupted stream" }],
+        facts: [{ ref: "fixture-f", description: "Synthetic fixture records allowed control and denied changed-object labels", evidenceRefs: ["fixture-e"] }],
+      });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 1 });
+    expect(board.steps[0]).toMatchObject({ status: "done", attempts: 1 });
+    expect(board.facts).toHaveLength(1);
+    expect(board.evidence).toHaveLength(1);
+    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(JSON.stringify(board)).not.toContain(interruptedMarker);
+    expect(test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : [])).toEqual(["artifact-once"]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("Transient model failure"))).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(0);
+    expect(test.store.events().filter(event => event.kind === "execution")).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
   it("continues metacog after a thinking-only length stop using its completed read, then executes the new plan", async () => {
     let factId = "";
     let recoveredPlans = 0;

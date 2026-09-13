@@ -139,13 +139,13 @@ describe("same-session transient chat continuation", () => {
     expect(JSON.stringify(contexts[1].messages)).not.toContain("previous private answer");
   });
 
-  it("retries only the model request after a completed write and retains its durable result exactly once", async () => {
+  it.each(["Stream error: error decoding response body", "Anthropic stream ended before message_stop", "Request timed out."])("recovers %s after a completed write and retains its durable result exactly once", async errorMessage => {
     const { input, events, directory } = await request();
     let requests = 0;
     const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(context => {
       requests++;
       if (requests === 1) return assistant([{ type: "toolCall", id: "write-once", name: "write", arguments: { path: "result.txt", content: "completed exactly once" } }], "toolUse");
-      if (requests === 2) return { ...assistant([{ type: "text", text: "incomplete transient response" }], "error"), errorMessage: "Stream error: error decoding response body" };
+      if (requests === 2) return { ...assistant([{ type: "text", text: "incomplete transient response" }], "error"), errorMessage };
       expect(context.messages.filter(message => message.role === "toolResult")).toHaveLength(1);
       expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "write-once", isError: false });
       expect(JSON.stringify(context.messages)).not.toContain("incomplete transient response");
@@ -159,15 +159,16 @@ describe("same-session transient chat continuation", () => {
     expect(await readdir(directory)).toEqual(["result.txt"]);
   });
 
-  it("makes at most one automatic transient retry per send and retains both attempts' usage", async () => {
+  it.each(["503 temporarily unavailable", "Anthropic stream ended before message_stop", "Request timed out."])("does not repeatedly retry %s and retains both attempts' usage", async errorMessage => {
     const { input } = await request();
     let requests = 0;
     const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(() => {
       requests++;
-      return { ...assistant([], "error"), errorMessage: "503 temporarily unavailable" };
+      return { ...assistant([], "error"), errorMessage };
     }) }) });
     const failure = await session.send(input).catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
+    expect(failure.message).toContain(errorMessage);
     expect(requests).toBe(2);
     expect(failure.usage).toMatchObject({ input: 6, output: 2 });
   });

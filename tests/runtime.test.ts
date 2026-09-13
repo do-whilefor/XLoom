@@ -247,7 +247,7 @@ describe("Pi runtime isolation", () => {
     await expect(readFile(join(input.workspace, "forbidden.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("continues a transient model failure from durable complete tool results without replay", async () => {
+  it.each(["503 upstream temporarily unavailable", "Anthropic stream ended before message_stop", "Request timed out."])("continues %s from durable complete tool results without replay", async errorMessage => {
     const input = await request("execute");
     input.snapshot.config.limits.maxTurnsPerRun = null;
     const events: RuntimeEvent[] = [];
@@ -255,10 +255,10 @@ describe("Pi runtime isolation", () => {
     let calls = 0;
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
       if (++calls === 1) return message([{ type: "thinking", thinking: "PRIVATE REASONING" }, { type: "toolCall", id: "once", name: "write", arguments: { path: "once.txt", content: "one write" } }], "toolUse");
-      if (calls === 2) return { ...message([], "error"), errorMessage: "503 upstream temporarily unavailable" };
+      if (calls === 2) return { ...message([], "error"), errorMessage };
       expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "once", isError: false });
       expect(JSON.stringify(context.messages)).not.toContain("PRIVATE REASONING");
-      expect(JSON.stringify(context.messages)).not.toContain("503 upstream");
+      expect(JSON.stringify(context.messages)).not.toContain(errorMessage);
       return message([{ type: "text", text: '{"summary":"Retained prior observation","result":"no_progress"}' }]);
     }) }) });
     const result = await runner.run(input);
@@ -268,6 +268,39 @@ describe("Pi runtime isolation", () => {
     const checkpoint = JSON.parse(await readFile(join(input.runDir, "continuation.json"), "utf8"));
     expect(checkpoint).toMatchObject({ pendingToolCalls: [], usage: result.usage, identity: { role: "execute", stepId: "s1" } });
     expect(JSON.stringify(checkpoint)).not.toContain("PRIVATE REASONING");
+  });
+
+  it.each(["Anthropic stream ended before message_stop", "Request timed out."])("rejects a second %s even when the interrupted JSON looks complete", async errorMessage => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return { ...message([{ type: "text", text: '{"summary":"Unverified interrupted response"}' }], "error"), errorMessage };
+    }) }) });
+    const failure = await runner.run(input).catch(error => error);
+    expect(failure).toBeInstanceOf(RuntimeRunError);
+    expect(failure.message).toContain(errorMessage);
+    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+    expect(calls).toBe(2);
+    await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not replay uncertain tool calls from an incomplete Anthropic stream", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return { ...message([{ type: "toolCall", id: "uncertain", name: "write", arguments: { path: "must-not-exist.txt", content: "incomplete response" } }], "error"),
+        errorMessage: "Anthropic stream ended before message_stop" };
+    }) }) });
+    await expect(runner.run(input)).rejects.toThrow("unfinished tools");
+    expect(calls).toBe(1);
+    expect(events.filter(event => event.type === "tool_start")).toHaveLength(0);
+    await expect(readFile(join(input.workspace, "must-not-exist.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each(["authentication", "turn-budget", "token-budget", "cancellation"])("does not retry after %s", async reason => {
@@ -591,6 +624,24 @@ describe("Pi runtime isolation", () => {
     expect(result.output).toEqual({ summary: "Resumed fixture review" });
     expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08 });
     expect(calls).toBe(4);
+  });
+
+  it.each(["Anthropic stream ended before message_stop", "Request timed out."])("discards the failed JSON suffix on %s while retaining a length prefix", async errorMessage => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "text", text: '{"summary":"Retained ' }], "length");
+      expect(context.tools).toEqual([]);
+      if (calls === 2) return { ...message([{ type: "text", text: 'FAILED_SUFFIX"}' }], "error"), errorMessage };
+      expect(JSON.stringify(context.messages)).not.toContain("FAILED_SUFFIX");
+      expect(context.messages.some(entry => entry.role === "assistant" && entry.content.some(part => part.type === "text" && part.text === '{"summary":"Retained '))).toBe(true);
+      return message([{ type: "text", text: 'validated suffix"}' }]);
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual({ summary: "Retained validated suffix" });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(calls).toBe(3);
   });
 
   it("redacts JSON-encoded credentials across single-character streaming chunks", async () => {
