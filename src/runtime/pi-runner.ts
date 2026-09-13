@@ -357,7 +357,7 @@ export class PiRunner implements AgentRunner {
           const validated = executionSchema.safeParse(parsed);
           if (!validated.success) throw new Error(formatValidationError(validated.error));
           validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
-          validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data);
+          validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);
           return validated.data;
         }
         const validated = decisionSchema.safeParse(parsed);

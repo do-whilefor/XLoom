@@ -163,6 +163,7 @@ export function projectStep(step: Step, runsDir?: string): ContextStep {
     successSignal: step.successSignal, evidencePlan: step.evidencePlan, priority: step.priority,
     status: step.status, attempts: step.attempts,
     ...(step.methodIds === undefined ? {} : { methodIds: [...step.methodIds] }),
+    ...(step.revisits === undefined ? {} : { revisits: step.revisits.map(ref => ({ stepId: ref.stepId, gapId: ref.gapId })) }),
     ...(step.combination === undefined ? {} : { combination: projectCombination(step.combination) }),
     ...(step.result === undefined ? {} : { result: step.result }),
     ...(recovery === undefined ? {} : { recovery }),

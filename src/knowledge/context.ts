@@ -4,6 +4,7 @@ import type { RunRequest } from "../types.js";
 import { wikiFilename } from "../wiki/format.js";
 import { discoverKnowledge } from "./discovery.js";
 import { capabilityIssues, chainIssues } from "./model.js";
+import { gapQueue } from "./gaps.js";
 
 export function knowledgeContext(request: RunRequest) {
   if (!request.blackboardPath) return undefined;
@@ -15,7 +16,8 @@ export function knowledgeContext(request: RunRequest) {
     factIds: record.factIds, counterFactIds: record.counterFactIds, conditions: record.conditions, pageFile: page("capability", record.id) }));
   const chains = (board.chains ?? []).slice().reverse().map(record => ({ id: record.id, title: record.title, status: record.status,
     reviewIssues: chainIssues(board, record), capabilityIds: record.capabilityIds, resultFactIds: record.resultFactIds, pageFile: page("chain", record.id) }));
-  const discovery = discoverKnowledge(board, { limit: 6, maxAlternatives: 6 });
+  const focus = gapQueue(board).filter(item => item.active && item.state === "review_required").flatMap(item => item.capabilityId ? [item.capabilityId] : []);
+  const discovery = discoverKnowledge(board, { limit: 6, maxAlternatives: 6, consumerIds: [...new Set(focus)] });
   let used = 0;
   const deferred: { kind: string; id: string; pageFile: string }[] = [];
   const pack = <T>(values: T[], ref: (value: T) => { kind: string; id: string; pageFile: string }) => values.filter(value => {

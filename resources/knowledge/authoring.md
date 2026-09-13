@@ -72,3 +72,31 @@ requirementsCovered 只表示找到一个声明前提被覆盖的方案，actual
 not_assessed；还需查看未知条件和 unverifiedCapabilityIds。没有方案不代表所有
 路径不可能。自动上下文会报告延后记录/备选；本地搜索有显式 searchTruncated
 标记，最多检查 2000 个搜索状态和 64 层依赖，不把达到限制当作证据充分。
+# Step gaps and revisits
+
+Execute can record unresolved prerequisites on its assigned Step with optional
+`gaps: [{id:"gap-session",missing:"...",why:"...",reopenWhen:"...",needs:[{type:"session",aliases:[],description:"..."}],conditions:{scope:null,identity:null,environment:null,stateVersion:null},capabilityId:"C-consumer"}]`.
+`capabilityId` is optional; copy an existing consumer ID. `needs:[]` permits gaps
+that only use explicit source association. Gap IDs remain local to their Step;
+their requirements are immutable. Use another ID for a different question.
+
+New material can be explicitly associated through
+`gapLinks:[{stepId:"S-exact-id",gapId:"gap-session",sources:[{kind:"fact",id:"same-batch-ref"}],reason:"Why this could change the old conclusion"}]`.
+Source kinds are fact/evidence/capability/chain. For Wiki material use the underlying
+sources, not the generated page as original evidence. Exact capability types and
+aliases also produce automatic candidates; inspect conditions, availability and
+source warnings. Neither a match nor full candidate input coverage is proof.
+
+Decide reads `gaps.items` and originals. It can create a new bounded Step with
+`revisits:[{stepId:"S-exact-id",gapId:"gap-session"}]` under the same Goal. Choose
+a changed experiment or new Fact inputs and set priority. Original Steps are never
+reset/replayed. Facts produced by the revisit are associated automatically; its
+completion also requests another gap review, including when it found no progress.
+
+Alternatively use `gapReviews:[{stepId:"S-exact-id",gapId:"gap-session",action:"defer",reason:"Still missing a fixture account",factIds:[]}]`.
+Use `action:"resolve"` only after reading current supporting Fact/Evidence IDs and
+explaining why they satisfy the gap. This never verifies a Finding or completes a
+Goal. Unchanged reviewed material stays quiet; new/corrected sources reopen review.
+Only active Goals are highlighted for scheduling. Deferred context entries remain
+in the original Step Wiki page, blackboard, and the read-only `gaps` local command
+(same `--task` and `--workspace` arguments as `discover`).

@@ -13,6 +13,7 @@ import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
 import { writeWiki } from "./wiki/projection.js";
 import { isWikiDerived } from "./wiki/format.js";
 import { applyKnowledge } from "./knowledge/model.js";
+import { applyGapDecision, applyGapRecords, gapQueue } from "./knowledge/gaps.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -247,6 +248,7 @@ export class BlackboardStore {
       const declarations = inspectGoalDeclarations(board.goals, decision.goals);
       assert(declarations.errors.length === 0, declarations.errors.join("; "));
       board.goals.push(...declarations.additions);
+      const priorSteps = new Set(board.steps.map(step => step.id));
       for (const update of decision.updateSteps ?? []) {
         const step = board.steps.find(item => item.id === update.id);
         assert(step, `Unknown Step reference: ${update.id}. Copy an exact committed Step ID.`);
@@ -281,8 +283,10 @@ export class BlackboardStore {
         const conditions = (step: Pick<Step, "combination">) => step.combination ? JSON.stringify([step.combination.scope, step.combination.stateVersion, [...step.combination.requires].sort(), [...step.combination.missing].sort(), step.combination.expectedCapability, [...(step.combination.counterEvidence ?? [])].sort()]) : "";
         // Selecting different guidance alone does not create a new experiment.
         const equivalent = board.steps.some(step => step.goalId === proposal.goalId && normalize(step.description) === normalize(proposal.description) && JSON.stringify([...step.from].sort()) === JSON.stringify([...proposal.from].sort()) && conditions(step) === conditions(proposal));
+        assert(!equivalent || !proposal.revisits?.length, "A gap revisit must change the experiment or its Fact inputs; do not replay an old Step.");
         if (!equivalent) board.steps.push({ ...proposal, id: id("S"), status: "ready", attempts: 0, runId: null, leaseUntil: null });
       }
+      applyGapDecision(board, decision, board.steps.filter(step => !priorSteps.has(step.id)), ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       for (const [index, review] of (decision.reviews ?? []).entries()) {
         const finding = board.findings.find(item => item.id === review.findingId);
         assert(finding, "Unknown finding in review.");
@@ -431,6 +435,7 @@ export class BlackboardStore {
         }
       }
       applyKnowledge(board, output, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
+      applyGapRecords(board, step, output, ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id }));
       const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks.map(block => ({ ...block,
         sources: block.sources.map(ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id })),
       })) }));
@@ -518,6 +523,7 @@ export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspac
   rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
   if (board.findings.length) rows.push("## Evidence navigation index", "", "Registered references only; not proof of support or current applicability.", "", "```jsonl",
     ...evidenceNavigationRecords(board).map(record => JSON.stringify(record)), "```", "");
+  if (board.steps.some(step => step.gaps?.length)) rows.push("## Gap review queue", "", "Candidate associations only; old Steps remain historical.", "", "```jsonl", ...gapQueue(board).map(item => JSON.stringify(item)), "```", "");
   rows.push("## Research Wiki", "", `[Wiki index](<${path.join(dataDir, "wiki", "index.md").replaceAll("\\", "/")}>) — generated navigation and sourced explanations; not original evidence.`, "");
   return rows.join("\n");
 }

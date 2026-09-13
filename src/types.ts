@@ -2,11 +2,13 @@ import type { Api } from "@earendil-works/pi-ai";
 import type { BlackboardContext } from "./loop/context.js";
 import type { WikiPage, WikiPageProposal } from "./wiki/model.js";
 import type { Capability, CapabilityProposal, Chain, ChainProposal } from "./knowledge/schema.js";
+import type { Gap, GapProposal, GapRef } from "./knowledge/gaps.js";
+import type { WikiSource } from "./wiki/model.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
 export interface OuterLoopTrigger {
-  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "knowledge_change" | "hint" | "manual" | "completion" | "empty_plan";
+  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "knowledge_change" | "gap_review" | "hint" | "manual" | "completion" | "empty_plan";
   reason: string;
 }
 export interface AgentHandoff {
@@ -49,6 +51,8 @@ export interface Step {
   combination?: Combination;
   /** Optional built-in guidance IDs; not observations or completion evidence. */
   methodIds?: string[];
+  gaps?: Gap[];
+  revisits?: GapRef[];
 }
 export interface Evidence { id: string; path: string; pathBase?: "task"; sha256: string; bytes: number; description: string; runId: string; stepId: string; excerpt?: string }
 export interface Impact { capability: string; object: string; result: string; scope: string; prerequisites: string }
@@ -75,9 +79,10 @@ export interface BoardSnapshot {
   capabilities?: Capability[];
   chains?: Chain[];
 }
-export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[] }
+export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[]; revisits?: GapRef[] }
 export interface Decision {
   summary: string;
+  gapReviews?: (GapRef & { action: "defer" | "resolve"; reason: string; factIds: string[] })[];
   steps?: StepProposal[];
   goals?: { id: string; description: string; parentId: string }[];
   updateSteps?: { id: string; action: "abandon" | "prioritize"; priority?: number; reason: string }[];
@@ -87,6 +92,8 @@ export interface Decision {
 }
 export interface Execution {
   summary: string; result: "done" | "no_progress" | "blocked";
+  gaps?: GapProposal[];
+  gapLinks?: (GapRef & { sources: (WikiSource & { kind: "fact" | "evidence" | "capability" | "chain" })[]; reason: string })[];
   wikiPages?: WikiPageProposal[];
   capabilities?: CapabilityProposal[];
   chains?: ChainProposal[];

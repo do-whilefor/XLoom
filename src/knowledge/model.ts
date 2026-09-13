@@ -1,4 +1,5 @@
 import type { BoardSnapshot, Execution } from "../types.js";
+import { applyGapRecords } from "./gaps.js";
 import { wikiBasis, wikiDigest, type WikiSource, type WikiStamp } from "../wiki/model.js";
 import { compareConditions, portsMatch, type Capability, type Chain } from "./schema.js";
 
@@ -99,8 +100,8 @@ export function applyKnowledge(board: BoardSnapshot, output: Execution, resolveF
 
 /** Diagnose semantic/reference errors before the existing no-tool repair request.
  * Temporary records stand for this batch's references, never committed evidence. */
-export function validateKnowledgeSubmission(board: BoardSnapshot, output: Execution): void {
-  if (!output.capabilities?.length && !output.chains?.length) return;
+export function validateKnowledgeSubmission(board: BoardSnapshot, output: Execution, stepId?: string): void {
+  if (!output.capabilities?.length && !output.chains?.length && !output.gaps?.length && !output.gapLinks?.length) return;
   const staged = structuredClone(board);
   for (const fact of output.facts ?? []) {
     if (staged.facts.some(item => item.id === fact.ref)) throw new Error("Ambiguous local Fact reference in knowledge submission.");
@@ -111,6 +112,11 @@ export function validateKnowledgeSubmission(board: BoardSnapshot, output: Execut
     staged.evidence.push({ id: evidence.ref, description: evidence.description, path: evidence.path, sha256: "pending-archive", bytes: 0, runId: "", stepId: "" });
   }
   applyKnowledge(staged, output, ref => ref, () => {});
+  if (output.gaps?.length || output.gapLinks?.length) {
+    const step = staged.steps.find(item => item.id === stepId);
+    if (!step) throw new Error("Gap records require the assigned Step.");
+    applyGapRecords(staged, step, output, ref => ref);
+  }
 }
 
 export function knowledgeChanges(before: BoardSnapshot, after: BoardSnapshot) {

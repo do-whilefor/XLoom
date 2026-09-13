@@ -1,10 +1,17 @@
 import type { BoardSnapshot, Decision } from "../types.js";
 import { inspectGoalDeclarations } from "./goals.js";
 import { findingReviewErrors } from "./reviews.js";
+import { applyGapDecision } from "../knowledge/gaps.js";
 
 /** Check all explicit references against the complete board before the one repair
  * request. Report every bad reference together; never guess replacement IDs. */
 export function validateDecisionReferences(board: BoardSnapshot, decision: Decision): void {
+  if (decision.gapReviews?.length || decision.steps?.some(step => step.revisits?.length)) {
+    const staged = structuredClone(board);
+    const steps = (decision.steps ?? []).map((step, index) => ({ ...step, id: `pending-${index}`, status: "ready" as const, attempts: 0, runId: null, leaseUntil: null }));
+    staged.steps.push(...steps);
+    applyGapDecision(staged, decision, steps, () => {});
+  }
   const facts = new Set(board.facts.map(fact => fact.id));
   const { goals, errors } = inspectGoalDeclarations(board.goals, decision.goals);
   const steps = new Map(board.steps.map(step => [step.id, step]));

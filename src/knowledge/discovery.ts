@@ -5,7 +5,7 @@ import { wikiGenerator } from "../wiki/format.js";
 
 export interface Edge { producerId: string; consumerId: string; provideIndex: number; needIndex: number }
 interface Plan { capabilityIds: string[]; links: Edge[]; conditions: Conditions[] }
-export interface DiscoveryOptions { limit?: number; maxStates?: number; maxAlternatives?: number }
+export interface DiscoveryOptions { limit?: number; maxStates?: number; maxAlternatives?: number; consumerIds?: string[] }
 
 /** Exact declared types/aliases only. Whole-plan search keeps AND prerequisites
  * and OR alternatives, including their shared conditions, separate from proof. */
@@ -46,6 +46,10 @@ export function discoverKnowledge(board: BoardSnapshot, options: DiscoveryOption
     yield* fill(0, next);
   }
   const consumers = capabilities.filter(item => item.needs.length).slice().reverse();
+  if (options.consumerIds?.length) consumers.sort((a, b) => {
+    const rank = (id: string) => { const index = options.consumerIds!.indexOf(id); return index < 0 ? Infinity : index; };
+    return rank(a.id) - rank(b.id);
+  });
   const items = consumers.slice(0, limit).map(consumer => {
     const inputs = consumer.needs.map((need, needIndex) => {
       const all = suppliers(consumer, needIndex);

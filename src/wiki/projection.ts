@@ -6,6 +6,7 @@ import type { BoardSnapshot } from "../types.js";
 import { wikiIssues, wikiRecord, type WikiSource } from "./model.js";
 import { buildRetrievalIndex, organizeWiki } from "./catalog.js";
 import { isWikiDerived, wikiFilename as filename, wikiGenerator, wikiMarker } from "./format.js";
+import { gapQueue } from "../knowledge/gaps.js";
 export { wikiMarker } from "./format.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -23,6 +24,7 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
   const files = new Map<string, string>();
   const groups = new Map<string, string[]>();
   const entries: object[] = [];
+  const gaps = gapQueue(board);
   const addIndex = (section: string, text: string) => { const rows = groups.get(section) ?? []; rows.push(text); groups.set(section, rows); };
   const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [], capability: board.capabilities ?? [], chain: board.chains ?? [] };
   for (const kind of Object.keys(collections) as WikiSource["kind"][]) for (const item of collections[kind]) {
@@ -35,6 +37,10 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
     const lines = [wikiMarker, `# ${label(item.id)} · ${label(title)}`, "", notice, "", `记录类型：${kind} · 状态：${status}`, "", json(record.value), "", "## 来源与相关记录", "",
       ...record.dependencies.map(dependency => `- ${dependency.kind}: ${link(dependency)}${wikiRecord(board, dependency) ? "" : "（记录缺失）"}`)];
     if ("stepId" in item && item.stepId) lines.push(`- 来源 Step: ${link({ kind: "step", id: item.stepId })}`);
+    if (kind === "step") {
+      const related = gaps.filter(gap => gap.stepId === item.id);
+      if (related.length) lines.push("", "## 缺口与复核", "", "候选资料关联不代表已经解决。", "", json(related));
+    }
     if (kind === "evidence") {
       const evidence = board.evidence.find(row => row.id === item.id)!;
       lines.push("", `原件：[${label(item.id)}](<${evidencePath(evidence, dataDir, workspace).replaceAll("\\", "/")}>)`, "", "这里只列出已登记的路径、大小和哈希；生成页面不会重新验证原件。");

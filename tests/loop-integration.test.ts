@@ -15,6 +15,7 @@ import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent } from "../src/types.js";
 import type { knowledgeContext } from "../src/knowledge/context.js";
 import type { retrievalContext } from "../src/wiki/retrieval.js";
+import { gapQueue, type gapContext } from "../src/knowledge/gaps.js";
 
 // This suite replaces the provider stream only: Controller, SQLite, Pi Agent and
 // Pi's native file tools are real. It makes no network calls or vulnerability claims.
@@ -33,6 +34,7 @@ interface PromptData {
   methods?: MethodContext;
   knowledge?: ReturnType<typeof knowledgeContext>;
   rag?: ReturnType<typeof retrievalContext>;
+  gaps?: ReturnType<typeof gapContext>;
 }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
@@ -107,6 +109,37 @@ function plan(): Decision {
     steps: [{ goalId: "G0", from: [], description: "Write and read back the synthetic identity fixture", successSignal: "Pi read returns the written fixture", evidencePlan: "Retain synthetic fixture in the assigned artifact directory", priority: 50 }],
   };
 }
+
+describe("native gap workflow through Pi and Controller", () => {
+  it("records a gap, associates new material, revisits with a fresh plan, and independently resolves it", async () => {
+    const conditions = { scope: "fixture", identity: "fixture-a", environment: "local", stateVersion: "v1" };
+    const next = (description: string) => ({ ...plan().steps![0]!, description });
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (input.assignedStep!.description === "Record fixture gap") return json({ summary: "Missing fixture input", result: "blocked",
+          gaps: [{ id: "gap-input", missing: "Fixture input", why: "Check cannot proceed", reopenWhen: "A compatible input is observed", needs: [{ type: "fixture-input", aliases: [], description: "Fixture value" }], conditions }] });
+        if (run.contexts.length === 1) return message([{ type: "text", text: privateTurn }, { type: "toolCall", id: "write-gap-fixture", name: "write", arguments: { path: join(input.artifacts, "gap.txt"), content: syntheticArtifact + input.assignedStep!.description } }], "toolUse");
+        return json({ summary: "Local fixture observation", result: "done", evidence: [{ ref: "e", path: "gap.txt", description: "Synthetic original" }],
+          facts: [{ ref: "f", description: input.assignedStep!.description, evidenceRefs: ["e"] }],
+          ...(input.assignedStep!.revisits ? {} : { capabilities: [{ id: "C-fixture-input", title: "Fixture input", status: "available" as const, provides: [{ type: "fixture-input", aliases: [], description: "Fixture value" }], needs: [], conditions, factRefs: ["f"], counterFactRefs: [], changeReason: "Fixture" }] }) });
+      }
+      expect(JSON.stringify(context)).not.toContain(privateTurn);
+      const item = input.gaps!.items[0];
+      if (!item) return json({ summary: "Plan fixture", steps: [next("Record fixture gap")] });
+      if (!item.candidates.length) return json({ summary: "Wait and inspect material", gapReviews: [{ stepId: item.stepId, gapId: item.gapId, action: "defer", reason: "Need new input", factIds: [] }], steps: [next("Observe fixture input")] });
+      if (!item.sources.length) return json({ summary: "Review original fixture and choose a new bounded test", steps: [{ ...next("Validate new fixture input"), from: item.candidates[0]!.factIds, priority: 100, revisits: [{ stepId: item.stepId, gapId: item.gapId }] }] });
+      return json({ summary: "Fixture gap resolved, whole research task remains open", gapReviews: [{ stepId: item.stepId, gapId: item.gapId, action: "resolve", reason: "The local fixture supplies the missing input", factIds: [item.sources[0]!.source.id] }] });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(test.seen.map(item => item.channel)).toEqual(["offline-decide", "offline-execute", "offline-decide", "offline-execute", "offline-decide", "offline-execute", "offline-decide"]);
+    expect(test.events.filter(event => event.handoff?.trigger.kind === "gap_review")).toHaveLength(2);
+    expect(gapQueue(board)[0]!.state).toBe("resolved");
+    expect(board.steps[0]!.status).toBe("blocked"); expect(board.goals[0]!.status).toBe("active"); expect(board.outcome).toBeNull();
+    expect(board.status).toBe("paused");
+    for (const run of test.seen) expect(run.contexts[0]!.messages).toHaveLength(1);
+  });
+});
 
 function proposal(input: PromptData): Decision {
   return {

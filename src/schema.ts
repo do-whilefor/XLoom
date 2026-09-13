@@ -2,6 +2,7 @@ import { z } from "zod";
 import { capabilitiesSchema, chainsSchema } from "./knowledge/schema.js";
 import { stepMethodIdsSchema } from "./methods.js";
 import { wikiPagesSchema } from "./wiki/model.js";
+import { gapsSchema, gapLinksSchema, gapReviewsSchema, revisitsSchema } from "./knowledge/gaps.js";
 
 const text = (max = 8_000) => z.string().trim().min(1).max(max).refine((value) => !value.includes("\0"), "Must not contain NUL characters");
 const id = text(256);
@@ -88,6 +89,7 @@ export const attemptSchema = z.object({
 
 export const decisionSchema = z.object({
   summary: text(),
+  gapReviews: gapReviewsSchema.optional(),
   steps: z.array(z.object({
     goalId: id,
     from: refs,
@@ -97,6 +99,7 @@ export const decisionSchema = z.object({
     priority,
     combination: combinationSchema.optional(),
     methodIds: stepMethodIdsSchema.optional(),
+    revisits: revisitsSchema.optional(),
   }).strict()).max(32).optional(),
   goals: z.array(z.object({ id, description: text(), parentId: id }).strict()).max(32).optional(),
   updateSteps: z.array(z.object({
@@ -125,6 +128,8 @@ export const decisionSchema = z.object({
 export const executionSchema = z.object({
   summary: text(),
   result: z.enum(["done", "no_progress", "blocked"]),
+  gaps: gapsSchema.optional(),
+  gapLinks: gapLinksSchema.optional(),
   wikiPages: wikiPagesSchema.optional(),
   capabilities: capabilitiesSchema.optional(),
   chains: chainsSchema.optional(),
