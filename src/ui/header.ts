@@ -33,6 +33,6 @@ export class HeaderView implements Component {
       .map((row, index) => index === 0 ? chalk.bold(row) : chalk.gray(row));
     // Align one information line with each dot row; stay compact in narrow terminals.
     const rows = width >= 32 ? DOT_X.map((dots, index) => `${coral(dots)}   ${information[index]!}`) : information;
-    return [...rows.map(row => truncateToWidth(row, Math.max(0, width), width > 3 ? "…" : "")), "", ""];
+    return [...rows.map(row => truncateToWidth(` ${row}`, Math.max(0, width), width > 3 ? "…" : "")), "", ""];
   }
 }

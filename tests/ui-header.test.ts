@@ -12,12 +12,12 @@ const workspace = "D:\\工作区\\Xloom";
 const info = { model: "fixture/deepseek-flash", modelName: "deepseek-flash", contextWindow: 1_048_576, authLabel: "API Key", workspace };
 
 describe("dot-matrix X session header", () => {
-  it("aligns information beside the three-row dotted X with two blank rows below", () => {
+  it("indents the three-row dotted header by one space with two blank rows below", () => {
     const header = new HeaderView(() => info, "ignored");
     expect(header.render(90).map(plainText)).toEqual([
-      `⠙⢿⣦⣀⣴⡿⠋   Xloom v${XLOOM_VERSION}`,
-      "  ⠙⣿⣄     deepseek-flash[1M] · API Key",
-      "⣠⣾⠟⠉⠻⣷⣄   D:\\工作区\\Xloom",
+      ` ⠙⢿⣦⣀⣴⡿⠋   Xloom v${XLOOM_VERSION}`,
+      "   ⠙⣿⣄     deepseek-flash[1M] · API Key",
+      " ⣠⣾⠟⠉⠻⣷⣄   D:\\工作区\\Xloom",
       "",
       "",
     ]);
@@ -37,7 +37,7 @@ describe("dot-matrix X session header", () => {
 
   it("uses coral Braille dots in all three logo rows", () => {
     const rows = new HeaderView(() => info, workspace).render(90);
-    for (const row of rows.slice(0, 3)) expect(row).toMatch(/^\x1b\[38;2;217;139;115m[ \u2800-\u28ff]{7}\x1b\[39m/);
+    for (const row of rows.slice(0, 3)) expect(row).toMatch(/^ \x1b\[38;2;217;139;115m[ \u2800-\u28ff]{7}\x1b\[39m/);
   });
 
   it.each([0, 1, 3, 8, 20, 31, 32, 90])("keeps every row within a %i-column terminal", width => {
@@ -45,6 +45,7 @@ describe("dot-matrix X session header", () => {
     expect(rows).toHaveLength(5);
     expect(rows.slice(-2)).toEqual(["", ""]);
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+    if (width > 0) for (const row of rows.slice(0, 3)) expect(plainText(row).startsWith(" ")).toBe(true);
     if (width < 32) expect(rows.map(plainText).join("\n")).not.toMatch(/[\u2800-\u28ff]/);
   });
 

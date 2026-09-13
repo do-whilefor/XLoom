@@ -161,7 +161,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const editor = new Editor(tui, {
     borderColor: coral,
     selectList: { selectedPrefix: coral, selectedText: coral, description: muted, scrollInfo: muted, noMatch: muted },
-  }, { paddingX: 0 });
+  }, { paddingX: 1 });
   editor.setAutocompleteProvider(createCommandAutocomplete());
   editor.setAutocompleteMaxVisible(6);
   const previousBindings = getKeybindings();
