@@ -1,3 +1,4 @@
+import { taskDirectory } from "../src/workspace.js";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -449,7 +450,7 @@ describe("LoopController synthetic protocol flow", () => {
     expect(board).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1, noProgressCount: 0, usage: { input: 40, output: 20, cost: 0.004 } });
     expect(board.findings[0]).toMatchObject({ status: "closed", rating: "unrated" });
     expect(board.lastMetaStep).toBe(1);
-    expect(readFileSync(path.resolve(test.root, board.evidence[0]!.path), "utf8")).toContain("SYNTHETIC TEST FIXTURE ONLY");
+    expect(readFileSync(path.resolve(taskDirectory(test.root), board.evidence[0]!.path), "utf8")).toContain("SYNTHETIC TEST FIXTURE ONLY");
     expect(new Set(test.requests.map((r) => r.id)).size).toBe(4);
     expect(new Set(test.requests.map((r) => r.snapshot)).size).toBe(4);
     for (const request of test.requests) {

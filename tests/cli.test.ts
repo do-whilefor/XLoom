@@ -1,3 +1,4 @@
+import { ensureProject, projectConfigPath, projectDirectory, workspaceLockPath } from "../src/paths.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,8 +34,13 @@ function cli(args: string[], cwd = workspace()) {
   return { ...result, combined: `${result.stdout}\n${result.stderr}` };
 }
 
+function saveWorkspaceConfig(root: string, config: ReturnType<typeof defaultConfig>) {
+  ensureProject(root);
+  saveNewConfig(projectConfigPath(root), config);
+}
+
 function databaseState(root: string) {
-  const db = new DatabaseSync(path.join(root, ".xloom", "blackboard.sqlite"), { readOnly: true });
+  const db = new DatabaseSync(path.join(projectDirectory(root), "blackboard.sqlite"), { readOnly: true });
   try {
     return {
       board: JSON.parse(String(db.prepare("SELECT value FROM board WHERE id=1").get()!.value)) as BoardSnapshot,
@@ -66,6 +72,18 @@ afterEach(() => {
 });
 
 describe("command-line entry points", () => {
+  it("resolves arbitrary launch directories and explicit workspace without creating local data", () => {
+    const a = workspace(); const b = workspace();
+    const first = JSON.parse(cli(["paths"], a).stdout);
+    const second = JSON.parse(cli(["paths"], b).stdout);
+    expect(first).toMatchObject({ workspace: realpathSync(a), home: process.env.XLOOM_HOME, project: projectDirectory(a), config: projectConfigPath(a) });
+    expect(first.project).not.toBe(second.project);
+    expect(JSON.parse(cli(["paths", "--workspace", a], b).stdout)).toEqual(first);
+    expect(existsSync(projectDirectory(a))).toBe(false);
+    expect(existsSync(projectDirectory(b))).toBe(false);
+    expect(existsSync(path.join(a, ".xloom"))).toBe(false);
+  });
+
   it("shows help without creating project state or starting agents", () => {
     const root = workspace();
     const result = cli(["--help"], root);
@@ -86,7 +104,7 @@ describe("command-line entry points", () => {
     const root = workspace();
     const initialized = cli(["init", "--goal", "验证本地 fixture 对象权限"], root);
     expect(initialized.status).toBe(0);
-    const file = path.join(root, "xloom.json");
+    const file = projectConfigPath(root);
     const config = loadConfig(file);
     expect(config.goal).toBe("验证本地 fixture 对象权限");
     expect(config.scope).toBe(config.goal);
@@ -139,17 +157,17 @@ describe("command-line entry points", () => {
 
   it("does not turn a chat-only configuration into a headless research task", () => {
     const root = workspace();
-    saveNewConfig(path.join(root, "xloom.json"), defaultConfig(CHAT_GOAL));
+    saveWorkspaceConfig(root, defaultConfig(CHAT_GOAL));
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("No red-team goal yet");
-    expect(existsSync(path.join(root, ".xloom", "blackboard.sqlite"))).toBe(false);
-    expect(existsSync(path.join(root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(root), "blackboard.sqlite"))).toBe(false);
+    expect(existsSync(workspaceLockPath(root))).toBe(false);
   });
 
   it("reads the selected independent TUI task rather than creating or using a root task", () => {
     const root = workspace();
-    saveNewConfig(path.join(root, "xloom.json"), defaultConfig(CHAT_GOAL));
+    saveWorkspaceConfig(root, defaultConfig(CHAT_GOAL));
     const store = new BlackboardStore(root, defaultConfig("Selected TUI fixture goal"), { taskId: "task-selected" });
     store.hint("Only this task hint");
     const before = store.snapshot(); store.close(); selectTask(root, "task-selected");
@@ -159,19 +177,19 @@ describe("command-line entry points", () => {
     expect(result.stdout).not.toContain(CHAT_GOAL);
     const reopened = new BlackboardStore(root, before.config, { taskId: "task-selected" });
     expect(reopened.snapshot()).toEqual(before); reopened.close();
-    expect(existsSync(path.join(root, ".xloom", "blackboard.sqlite"))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(root), "blackboard.sqlite"))).toBe(false);
   });
 
   it.each(["../outside", "missing-task"])("releases the headless session lock for an invalid selected task (%s)", taskId => {
     const root = workspace();
-    saveNewConfig(path.join(root, "xloom.json"), defaultConfig("Must not become replacement task"));
-    mkdirSync(path.join(root, ".xloom"));
-    writeFileSync(path.join(root, ".xloom", "current-task.json"), JSON.stringify({ taskId }));
+    saveWorkspaceConfig(root, defaultConfig("Must not become replacement task"));
+    ensureProject(root);
+    writeFileSync(path.join(projectDirectory(root), "current-task.json"), JSON.stringify({ taskId }));
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/Invalid task ID|No blackboard yet/);
-    expect(existsSync(path.join(root, ".xloom", "session.lock"))).toBe(false);
-    expect(existsSync(path.join(root, ".xloom", "tasks"))).toBe(false);
+    expect(existsSync(workspaceLockPath(root))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(root), "tasks"))).toBe(false);
   });
 
   it("fails without a model request when the named credential variable is missing", () => {
@@ -179,7 +197,7 @@ describe("command-line entry points", () => {
     const config = defaultConfig("Missing-credential fixture");
     config.models.decide.apiKeyEnv = missingKeyVariable;
     config.models.execute.apiKeyEnv = missingKeyVariable;
-    saveNewConfig(path.join(root, "xloom.json"), config);
+    saveWorkspaceConfig(root, config);
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
     expect(result.combined).toContain(`Missing model credential environment variable: ${missingKeyVariable}`);
@@ -187,7 +205,7 @@ describe("command-line entry points", () => {
     const saved = databaseState(root);
     expect(saved.board).toMatchObject({ status: "error", outcome: null, completedSteps: 0, usage: { input: 0, output: 0, cost: 0 } });
     expect(saved.board.facts).toEqual([]);
-    expect(existsSync(path.join(root, ".xloom", "controller.lock"))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(root), "controller.lock"))).toBe(false);
   });
 
   it("rejects status/report without creating an empty database", () => {
@@ -235,11 +253,11 @@ describe("offline demo and read-only reports", () => {
     expect(before.board.config.title).toContain("synthetic");
     expect(before.board.findings[0]).toMatchObject({ status: "closed", rating: "unrated" });
     expect(before.board.evidence).toHaveLength(1);
-    const artifact = JSON.parse(readFileSync(path.join(root, before.board.evidence[0].path), "utf8"));
+    const artifact = JSON.parse(readFileSync(path.join(projectDirectory(root), before.board.evidence[0].path), "utf8"));
     expect(artifact.synthetic).toBe(true);
     expect(artifact.purpose).toContain("NOT a network response or vulnerability evidence");
     expect(before.runs.map(run => run.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
-    const projection = readFileSync(path.join(root, "state", "blackboard.md"));
+    const projection = readFileSync(path.join(projectDirectory(root), "blackboard.md"));
 
     const status = cli(["status", "--workspace", root]);
     expect(status.status).toBe(0);
@@ -252,8 +270,8 @@ describe("offline demo and read-only reports", () => {
     expect(report.stdout).toContain("Integrity and schema checks do not independently establish a vulnerability");
     expect(report.stdout).not.toContain("VULN_FOUND");
     expect(databaseState(root)).toEqual(before);
-    expect(readFileSync(path.join(root, "state", "blackboard.md"))).toEqual(projection);
-    expect(existsSync(path.join(root, ".xloom", "controller.lock"))).toBe(false);
+    expect(readFileSync(path.join(projectDirectory(root), "blackboard.md"))).toEqual(projection);
+    expect(existsSync(path.join(projectDirectory(root), "controller.lock"))).toBe(false);
   }, 30_000);
 
   it("renders claimed impact and evidence as reviewable data, not independently proven truth", () => {

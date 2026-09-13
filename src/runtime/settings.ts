@@ -1,6 +1,7 @@
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { CredentialSynchronizationError, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelConfig } from "../types.js";
+import { modelRuntimePaths } from "./storage.js";
 
 export type { AuthEvent, AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 
@@ -11,7 +12,7 @@ export interface ModelChoice { provider: string; model: string; name: string }
 export interface ProviderChoice { id: string; name: string; authTypes: string[] }
 export interface ModelDisplayInfo { contextWindow?: number; authLabel?: string }
 
-const createRuntime: SettingsRuntimeFactory = (signal) => ModelRuntime.create({ allowModelNetwork: false, signal });
+const createRuntime: SettingsRuntimeFactory = (signal) => ModelRuntime.create({ ...modelRuntimePaths(), allowModelNetwork: false, signal });
 
 function checkCancellation(signal?: AbortSignal): void {
   // Abort reasons may include provider responses or pasted credentials too.

@@ -1,3 +1,4 @@
+import { evidencePath } from "../paths.js";
 import { dirname, join } from "node:path";
 import type { Attempt, BoardSnapshot, Evidence, Fact, Finding, Goal, Hint, Mode, RunRequest, Step } from "../types.js";
 
@@ -317,7 +318,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
     const excerpt = item.excerpt?.slice(0, excerptLimit);
     if (item.excerpt && item.excerpt.length > excerptLimit) truncatedExcerpts++;
     return {
-      id: item.id, path: item.path, sha256: item.sha256, bytes: item.bytes,
+      id: item.id, path: item.pathBase === "task" ? evidencePath(item, dirname(dirname(request.runDir)), request.workspace) : item.path, sha256: item.sha256, bytes: item.bytes,
       description: item.description, stepId: item.stepId,
       ...(excerpt === undefined ? {} : { excerpt: `${excerpt}${item.excerpt!.length > excerptLimit ? "\n[excerpt truncated; inspect referenced artifact]" : ""}` }),
     };

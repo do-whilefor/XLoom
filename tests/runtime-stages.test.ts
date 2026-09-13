@@ -1,3 +1,4 @@
+import { taskDirectory } from "../src/workspace.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -120,6 +121,28 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("returns directly readable archive paths after a checkpoint outside the tool workspace", async () => {
+    let archive = "";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      if (run.contexts.length === 1) return write("write-source", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) return write("commit-source", input.checkpointFile!, checkpoint(input));
+      if (run.contexts.length === 3) {
+        archive = JSON.parse(toolText(context)).evidence[0].path;
+        expect(archive.startsWith(input.workspace)).toBe(false);
+        expect(readFileSync(archive, "utf8")).toBe(artifactBody);
+        return message([{ type: "toolCall", id: "read-archive", name: "read", arguments: { path: archive } }], "toolUse");
+      }
+      expect(toolText(context)).toContain(artifactBody.trim());
+      return json({ summary: "Read committed archive through the native tool", result: "done" });
+    });
+    await test.controller.start();
+    expect(test.store.snapshot().completedSteps).toBe(1);
+    expect(test.store.snapshot().evidence).toHaveLength(1);
+    expect(archive).toContain("evidence");
+    assertExactUsage(test);
+  });
+
   it.each(["json", "schema"] as const)("rejects invalid checkpoint %s before writing and preserves the previous accepted proposal through a corrected retry", async invalidKind => {
     let acceptedSource = "";
     let acceptedRevision = 0;
@@ -211,7 +234,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board.steps[0]).toMatchObject({ status: "done", attempts: 1 });
     expect(board.facts).toHaveLength(1);
     expect(board.evidence).toHaveLength(1);
-    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(readFileSync(join(taskDirectory(test.root), board.evidence[0]!.path), "utf8")).toBe(artifactBody);
     expect(JSON.stringify(board)).not.toContain(interruptedMarker);
     expect(test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : [])).toEqual(["artifact-once"]);
     expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("Transient model failure"))).toHaveLength(1);
@@ -229,7 +252,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
         if (input.blackboard.completedSteps === 1 && context.systemPrompt?.includes("Fresh metacognitive review")) {
           factId = input.blackboard.facts[0]!.id;
           if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-before-length", name: "read",
-            arguments: { path: join(input.workspace, input.blackboard.evidence[0]!.path) } }], "toolUse");
+            arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
           if (run.contexts.length === 2) {
             expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "read-before-length", isError: false });
             return message([{ type: "thinking", thinking: "Synthetic interrupted reasoning fixture; final plan not yet emitted" }], "length");
@@ -291,7 +314,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board.evidence).toHaveLength(1);
     expect(board.facts).toHaveLength(2);
     expect(board.facts[1]!.evidenceIds).toEqual([evidenceId]);
-    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(readFileSync(join(taskDirectory(test.root), board.evidence[0]!.path), "utf8")).toBe(artifactBody);
     expect(test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : [])).toEqual(["fixture-write", "fixture-checkpoint"]);
     expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("length"))).toHaveLength(1);
     expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
@@ -370,7 +393,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
         if (input.blackboard.completedSteps === 1) {
           factId = input.blackboard.facts[0]!.id;
           if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-before-repair", name: "read",
-            arguments: { path: join(input.workspace, input.blackboard.evidence[0]!.path) } }], "toolUse");
+            arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
           const repaired = run.contexts.length === 3;
           if (repaired) {
             repairRequests++;
@@ -565,7 +588,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board.evidence).toHaveLength(1);
     expect(board.steps[0]).toMatchObject({ status: "failed", attempts: 1 });
     expect(board.goals[0]?.status).toBe("active");
-    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(readFileSync(join(taskDirectory(test.root), board.evidence[0]!.path), "utf8")).toBe(artifactBody);
     expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
     expect(test.store.runs().at(-1)).toMatchObject({ mode: "execute", status: "failed" });
     assertExactUsage(test);
@@ -686,7 +709,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     const output = readFileSync(join(test.store.dataDir, "runs", executionRun.id, "output.json"), "utf8");
     expect(output).not.toContain("stage-model-");
     expect(output).toContain("[MODEL_CREDENTIAL_REDACTED]");
-    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(readFileSync(join(taskDirectory(test.root), board.evidence[0]!.path), "utf8")).toBe(artifactBody);
     for (const run of test.seen.slice(2)) expect(JSON.stringify(run.contexts[0])).not.toContain("stage-model-");
     assertExactUsage(test);
   });

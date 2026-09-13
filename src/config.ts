@@ -1,7 +1,9 @@
-import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { projectConfigSchema, formatValidationError } from "./schema.js";
 import type { ProjectConfig } from "./types.js";
+import { xloomHome } from "./paths.js";
 
 export const CHAT_GOAL = "普通聊天；使用 /run 目标启动独立红队任务";
 
@@ -17,6 +19,25 @@ export function defaultConfig(goal: string, scope = goal): ProjectConfig {
     models: { decide: { ...model }, execute: { ...model } },
     limits: {},
   });
+}
+
+const globalSettingsSchema = projectConfigSchema.pick({ version: true, models: true, limits: true });
+
+export function workspaceDefaults(goal: string, scope = goal): ProjectConfig {
+  const file = path.join(xloomHome(), "settings.json");
+  if (!existsSync(file)) return defaultConfig(goal, scope);
+  const settings = globalSettingsSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+  if (!settings.success) throw new Error(`Invalid Xloom global settings: ${file}`);
+  return projectConfigSchema.parse({ ...defaultConfig(goal, scope), ...settings.data, goal, scope });
+}
+
+export function ensureGlobalSettings(config: ProjectConfig): void {
+  const file = path.join(xloomHome(), "settings.json");
+  if (existsSync(file)) return;
+  mkdirSync(path.dirname(file), { recursive: true });
+  const { version, models, limits } = config;
+  try { writeFileSync(file, `${JSON.stringify({ version, models, limits }, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 }
 
 export function loadConfig(path: string): ProjectConfig {

@@ -81,11 +81,14 @@ npm run check
 # 不连接模型、不访问外部目标的合成闭环演示
 npm start -- demo --headless
 
-# 打开普通聊天 TUI；首次自动生成不含凭据的 xloom.json
-npm start -- run
+# 注册全局入口；上面的 check 已构建 dist，npm 全局 bin 目录需在 PATH 中
+npm link
+
+# 之后可在任意工作目录打开普通聊天 TUI
+xloom
 ```
 
-在 TUI 中使用 `/model` 选择模型、`/apikey` 设置 Key，也可复用 Pi 已保存的认证。普通文字为聊天；`/run 目标` 启动双 Agent；`/hint 文字` 补充任务信息；`/help` 查看全部命令。
+在 TUI 中使用 `/model` 选择模型、`/apikey` 设置 Key，首次使用默认用户目录时会导入 Pi 已保存的认证，原件保留。普通文字为聊天；`/run 目标` 启动双 Agent；`/hint 文字` 补充任务信息；`/help` 查看全部命令。
 
 ```powershell
 npm start -- run --headless      # 立即启动 / 恢复已配置任务
@@ -94,7 +97,7 @@ npm start -- report              # 输出 Markdown 报告
 npm start -- models              # 列出 Pi 本地模型目录
 ```
 
-构建后也可使用 `node dist/cli.js`，或 `npm link` 后使用 `xloom`。
+构建后也可使用 `node dist/cli.js`；`npm link` 注册的 `xloom` 始终保留终端当前工作目录，不会切换到源码安装目录。源码更新后执行 `npm run build` 即可更新链接命令。
 
 ## 项目结构
 
@@ -116,7 +119,33 @@ xloom/
 └── LICENSE
 ```
 
-运行数据写入工作区 `.xloom/`：每个 `/run` 对应一个独立任务目录，包含该任务的 `blackboard.sqlite`、可读投影、归档证据与运行产物。`.xloom`、`xloom.json` 默认不进 Git。
+运行数据默认写入用户目录 `~/.xloom/`（Windows 使用系统用户目录，例如 `C:\Users\Acer\.xloom`）。可用绝对路径环境变量 `XLOOM_HOME` 指定另一数据目录。工作区仍是启动目录，或 `--workspace` 指定的目录；默认不再向工作区创建内部 `.xloom`、配置或黑板投影。普通聊天仍仅保存在内存，退出、重置后不恢复。
+
+`~/.xloom` 内的布局：
+
+```text
+settings.json                     全局默认模型和资源限制，不含任务目标
+models.json / auth.json            Xloom 自己的模型配置与认证
+cache/models-store.json            模型缓存
+locks/<工作区哈希>.lock            各工作区独立的应用锁
+projects/<工作区哈希>/
+  project.json                    真实工作区路径、名称和迁移记录
+  settings.json                   该工作区配置（新建时继承全局默认）
+  current-task.json                该工作区选中的研究任务
+  tasks/task-<UUID>/
+    blackboard.sqlite             权威状态和审计事件
+    blackboard.md                 可读投影
+    evidence/<SHA256>.bin          归档证据
+    runs/<run-id>/                调用输入、事件、续接检查点和产物
+```
+
+工作区按规范化真实路径区分，同名目录不会混用任务，文件系统别名映射到同一工作区。不同工作区可以分别运行；同一工作区仍只允许一个应用控制器。每次 `/run` 新建任务；重新启动先进入普通聊天，使用 `/start` 继续当前工作区已选任务。此次未增加跨工作区历史列表或按 ID 选择任务的交互。
+
+`xloom paths` 显示实际工作区、用户数据、项目数据和配置路径。全局 `settings.json` 提供新工作区的默认值，已有工作区保留各自设置；`/model` 保存当前工作区的选择，认证和自定义模型目录由所有工作区共用。`--config PATH` 仍支持显式配置文件，其相对路径以工作区解析。
+
+首次打开旧工作区，或执行 `xloom migrate`，会复制原 `.xloom` 和 `xloom.json` 到用户目录：先阻止与旧控制器同时写入，通过 SQLite backup 包含 WAL 数据，再校验证据大小、SHA-256 和引用，最后原子启用新目录。旧文件保留，迁移失败不启用半成品，重试不会覆盖已导入的数据。原根黑板／headless 任务兼容保存在对应 `projects/<哈希>/` 根部；新 `/run` 使用独立任务目录。运行输入和私有日志保留历史原文，可能含旧位置；恢复使用新黑板和证据位置，不自动重放旧工具。
+
+使用新版本后请将旧项目数据当作备份；旧版程序对它的后续修改不会自动同步。备份时退出相应 Xloom 进程后复制用户数据目录。
 
 ## 模型与配置
 
@@ -133,7 +162,7 @@ xloom/
 }
 ```
 
-配置不接受明文 Key。复用 Pi 用户目录（默认 `~/.pi/agent`）的 `auth.json`、`models.json` 和模型缓存，支持环境认证、API Key 与 OAuth 登录 / 刷新。默认不设置运行时间、回合数或 token 硬上限，用户可随时 `/pause` 或 `/stop`。
+项目配置不接受明文 Key。Pi 的模型运行时与登录服务均显式使用 Xloom 用户目录中的 `auth.json`、`models.json` 和模型缓存，支持环境认证、API Key 与 OAuth 登录 / 刷新。默认用户目录首次使用时只导入一次已有 Pi 配置，不覆盖已有 Xloom 文件，不删除 Pi 原件，登出后也不会再次导入旧认证。设置 `XLOOM_HOME` 时默认隔离，不自动读取旧 Pi 认证；需要导入时执行 `xloom migrate --pi-dir "旧 Pi agent 目录的绝对路径"`。默认不设置运行时间、回合数或 token 硬上限，用户可随时 `/pause` 或 `/stop`。
 
 ## 明确的边界
 

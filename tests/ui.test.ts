@@ -90,6 +90,8 @@ describe("TUI formatting", () => {
     expect(text).toContain("Steps (1)");
     expect(text).toContain("technical_hit/unrated");
     expect(text).toContain("e1 .xloom/runs/r1/response.txt");
+    board.evidence[0] = { ...board.evidence[0]!, path: "evidence/archive.bin", pathBase: "task" };
+    expect(formatBoard(board)).toContain("e1 [任务目录] evidence/archive.bin");
     expect(text).toContain("next: 验证影响");
     expect(statusLine(board)).toContain("180 tokens");
     expect(statusLine(board)).toContain("step 1");

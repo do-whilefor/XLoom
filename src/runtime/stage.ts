@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import type { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { executionSchema, formatValidationError } from "../schema.js";
 import type { RunRequest, Usage } from "../types.js";
+import { evidencePath } from "../paths.js";
 
 export const stageSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
@@ -63,7 +64,7 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
           // Return committed public identifiers so the next batch can refer to
           // already-submitted evidence instead of inventing or resubmitting IDs.
           facts: board.facts.map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
-          evidence: board.evidence.map(item => ({ id: item.id, path: item.path, description: item.description })),
+          evidence: board.evidence.map(item => ({ id: item.id, path: evidencePath(item, dirname(dirname(request.runDir)), request.workspace), description: item.description })),
           findings: board.findings.map(({ id, key, target }) => ({ id, key, target })),
           instruction: yielded ? "Return control to Decide; do not execute further tools." : "Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
         }) }] };

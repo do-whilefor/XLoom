@@ -46,7 +46,7 @@ export interface Step {
   priority: number; status: StepStatus; attempts: number; runId: string | null; leaseUntil: number | null; result?: string;
   combination?: Combination;
 }
-export interface Evidence { id: string; path: string; sha256: string; bytes: number; description: string; runId: string; stepId: string; excerpt?: string }
+export interface Evidence { id: string; path: string; pathBase?: "task"; sha256: string; bytes: number; description: string; runId: string; stepId: string; excerpt?: string }
 export interface Impact { capability: string; object: string; result: string; scope: string; prerequisites: string }
 export interface Finding {
   id: string; key: string; target: string; title: string; status: FindingStatus; rating: Rating;

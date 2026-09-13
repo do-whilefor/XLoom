@@ -5,6 +5,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { ModelRuntime, type ModelRuntimeAuthOverrides } from "@earendil-works/pi-coding-agent";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { ModelConfig } from "../types.js";
+import { modelRuntimePaths } from "./storage.js";
 
 export interface ResolvedModel {
   model: Model<Api>;
@@ -23,7 +24,7 @@ function checkConfiguration(runtime: ModelRuntime): void {
 async function createRuntime(signal?: AbortSignal): Promise<ModelRuntime> {
   signal?.throwIfAborted();
   // Pi owns auth.json, models.json, environment lookup, cached catalogs and OAuth refresh.
-  const runtime = await piOperation(() => ModelRuntime.create({ allowModelNetwork: false, signal }), signal,
+  const runtime = await piOperation(() => ModelRuntime.create({ ...modelRuntimePaths(), allowModelNetwork: false, signal }), signal,
     "Pi model runtime could not be initialized; check the Pi configuration.");
   signal?.throwIfAborted();
   checkConfiguration(runtime);

@@ -1,3 +1,4 @@
+import { modelRuntimePaths } from "../src/runtime/storage.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ const saveModels = (providers: Record<string, unknown>) => writeFile(join(direct
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "xloom-models-test-"));
-  vi.stubEnv("PI_CODING_AGENT_DIR", directory);
+  vi.stubEnv("XLOOM_HOME", directory);
   for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "PI_OFFLINE", "XLOOM_TEST_KEY"]) vi.stubEnv(name, undefined);
   configureRuntime = undefined;
   // Exercise Pi's real config/auth code, but never a user credential store or a network catalog.
@@ -41,7 +42,7 @@ describe("Pi model resolution", () => {
     vi.stubEnv("XLOOM_TEST_KEY", "test-model-key");
     const requestSignal = signal();
     const result = await resolveModel({ ...selection, apiKeyEnv: "XLOOM_TEST_KEY", maxTokens: 2048 }, requestSignal);
-    expect(ModelRuntime.create).toHaveBeenCalledWith({ allowModelNetwork: false, signal: requestSignal });
+    expect(ModelRuntime.create).toHaveBeenCalledWith({ ...modelRuntimePaths(), allowModelNetwork: false, signal: requestSignal });
     expect(result.model.id).toBe(selection.model);
     expect(result.model.maxTokens).toBe(2048);
     expect(result.secrets).toContain("test-model-key");

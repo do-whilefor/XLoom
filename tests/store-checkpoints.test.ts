@@ -249,7 +249,7 @@ describe("conditional research progress", () => {
     const first = claim(store);
     const board = store.applyExecution(first.runId, output(first.artifacts), usage);
     const second = claim(store);
-    writeFileSync(path.join(store.workspace, board.evidence[0].path), "tampered archive");
+    writeFileSync(path.join(store.dataDir, board.evidence[0].path), "tampered archive");
     const before = store.snapshot();
     expect(() => store.applyExecution(second.runId, { summary: "Reuse", result: "done", attempts: [{ ...output(second.artifacts).attempts![0], identity: "account-B", evidenceRefs: [board.evidence[0].id] }] }, usage)).toThrow(/Evidence changed/);
     expect(store.snapshot()).toEqual(before);

@@ -4,12 +4,14 @@ import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { CHAT_GOAL, defaultConfig, loadConfig, saveNewConfig } from "./config.js";
+import { CHAT_GOAL, defaultConfig, ensureGlobalSettings, loadConfig, saveNewConfig, workspaceDefaults } from "./config.js";
 import { BlackboardStore } from "./store.js";
 import { LoopController } from "./controller.js";
 import { DemoRunner } from "./demo.js";
 import { renderReport } from "./report.js";
 import { currentTaskId, readSavedBoard, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { ensureProject, projectConfigPath, projectDirectory, xloomHome } from "./paths.js";
+import { migrateWorkspace } from "./migration.js";
 
 const help = `xloom — local two-agent research loop (Windows MVP)
 
@@ -19,6 +21,8 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom report               Print a Markdown report with evidence references
   xloom doctor               Check local Node/PowerShell/config/model credentials
   xloom models [--provider NAME]  List Pi's local built-in/cached/custom model catalog
+  xloom paths                Show workspace, user data and configuration paths
+  xloom migrate [--pi-dir PATH]  Import legacy workspace data / Pi settings; retain originals
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
 Options: --workspace PATH  --config PATH  --help
@@ -33,15 +37,16 @@ Tools run with the current user's OS permissions.
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ options: {
     goal: { type: "string" }, scope: { type: "string" }, workspace: { type: "string" }, config: { type: "string" },
-    provider: { type: "string" },
+    provider: { type: "string" }, "pi-dir": { type: "string" },
     headless: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
   }, allowPositionals: true, strict: true });
   const command = positionals[0] ?? "run";
   if (values.help || command === "help") { process.stdout.write(help); return; }
   if (positionals.length > 1) throw new Error("Unexpected positional arguments; use --goal for task text.");
   const demo = command === "demo";
-  if (!["init", "run", "status", "report", "doctor", "demo", "models"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
+  if (!["init", "run", "status", "report", "doctor", "demo", "models", "paths", "migrate"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
   if (values.provider !== undefined && command !== "models") throw new Error("--provider is only supported by the models command.");
+  if (values["pi-dir"] !== undefined && command !== "migrate") throw new Error("--pi-dir is only supported by migrate.");
   if (command === "models") {
     const { listModels } = await import("./runtime/index.js");
     const models = await listModels(values.provider);
@@ -51,16 +56,35 @@ async function main(): Promise<void> {
   }
   if (demo && (values.workspace || values.config)) throw new Error("Demo always uses a new temporary workspace; omit --workspace and --config.");
   const workspace = demo ? mkdtempSync(path.join(tmpdir(), "xloom-demo-")) : realpathSync(path.resolve(values.workspace ?? process.cwd()));
-  const configPath = path.resolve(workspace, values.config ?? "xloom.json");
+  const configPath = values.config ? path.resolve(workspace, values.config) : projectConfigPath(workspace);
+  if (command === "paths") {
+    process.stdout.write(`${JSON.stringify({ workspace, home: xloomHome(), project: projectDirectory(workspace), config: configPath }, null, 2)}\n`);
+    return;
+  }
+  if (command === "init" && !values.goal?.trim()) throw new Error("init requires --goal. Your input defines the authorized task and targets.");
+  if ((command === "run" || demo) && !values.headless && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("TUI needs an interactive terminal. Use --headless to run explicitly without a TUI.");
+  if (await migrateWorkspace(workspace)) process.stderr.write(`Imported legacy Xloom data into ${projectDirectory(workspace)}; original files retained.\n`);
+  if (command === "migrate") {
+    if (values["pi-dir"]) {
+      const { importPiSettings } = await import("./runtime/storage.js");
+      importPiSettings(realpathSync(path.resolve(values["pi-dir"])));
+    }
+    if (existsSync(configPath)) ensureGlobalSettings(loadConfig(configPath));
+    process.stdout.write(`Data: ${projectDirectory(workspace)}\nOriginal files retained; existing imported data is never overwritten.\n`);
+    return;
+  }
   if (command === "init") {
     if (!values.goal?.trim()) throw new Error("init requires --goal. Your input defines the authorized task and targets.");
-    saveNewConfig(configPath, defaultConfig(values.goal, values.scope));
+    ensureProject(workspace);
+    const config = workspaceDefaults(values.goal!, values.scope);
+    saveNewConfig(configPath, config);
+    ensureGlobalSettings(config);
     process.stdout.write(`Created ${configPath}\nChoose models via xloom models, configure context, and use Pi credentials or a model key environment variable. Goal completion, not a Step count, ends the loop.\n`);
     return;
   }
   if (command === "status" || command === "report") {
     const board = readSavedBoard(workspace);
-    process.stdout.write(command === "report" ? renderReport(board) : `${JSON.stringify({ status: board.status, outcome: board.outcome, reason: board.reason, revision: board.revision, steps: board.completedSteps, findings: board.findings.length, usage: board.usage, elapsedMs: board.elapsedMs ?? 0 }, null, 2)}\n`);
+    process.stdout.write(command === "report" ? renderReport(board, { workspace, dataDir: taskDirectory(workspace, currentTaskId(workspace)) }) : `${JSON.stringify({ status: board.status, outcome: board.outcome, reason: board.reason, revision: board.revision, steps: board.completedSteps, findings: board.findings.length, usage: board.usage, elapsedMs: board.elapsedMs ?? 0 }, null, 2)}\n`);
     return;
   }
   if (command === "doctor") {
@@ -74,19 +98,22 @@ async function main(): Promise<void> {
         const resolved = await resolveModel(config.models[role] ?? config.models.execute, new AbortController().signal);
         process.stdout.write(`${role}: ${resolved.model.provider}/${resolved.model.id}; Pi credential resolution OK (no model request)\n`);
       }
-    } else process.stdout.write("No xloom.json yet; use init --goal. No model request was made.\n");
+    } else process.stdout.write(`No workspace settings yet (${configPath}); use init --goal. No model request was made.\n`);
     return;
   }
   if (!values.headless && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("TUI needs an interactive terminal. Use --headless to run explicitly without a TUI.");
   if (!demo && !values.headless) {
-    if (!existsSync(configPath)) saveNewConfig(configPath, defaultConfig(CHAT_GOAL));
+    ensureProject(workspace);
+    if (!existsSync(configPath)) saveNewConfig(configPath, workspaceDefaults(CHAT_GOAL));
+    ensureGlobalSettings(loadConfig(configPath));
     const [{ AppController }, { startTui }] = await Promise.all([import("./app.js"), import("./ui/index.js")]);
     const app = new AppController(workspace, configPath, loadConfig(configPath));
     try { await startTui(app, workspace); } finally { await app.close(); }
     return;
   }
   const config = demo ? defaultConfig("DEMO: validate only the offline synthetic protocol fixture", "Local synthetic fixture; no external target") : loadConfig(configPath);
-  if (demo) { config.title = "xloom DEMO (synthetic, no live test)"; saveNewConfig(configPath, config); process.stdout.write(`DEMO workspace: ${workspace}\n`); }
+  if (demo) { ensureProject(workspace); config.title = "xloom DEMO (synthetic, no live test)"; saveNewConfig(configPath, config); process.stdout.write(`DEMO workspace: ${workspace}\n`); }
+  else ensureGlobalSettings(config);
   const runner = demo ? new DemoRunner() : new (await import("./runtime/index.js")).PiRunner();
   const sessionLock = new WorkspaceLock(workspace);
   let store: BlackboardStore;

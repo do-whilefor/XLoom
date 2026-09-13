@@ -10,6 +10,7 @@ import { PiRunner } from "./runtime/pi-runner.js";
 import { SettingsService, type ModelDisplayInfo } from "./runtime/settings.js";
 import { projectConfigSchema, usageSchema } from "./schema.js";
 import { currentTaskId, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { ensureProject } from "./paths.js";
 import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, ProjectConfig, Usage } from "./types.js";
 
 export interface AppOptions {
@@ -44,6 +45,7 @@ export class AppController {
 
   constructor(workspace: string, private readonly configPath: string, config: ProjectConfig, options: AppOptions = {}) {
     this.workspace = realpathSync(workspace);
+    ensureProject(this.workspace);
     this.config = projectConfigSchema.parse(config);
     this.runner = options.runner ?? new PiRunner();
     this.chatSession = options.chat ?? new ChatSession();

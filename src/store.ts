@@ -2,12 +2,14 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { ensureProject, evidencePath } from "./paths.js";
+import { taskDirectory } from "./workspace.js";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
-const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
+export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cost: 0 });
 const id = (prefix: string) => `${prefix}-${randomUUID().slice(0, 12)}`;
 const normalize = (value: string) => value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
@@ -32,8 +34,9 @@ export class BlackboardStore {
   constructor(workspace: string, config: ProjectConfig, options: { taskId?: string } = {}) {
     this.workspace = realpathSync(workspace);
     assert(options.taskId === undefined || /^[a-zA-Z0-9_-]{1,100}$/.test(options.taskId), "Invalid task ID.");
-    this.dataDir = options.taskId ? path.join(this.workspace, ".xloom", "tasks", options.taskId) : path.join(this.workspace, ".xloom");
-    this.projectionPath = options.taskId ? path.join(this.dataDir, "blackboard.md") : path.join(this.workspace, "state", "blackboard.md");
+    ensureProject(this.workspace);
+    this.dataDir = taskDirectory(this.workspace, options.taskId);
+    this.projectionPath = path.join(this.dataDir, "blackboard.md");
     this.lockPath = path.join(this.dataDir, "controller.lock");
     config = projectConfigSchema.parse(config);
     mkdirSync(this.dataDir, { recursive: true });
@@ -438,12 +441,12 @@ export class BlackboardStore {
     else assert(hash(readFileSync(destination)) === sha256, "Evidence archive integrity failure.");
     const text = data.subarray(0, 4096).toString("utf8");
     const excerpt = text.includes("\u0000") ? "[binary artifact; inspect the referenced file]" : text + (data.length > 4096 ? "\n[truncated: inspect the referenced artifact]" : "");
-    return { id: id("E"), path: path.relative(this.workspace, destination).replaceAll("\\", "/"), sha256, bytes: data.length, description, runId, stepId, excerpt };
+    return { id: id("E"), path: path.relative(this.dataDir, destination).replaceAll("\\", "/"), pathBase: "task", sha256, bytes: data.length, description, runId, stepId, excerpt };
   }
 
   verifyEvidence(evidence: Evidence): void {
     assert(evidence, "Evidence not found.");
-    const file = realpathSync(path.resolve(this.workspace, evidence.path));
+    const file = realpathSync(evidencePath(evidence, this.dataDir, this.workspace));
     assert(inside(realpathSync(path.join(this.dataDir, "evidence")), file), "Evidence escaped archive.");
     const data = readFileSync(file);
     assert(data.length === evidence.bytes && hash(data) === evidence.sha256, `Evidence changed: ${evidence.id}`);
@@ -486,13 +489,17 @@ export class BlackboardStore {
       const file = this.projectionPath;
       assert(!existsSync(file) || readFileSync(file, "utf8").startsWith(marker), "Preserving existing state/blackboard.md; not an xloom-generated view.");
       const board = this.snapshot();
-      const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
-      for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
-      rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${item.path} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
       const temporary = `${file}.${this.lockToken}.tmp`;
-      writeFileSync(temporary, rows.join("\n"), "utf8");
+      writeFileSync(temporary, renderBlackboard(board, this.dataDir, this.workspace), "utf8");
       renameSync(temporary, file);
       this.projectionError = null;
     } catch (error) { this.projectionError = (error as Error).message; }
   }
+}
+
+export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspace: string): string {
+  const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
+  for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
+  rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
+  return rows.join("\n");
 }

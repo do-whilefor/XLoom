@@ -1,3 +1,4 @@
+import { projectDirectory, workspaceLockPath } from "../src/paths.js";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -113,7 +114,7 @@ describe("chat / red-team application boundary", () => {
     expect(test.runRequests).toHaveLength(0);
     expect(test.app.snapshot().hints).toEqual([]);
     expect(test.app.getSessionInfo().usage).toEqual(usage);
-    expect(existsSync(path.join(test.root, ".xloom", "blackboard.sqlite"))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(test.root), "blackboard.sqlite"))).toBe(false);
     expect(() => test.app.start()).toThrow(/\/run/);
   });
 
@@ -133,7 +134,7 @@ describe("chat / red-team application boundary", () => {
     expect(readSavedBoard(test.root, firstId).hints[0]?.content).toBe("OLD TASK PRIVATE HINT");
     expect(readSavedBoard(test.root).hints).toEqual([]);
     expect(readSavedBoard(test.root).config.goal).toBe("second fixture goal");
-    expect(readdirSync(path.join(test.root, ".xloom", "tasks"))).toHaveLength(2);
+    expect(readdirSync(path.join(projectDirectory(test.root), "tasks"))).toHaveLength(2);
     expect(loadConfig(test.configPath).goal).toBe(CHAT_GOAL);
   });
 
@@ -188,7 +189,7 @@ describe("chat / red-team application boundary", () => {
   it("preserves a legacy root blackboard and keeps newly requested tasks separate", async () => {
     const test = setup(); await test.app.close();
     const store = new BlackboardStore(test.root, defaultConfig("legacy fixture goal")); store.hint("legacy hint"); store.close();
-    const oldFile = path.join(test.root, ".xloom", "blackboard.sqlite");
+    const oldFile = path.join(projectDirectory(test.root), "blackboard.sqlite");
     const app = new AppController(test.root, test.configPath, test.config, { runner: test.runner, chat: test.chat, settings: test.settings }); apps.push(app);
     expect(app.snapshot().config.goal).toBe("legacy fixture goal");
     await app.runGoal("new fixture goal");
@@ -201,7 +202,7 @@ describe("chat / red-team application boundary", () => {
     const test = setup();
     expect(() => test.app.runGoal(" ")).toThrow();
     expect(currentTaskId(test.root)).toBeUndefined();
-    expect(existsSync(path.join(test.root, ".xloom", "tasks"))).toBe(false);
+    expect(existsSync(path.join(projectDirectory(test.root), "tasks"))).toBe(false);
   });
 
   it("requires explicit task context for hints and metacognition", () => {
@@ -246,7 +247,7 @@ describe("chat / red-team application boundary", () => {
     await test.app.close();
     expect(closeStore).toHaveBeenCalledOnce();
     expect(test.chat.reset).toHaveBeenCalledOnce();
-    expect(existsSync(path.join(test.root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(workspaceLockPath(test.root))).toBe(false);
     expect(existsSync(path.join(store.dataDir, "controller.lock"))).toBe(false);
   });
 });
@@ -412,7 +413,7 @@ describe("workspace ownership", () => {
     expect(() => test.app.chat("after close")).toThrow(/已关闭/);
     release(); await running; await Promise.all([first, second]);
     expect(closed).toBe(true);
-    expect(existsSync(path.join(test.root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(workspaceLockPath(test.root))).toBe(false);
   });
 
   it("keeps one live application per workspace and releases its own lock", async () => {
@@ -420,20 +421,20 @@ describe("workspace ownership", () => {
     expect(() => new WorkspaceLock(test.root)).toThrow(/Another xloom session/);
     await test.app.close();
     const lock = new WorkspaceLock(test.root); lock.close();
-    expect(existsSync(path.join(test.root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(workspaceLockPath(test.root))).toBe(false);
   });
 
   it("rejects malformed task pointers without reading outside the workspace", async () => {
     const test = setup(); await test.app.close();
-    writeFileSync(path.join(test.root, ".xloom", "current-task.json"), JSON.stringify({ taskId: "../../outside" }));
+    writeFileSync(path.join(projectDirectory(test.root), "current-task.json"), JSON.stringify({ taskId: "../../outside" }));
     expect(() => readSavedBoard(test.root)).toThrow(/Invalid task ID/);
     expect(() => new AppController(test.root, test.configPath, test.config)).toThrow(/Invalid task ID/);
-    expect(existsSync(path.join(test.root, ".xloom", "session.lock"))).toBe(false);
+    expect(existsSync(workspaceLockPath(test.root))).toBe(false);
   });
 
   it("recovers a stale session under the recovery guard and releases that guard", async () => {
     const test = setup(); await test.app.close();
-    const file = path.join(test.root, ".xloom", "session.lock");
+    const file = workspaceLockPath(test.root);
     writeFileSync(file, JSON.stringify({ pid: 123456789, token: "stale-owner" }));
     const realKill = process.kill.bind(process);
     vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
@@ -455,7 +456,7 @@ describe("workspace ownership", () => {
 
   it("does not inspect or remove an owner when another recovery guard exists", async () => {
     const test = setup(); await test.app.close();
-    const file = path.join(test.root, ".xloom", "session.lock");
+    const file = workspaceLockPath(test.root);
     const content = JSON.stringify({ pid: 123456789, token: "existing-owner" });
     writeFileSync(file, content); writeFileSync(`${file}.recovery`, "other-recovery-owner");
     const kill = vi.spyOn(process, "kill");
@@ -468,7 +469,7 @@ describe("workspace ownership", () => {
   it("never removes a replacement session lock when closing an older owner", async () => {
     const test = setup(); await test.app.close();
     const lock = new WorkspaceLock(test.root);
-    const file = path.join(test.root, ".xloom", "session.lock");
+    const file = workspaceLockPath(test.root);
     const replacement = JSON.stringify({ pid: process.pid, token: "replacement-owner" });
     writeFileSync(file, replacement);
     lock.close();

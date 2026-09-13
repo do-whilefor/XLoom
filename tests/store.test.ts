@@ -1,3 +1,4 @@
+import { projectDirectory } from "../src/paths.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,7 +95,7 @@ describe("transactional blackboard", () => {
     const store = openStore();
     expect(store.snapshot()).toMatchObject({ revision: 0, status: "idle", outcome: null, facts: [], usage: { input: 0, output: 0, cost: 0 }, goals: [{ id: "G0", status: "active", parentId: null }] });
     expect(store.events().map(event => event.kind)).toEqual(["initialized"]);
-    expect(readFileSync(path.join(store.workspace, "state", "blackboard.md"), "utf8")).toContain("SQLite is authoritative");
+    expect(readFileSync(store.projectionPath, "utf8")).toContain("SQLite is authoritative");
   });
 
   it("rolls back graph, run completion, usage and audit event together on invalid references", () => {
@@ -320,7 +321,7 @@ describe("transactional blackboard", () => {
     const store = openStore();
     const first = produceHit(store);
     const { runId } = claimStep(store, "Reference a fact with damaged archived evidence");
-    const archive = path.join(store.workspace, first.evidence[0].path);
+    const archive = path.join(store.dataDir, first.evidence[0].path);
     if (damage === "tampered") writeFileSync(archive, "changed fixture archive");
     else rmSync(archive);
     const before = store.snapshot();
@@ -383,7 +384,7 @@ describe("evidence boundaries and integrity", () => {
     const evidence = board.evidence[0];
     expect(evidence.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
     expect(evidence.bytes).toBe(bytes.length);
-    expect(readFileSync(path.join(store.workspace, evidence.path))).toEqual(bytes);
+    expect(readFileSync(path.join(store.dataDir, evidence.path))).toEqual(bytes);
     writeFileSync(path.join(artifacts, "response.txt"), "source changed after collection");
     expect(() => store.verifyEvidence(evidence)).not.toThrow();
   });
@@ -391,9 +392,9 @@ describe("evidence boundaries and integrity", () => {
   it.each(["relative traversal", "absolute path"])("rejects evidence outside run artifacts via %s", (form) => {
     const store = openStore();
     const { runId } = claimStep(store);
-    const outside = path.join(store.workspace, "outside.txt");
+    const outside = path.join(store.dataDir, "outside.txt");
     writeFileSync(outside, "outside fixture");
-    const source = form === "absolute path" ? outside : path.join("..", "..", "..", "..", "outside.txt");
+    const source = form === "absolute path" ? outside : path.relative(path.join(store.dataDir, "runs", runId, "artifacts"), outside);
     expect(() => store.applyExecution(runId, hitOutput(source), usage)).toThrow(/inside this run's artifacts/);
     expect(store.snapshot().evidence).toEqual([]);
   });
@@ -401,7 +402,7 @@ describe("evidence boundaries and integrity", () => {
   it("rejects a directory junction escape from the artifacts directory", () => {
     const store = openStore();
     const { runId, artifacts } = claimStep(store);
-    const outside = path.join(store.workspace, "outside-directory");
+    const outside = path.join(store.dataDir, "outside-directory");
     mkdirSync(outside);
     writeFileSync(path.join(outside, "response.txt"), "outside fixture");
     symlinkSync(outside, path.join(artifacts, "escape"), process.platform === "win32" ? "junction" : "dir");
@@ -446,7 +447,7 @@ describe("evidence boundaries and integrity", () => {
   it("detects archive tampering before a finding can be verified", () => {
     const store = openStore();
     const board = produceHit(store);
-    writeFileSync(path.join(store.workspace, board.evidence[0].path), "tampered");
+    writeFileSync(path.join(store.dataDir, board.evidence[0].path), "tampered");
     expect(() => store.verifyEvidence(board.evidence[0])).toThrow(/Evidence changed/);
     expect(() => runDecision(store, verifiedDecision(store), "metacog")).toThrow(/Evidence changed/);
     expect(store.snapshot().findings[0]).toMatchObject({ status: "technical_hit", rating: "unrated" });
@@ -456,7 +457,7 @@ describe("evidence boundaries and integrity", () => {
     const store = openStore();
     produceHit(store);
     const reviewed = runDecision(store, verifiedDecision(store));
-    writeFileSync(path.join(store.workspace, reviewed.evidence[0].path), "tampered after review");
+    writeFileSync(path.join(store.dataDir, reviewed.evidence[0].path), "tampered after review");
     expect(() => runDecision(store, completeGoal(store), "metacog")).toThrow(/Evidence changed/);
     expect(store.snapshot().outcome).toBeNull();
   });
@@ -469,7 +470,7 @@ describe("evidence boundaries and integrity", () => {
       reviews: [{ findingId: board.findings[0].id, status: "closed", rating: "unrated", reason: "Fixture counterexample refutes the hypothesis; reopen for a new identity" }],
     };
     const reviewed = runDecision(store, review);
-    writeFileSync(path.join(store.workspace, reviewed.evidence[0].path), "tampered after review");
+    writeFileSync(path.join(store.dataDir, reviewed.evidence[0].path), "tampered after review");
     expect(() => runDecision(store, completeGoal(store, outcome), "metacog")).toThrow(/Evidence changed/);
     expect(store.snapshot().outcome).toBeNull();
   });
@@ -781,7 +782,7 @@ describe("root goal completion", () => {
       facts: [{ ref: "coverage-f", description: "Remaining fixture coverage observed", evidenceRefs: ["coverage-e"] }],
     }, usage);
     const evidence = board.evidence.find(item => !board.findings[0].evidenceIds.includes(item.id))!;
-    const archived = path.join(store.workspace, evidence.path);
+    const archived = path.join(store.dataDir, evidence.path);
     if (damage === "changed") writeFileSync(archived, "tampered coverage evidence");
     else rmSync(archived);
     const decision = completeGoal(store);
@@ -957,8 +958,9 @@ describe("single controller and restart recovery", () => {
   it("does not overwrite user-owned state/blackboard.md and records projection failure", () => {
     const root = workspace();
     mkdirSync(path.join(root, "state"));
-    const projection = path.join(root, "state", "blackboard.md");
+    const projection = path.join(projectDirectory(root), "blackboard.md");
     const original = "# Existing user research\nDo not overwrite this file.\n";
+    mkdirSync(path.dirname(projection), { recursive: true });
     writeFileSync(projection, original);
     const store = openStore(root);
     expect(store.projectionError).toMatch(/Preserving existing/);

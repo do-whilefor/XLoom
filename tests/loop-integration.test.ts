@@ -1,3 +1,4 @@
+import { taskDirectory } from "../src/workspace.js";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -145,7 +146,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
         }
         if (prematureInput) {
           expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
-          expect(JSON.stringify(context.messages.at(-1))).toContain(".xloom");
+          expect(JSON.stringify(context.messages.at(-1))).not.toContain(".xloom");
         }
         return json({ ...plan(), ...(prematureInput ? { conclusion: {
           outcome: "NEED_INPUT" as const, reason: "The planned fixture file has not been written by Execute yet.",
@@ -169,7 +170,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     expect(board.goals[0]).toMatchObject({ id: "G0", status: "satisfied", factIds: [board.facts[0]!.id] });
     expect(board.findings[0]).toMatchObject({ status: "closed", rating: "unrated" });
     expect(board.evidence).toHaveLength(1);
-    const archived = readFileSync(join(test.root, board.evidence[0]!.path), "utf8");
+    const archived = readFileSync(join(taskDirectory(test.root), board.evidence[0]!.path), "utf8");
     expect(archived).toBe(syntheticArtifact);
     expect(board.evidence[0]!.sha256).toBe(createHash("sha256").update(syntheticArtifact).digest("hex"));
     expect(test.store.runs().map(run => [run.mode, run.status])).toEqual([

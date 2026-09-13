@@ -95,7 +95,7 @@ export function formatBoard(board: BoardSnapshot): string {
   section("Facts", board.facts, 10, (f) => `${f.id} ${compact(f.description)} → ${f.evidenceIds.join(", ") || "无证据引用"}`);
   section("Steps", board.steps, 10, (s) => `${s.id} [${s.status}] ${s.goalId} ← ${s.from.join(",") || "—"} · ${compact(s.description)}`);
   section("Findings", board.findings, 8, (f) => `${f.id} [${f.status}/${f.rating}] ${compact(f.title)}\n    evidence: ${f.evidenceIds.join(", ") || "—"}\n    next: ${compact(f.next)}`);
-  section("Evidence", board.evidence, 8, (e) => `${e.id} ${compact(e.path)} · sha256:${e.sha256.slice(0, 12)}`);
+  section("Evidence", board.evidence, 8, (e) => `${e.id} ${e.pathBase === "task" ? "[任务目录] " : ""}${compact(e.path)} · sha256:${e.sha256.slice(0, 12)}`);
   section("Hints", board.hints, 4, (h) => `${h.id} ${compact(h.content)}`);
   return lines.join("\n");
 }

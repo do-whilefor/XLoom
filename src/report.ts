@@ -1,6 +1,7 @@
+import { evidencePath } from "./paths.js";
 import type { BoardSnapshot } from "./types.js";
 
-export function renderReport(board: BoardSnapshot): string {
+export function renderReport(board: BoardSnapshot, location?: { dataDir: string; workspace: string }): string {
   const lines = [`# ${board.config.title}`, "", `State: ${board.status} | Outcome: ${board.outcome ?? "not concluded"}`, "", board.reason, "", `Goal: ${board.config.goal}`, `Authorized scope: ${board.config.scope}`, "", "## Findings", ""];
   for (const finding of board.findings) {
     lines.push(`### ${finding.id} — ${finding.title}`, "", `Status: ${finding.status} | Rating: ${finding.rating}`, `Target: ${finding.target}`, `Next / reopening conditions: ${finding.next}`, "");
@@ -10,7 +11,7 @@ export function renderReport(board: BoardSnapshot): string {
   }
   if (!board.findings.length) lines.push("No evidence-backed finding has been recorded.", "");
   lines.push("## Evidence index", "");
-  for (const evidence of board.evidence) lines.push(`- ${evidence.id}: ${evidence.path} — ${evidence.description}`, `  SHA-256: ${evidence.sha256} (${evidence.bytes} bytes)`);
+  for (const evidence of board.evidence) lines.push(`- ${evidence.id}: ${location ? evidencePath(evidence, location.dataDir, location.workspace) : evidence.path} — ${evidence.description}`, `  SHA-256: ${evidence.sha256} (${evidence.bytes} bytes)`);
   lines.push("", "Integrity and schema checks do not independently establish a vulnerability. Review original artifacts and reproduce each reported impact within the authorized scope.", "");
   return lines.join("\n");
 }

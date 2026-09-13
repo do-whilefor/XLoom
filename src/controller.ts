@@ -78,7 +78,7 @@ export class LoopController {
       let snapshot = this.snapshot();
       if (this.manualMeta) { mode = "metacog"; trigger = { kind: "manual", reason: "User requested a fresh metacognitive review." }; this.manualMeta = false; }
       const exhausted = this.budgetReason(snapshot);
-      if (exhausted) { this.store.setStatus("paused", `${exhausted}; explicit resource limit reached, not Goal completion. Review configured limits in xloom.json before resuming.`); this.board("state"); return; }
+      if (exhausted) { this.store.setStatus("paused", `${exhausted}; explicit resource limit reached, not Goal completion. Review configured workspace limits before resuming.`); this.board("state"); return; }
       const step: Step | undefined = mode === "execute" ? this.policy.selectStep(snapshot) : undefined;
       if (step && pendingStepReviews(snapshot).some(review => review.stepId === step.id)) {
         this.store.setStatus("paused", `Scheduling policy selected Step ${step.id} with superseded dependencies. Review and replace this plan before resuming.`);
