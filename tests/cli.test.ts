@@ -18,6 +18,22 @@ const tsxFile = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs")
 const roots: string[] = [];
 const missingKeyVariable = "XLOOM_CLI_TEST_MISSING_MODEL_CREDENTIAL_17";
 
+it("lists tasks and current data paths without acquiring a writer or changing the board", () => {
+  const root = workspace();
+  const store = new BlackboardStore(root, defaultConfig("Saved task fixture"), { taskId: "task-inventory" });
+  try {
+    selectTask(root, "task-inventory");
+    const before = store.snapshot();
+    const result = cli(["tasks"], root);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toContainEqual(expect.objectContaining({ id: "task-inventory", selected: true, goal: "Saved task fixture" }));
+    const paths = cli(["paths"], root);
+    expect(paths.status).toBe(0);
+    expect(JSON.parse(paths.stdout)).toMatchObject({ task: store.dataDir, chats: path.join(projectDirectory(root), "chats") });
+    expect(store.snapshot()).toEqual(before);
+  } finally { store.close(); }
+});
+
 function workspace(): string {
   const root = mkdtempSync(path.join(tmpdir(), "xloom-cli-test-"));
   roots.push(root);

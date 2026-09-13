@@ -9,7 +9,7 @@ import { BlackboardStore } from "./store.js";
 import { LoopController } from "./controller.js";
 import { DemoRunner } from "./demo.js";
 import { renderReport } from "./report.js";
-import { currentTaskId, readSavedBoard, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { currentTaskId, listTasks, readSavedBoard, taskDirectory, WorkspaceLock } from "./workspace.js";
 import { ensureProject, projectConfigPath, projectDirectory, xloomHome } from "./paths.js";
 import { migrateWorkspace } from "./migration.js";
 
@@ -22,12 +22,13 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom doctor               Check local Node/PowerShell/config/model credentials
   xloom models [--provider NAME]  List Pi's local built-in/cached/custom model catalog
   xloom paths                Show workspace, user data and configuration paths
+  xloom tasks                List saved research tasks without running agents
   xloom migrate [--pi-dir PATH]  Import legacy workspace data / Pi settings; retain originals
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
 Options: --workspace PATH  --config PATH  --help
 TUI: plain text chats; /run GOAL starts a separate two-agent task
-     /model /apikey /new /start /pause /stop /hint /meta /board /help /exit
+     /model /apikey /new /tasks /open TASK_ID /paths /start /pause /stop /hint /meta /board /help /exit
      Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
 Chat and Execute have read/write/edit/powershell; Decide and metacog have read only.
@@ -44,7 +45,7 @@ async function main(): Promise<void> {
   if (values.help || command === "help") { process.stdout.write(help); return; }
   if (positionals.length > 1) throw new Error("Unexpected positional arguments; use --goal for task text.");
   const demo = command === "demo";
-  if (!["init", "run", "status", "report", "doctor", "demo", "models", "paths", "migrate"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
+  if (!["init", "run", "status", "report", "doctor", "demo", "models", "paths", "tasks", "migrate"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
   if (values.provider !== undefined && command !== "models") throw new Error("--provider is only supported by the models command.");
   if (values["pi-dir"] !== undefined && command !== "migrate") throw new Error("--pi-dir is only supported by migrate.");
   if (command === "models") {
@@ -57,8 +58,12 @@ async function main(): Promise<void> {
   if (demo && (values.workspace || values.config)) throw new Error("Demo always uses a new temporary workspace; omit --workspace and --config.");
   const workspace = demo ? mkdtempSync(path.join(tmpdir(), "xloom-demo-")) : realpathSync(path.resolve(values.workspace ?? process.cwd()));
   const configPath = values.config ? path.resolve(workspace, values.config) : projectConfigPath(workspace);
+  if (command === "tasks") { process.stdout.write(`${JSON.stringify(listTasks(workspace), null, 2)}\n`); return; }
   if (command === "paths") {
-    process.stdout.write(`${JSON.stringify({ workspace, home: xloomHome(), project: projectDirectory(workspace), config: configPath }, null, 2)}\n`);
+    const taskId = currentTaskId(workspace);
+    process.stdout.write(`${JSON.stringify({ workspace, home: xloomHome(), project: projectDirectory(workspace), config: configPath,
+      task: taskId || existsSync(path.join(projectDirectory(workspace), "blackboard.sqlite")) ? taskDirectory(workspace, taskId) : undefined,
+      chats: path.join(projectDirectory(workspace), "chats") }, null, 2)}\n`);
     return;
   }
   if (command === "init" && !values.goal?.trim()) throw new Error("init requires --goal. Your input defines the authorized task and targets.");

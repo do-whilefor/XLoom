@@ -2,6 +2,7 @@ import { stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi
 import type { AgentHandoff, BoardSnapshot, LoopEvent, Mode, RuntimeEvent, Usage } from "../types.js";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { retainToolOutput } from "./tool-output.js";
+import type { TaskInfo } from "../workspace.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -19,6 +20,9 @@ export interface UiController {
   chat?(text: string): Promise<void>;
   runGoal?(goal: string): Promise<void>;
   resetChat?(): void;
+  listTasks?(): TaskInfo[];
+  openTask?(id: string): void;
+  storagePaths?(): object;
   getSessionInfo?(): SessionInfo;
   getModels?(): Promise<{ provider: string; model: string; name: string }[]>;
   getProviders?(): Promise<{ id: string; name: string; authTypes: string[] }[]>;
@@ -32,6 +36,7 @@ export const HELP = [
   "普通输入：和模型聊天，可使用 read / write / edit / powershell；/new 清空聊天",
   "/run 目标  新建双 Agent 任务（不读取聊天历史）",
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
+  "/tasks  历史任务    /open 任务ID  选择任务    /paths  数据位置",
   "/hint 内容  写入黑板    /meta  请求元认知    /board  查看黑板",
   "/help  帮助    /exit  退出",
   "/model [all|chat|decide|execute]  搜索切换模型；默认应用所有角色",
@@ -325,7 +330,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
   }
   const [command, ...rest] = value.split(/\s+/);
   const argument = value.slice(command!.length).trim();
-  if (rest.length && !["/hint", "/run", "/model", "/apikey"].includes(command!)) {
+  if (rest.length && !["/hint", "/run", "/model", "/apikey", "/open"].includes(command!)) {
     actions.print("xloom", `命令 ${command} 不接受参数。`);
     return;
   }
@@ -350,6 +355,17 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else actions.print("xloom", "当前模式不支持凭据设置。");
       break;
     case "/start": actions.start(); break;
+    case "/tasks": {
+      const tasks = controller.listTasks?.();
+      actions.print("Tasks", tasks?.length ? tasks.map(task => `${task.selected ? "* " : "  "}${task.id} · ${task.error ?? task.status}\n  ${task.goal ?? task.directory}`).join("\n") : "当前工作区尚无研究任务。");
+      break;
+    }
+    case "/open":
+      if (!argument || rest.length !== 1) actions.print("xloom", "用法：/open 完整任务ID；使用 /tasks 查看。");
+      else if (controller.openTask) { controller.openTask(argument); actions.print("xloom", "已选择任务；/board 查看，/start 继续研究。"); }
+      else actions.print("xloom", "当前模式不支持切换任务。");
+      break;
+    case "/paths": actions.print("Paths", controller.storagePaths ? JSON.stringify(controller.storagePaths(), null, 2) : "使用 xloom paths 查看数据目录。"); break;
     case "/pause": controller.pause(); actions.print("xloom", "已请求暂停；正在取消当前运行。"); break;
     case "/stop": controller.stop(); actions.print("xloom", "已请求停止；黑板与证据保留。"); break;
     case "/meta": controller.requestMetacog(); actions.print("xloom", "已请求 Decide 在下一调度点进行元认知复核。"); break;

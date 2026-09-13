@@ -9,8 +9,8 @@ import { ChatSession, type ChatRequest } from "./runtime/chat.js";
 import { PiRunner } from "./runtime/pi-runner.js";
 import { SettingsService, type ModelDisplayInfo } from "./runtime/settings.js";
 import { projectConfigSchema, usageSchema } from "./schema.js";
-import { currentTaskId, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
-import { ensureProject } from "./paths.js";
+import { currentTaskId, listTasks, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { ensureProject, projectDirectory, xloomHome } from "./paths.js";
 import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, ProjectConfig, Usage } from "./types.js";
 
 export interface AppOptions {
@@ -147,6 +147,29 @@ export class AppController {
     });
   }
   resetChat(): void { this.idle(); this.chatSession.reset(); this.chatUsage = { input: 0, output: 0, cost: 0 }; this.chatStatus = "idle"; this.mode = "chat"; this.refreshDisplayInfo(); this.emit({ type: "session" }); }
+
+  listTasks() { return listTasks(this.workspace); }
+  storagePaths() {
+    return { workspace: this.workspace, home: xloomHome(), project: projectDirectory(this.workspace), config: this.configPath,
+      task: this.store?.dataDir, chats: path.join(projectDirectory(this.workspace), "chats") };
+  }
+  openTask(id: string): void {
+    this.idle();
+    const task = this.listTasks().find(item => item.id === id);
+    if (!task || task.error) throw new Error(task?.error ?? "找不到该任务；使用 /tasks 查看完整 ID。");
+    if (this.store?.dataDir !== task.directory) {
+      const taskId = id === "@legacy" ? undefined : id;
+      const saved = readSavedBoard(this.workspace, taskId ?? null);
+      const store = new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits }, { taskId });
+      try { selectTask(this.workspace, taskId ?? null); } catch (error) { store.close(); throw error; }
+      this.attach(store);
+    }
+    this.mode = "run";
+    this.activeRole = "decide";
+    this.refreshDisplayInfo();
+    this.emit({ type: "board", snapshot: this.snapshot() });
+    this.emit({ type: "session" });
+  }
 
   runGoal(goal: string): Promise<void> {
     this.idle();

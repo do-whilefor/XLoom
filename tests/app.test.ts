@@ -7,7 +7,7 @@ import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { AppController, type AppOptions } from "../src/app.js";
 import { CHAT_GOAL, defaultConfig, loadConfig, saveNewConfig } from "../src/config.js";
 import { BlackboardStore } from "../src/store.js";
-import { currentTaskId, readSavedBoard, WorkspaceLock } from "../src/workspace.js";
+import { currentTaskId, readSavedBoard, taskDirectory, WorkspaceLock } from "../src/workspace.js";
 import type { ChatRequest } from "../src/runtime/chat.js";
 import type { LoopEvent, RunRequest } from "../src/types.js";
 
@@ -36,6 +36,49 @@ function setup(options: AppOptions = {}, describeModel?: NonNullable<AppOptions[
 }
 
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+describe("saved task navigation", () => {
+  it("lists without mutation and opens a historical task without running a model, retaining the selection on restart", async () => {
+    const test = setup();
+    await test.app.runGoal("First synthetic research");
+    const first = currentTaskId(test.root)!;
+    test.app.hint("Retain this finding context");
+    await test.app.runGoal("Second synthetic research");
+    const second = currentTaskId(test.root)!;
+    const before = readSavedBoard(test.root);
+    const calls = test.runRequests.length;
+    expect(test.app.listTasks()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first, selected: false, goal: "First synthetic research" }),
+      expect.objectContaining({ id: second, selected: true }),
+    ]));
+    expect(readSavedBoard(test.root)).toEqual(before);
+    test.app.openTask(first);
+    test.app.openTask(first);
+    expect(test.runRequests).toHaveLength(calls);
+    expect(test.app.snapshot().hints[0]?.content).toBe("Retain this finding context");
+    expect(test.app.storagePaths().task).toBe(taskDirectory(test.root, first));
+    expect(test.app.getSessionInfo().mode).toBe("run");
+    expect(currentTaskId(test.root)).toBe(first);
+    expect(() => test.app.openTask("../outside")).toThrow("找不到");
+    expect(currentTaskId(test.root)).toBe(first);
+    await test.app.close();
+    const reopened = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(reopened);
+    expect(reopened.snapshot().config.goal).toBe("First synthetic research");
+    expect(readSavedBoard(test.root, second).hints).toEqual([]);
+    expect(test.runRequests).toHaveLength(calls);
+  });
+
+  it("can select the retained legacy task explicitly", async () => {
+    const test = setup();
+    const legacy = new BlackboardStore(test.root, defaultConfig("Legacy research")); legacy.close();
+    await test.app.runGoal("New research");
+    expect(test.app.listTasks().some(task => task.id === "@legacy")).toBe(true);
+    test.app.openTask("@legacy");
+    expect(currentTaskId(test.root)).toBeUndefined();
+    expect(test.app.snapshot().config.goal).toBe("Legacy research");
+    expect(test.app.listTasks().find(task => task.id === "@legacy")?.selected).toBe(true);
+  });
+});
 
 describe("session header metadata", () => {
   it("caches optional metadata and discards a stale result after a model change", async () => {

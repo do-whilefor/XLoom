@@ -82,6 +82,18 @@ describe("TUI formatting", () => {
     expect(text).not.toContain("\x1b");
   });
 
+  it("navigates saved tasks and paths without starting execution", () => {
+    const { controller } = fakeController();
+    const openTask = vi.fn();
+    const app = { ...controller, openTask, listTasks: () => [{ id: "task-saved", directory: "saved", selected: true, goal: "Saved research", status: "paused" }], storagePaths: () => ({ task: "saved" }) };
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn() };
+    for (const command of ["/tasks", "/paths", "/open task-saved", "/open", "/open a b"]) dispatchCommand(command, app, actions);
+    expect(openTask).toHaveBeenCalledExactlyOnceWith("task-saved");
+    expect(actions.start).not.toHaveBeenCalled();
+    expect(actions.print).toHaveBeenCalledWith("Tasks", expect.stringContaining("* task-saved"));
+    expect(actions.print).toHaveBeenCalledWith("Paths", expect.stringContaining("saved"));
+  });
+
   it("shows concise FGS, findings and evidence references without inventing ratings", () => {
     const board = snapshot();
     const text = formatBoard(board);
