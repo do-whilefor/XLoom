@@ -4,11 +4,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { evidencePath } from "../paths.js";
 import type { BoardSnapshot } from "../types.js";
 import { wikiIssues, wikiRecord, type WikiSource } from "./model.js";
+import { buildRetrievalIndex, organizeWiki } from "./catalog.js";
+import { isWikiDerived, wikiFilename as filename, wikiGenerator, wikiMarker } from "./format.js";
+export { wikiMarker } from "./format.js";
 
-export const wikiMarker = "<!-- xloom generated wiki; SQLite and archived evidence are authoritative -->";
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 const label = (text: string) => text.replace(/[\r\n]+/g, " ").replace(/[\\`*_[\]<>]/g, "\\$&");
-const filename = (kind: WikiSource["kind"] | "note", id: string) => `${kind}-${digest(id)}.md`;
 const link = (ref: WikiSource) => `[${label(ref.id)}](${filename(ref.kind, ref.id)})`;
 const json = (value: unknown) => {
   const text = JSON.stringify(value, null, 2);
@@ -64,13 +65,17 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
     entries.push({ kind: "note", id: page.id, path, revision: page.revision, reviewRequired: issues.length > 0, issues });
     addIndex("研究解释", `- [${label(page.id)} · ${label(page.title)}](${path}) [${issues.length ? "待复核" : "来源记录未变"}] · 修订 ${page.revision}`);
   }
-  const index = [wikiMarker, "# Xloom 研究 Wiki", "", notice, "", `黑板修订：${board.revision}`, "", "解释页沿用稳定 ID。来源变化会标记待复核，直接编辑 Markdown 不会提交研究记录。", ""];
+  const retrieval = buildRetrievalIndex(board);
+  files.set("search-index.json", `${JSON.stringify(retrieval)}\n`);
+  files.set("organization.json", `${JSON.stringify(organizeWiki(board, retrieval), null, 2)}\n`);
+  const index = [wikiMarker, "# Xloom 研究 Wiki", "", notice, "", `黑板修订：${board.revision}`, "", "解释页沿用稳定 ID。来源变化会标记待复核，直接编辑 Markdown 不会提交研究记录。", "",
+    "[整理与待复核入口](organization.json) · [本地检索索引](search-index.json)（派生资料；原件完整性需单独审计）", ""];
   for (const name of ["目标", "活动与受阻步骤", "未解决 Findings", "已确认影响", "关闭的命题", "研究解释", "条件化尝试", "事实与修订", "步骤历史", "原始证据入口"]) {
     const rows = groups.get(name);
     if (rows?.length) index.push(`## ${name}`, "", ...rows, "");
   }
   files.set("index.md", index.join("\n"));
-  files.set("manifest.json", `${JSON.stringify({ generator: "xloom-wiki-v1", boardRevision: board.revision, entries,
+  files.set("manifest.json", `${JSON.stringify({ generator: wikiGenerator, boardRevision: board.revision, entries,
     files: [...files].map(([path, body]) => ({ path, sha256: digest(body) })) }, null, 2)}\n`);
   return files;
 }
@@ -91,7 +96,7 @@ export function writeWiki(board: BoardSnapshot, dataDir: string, workspace: stri
     if (existsSync(file)) {
       if (lstatSync(file).isSymbolicLink() || !lstatSync(file).isFile()) throw new Error("Wiki projection file must be a regular file");
       const old = readFileSync(file, "utf8");
-      if (path === "manifest.json" ? !old.includes('"generator": "xloom-wiki-v1"') : !old.startsWith(wikiMarker)) throw new Error(`Preserving non-generated Wiki file: ${file}`);
+      if (path.endsWith(".json") ? !isWikiDerived(old) : !old.startsWith(wikiMarker)) throw new Error(`Preserving non-generated Wiki file: ${file}`);
       if (old === body) continue;
     }
     const temporary = join(dirname(file), `.${randomUUID()}.tmp`);

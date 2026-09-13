@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "description": "Reimplemented local lexical retrieval, complete judgment/source packaging, organization and audit against Xloom SQLite. Reference hashes identify user-supplied Webounty source bytes, not verified security claims. No runtime dependency on Webounty.",
+  "sources": [
+    {"path": "webounty/scripts/search_index.py", "sha256": "c77dc43fe6683a7c2f9239d3e5e929b931f2be377806575131368009afc84a55"},
+    {"path": "webounty/scripts/rag.py", "sha256": "256b77c4c20314b572864ef22323cdc042a0dee6158a4d019b762920216a679f"},
+    {"path": "webounty/scripts/wiki.py", "sha256": "c0b76988785c3d1efe7a3b201770b3cc8c93f505deb6939c95b068abe8705c13"},
+    {"path": "webounty/references/retrieval.md", "sha256": "41957f692432c6a2dcea9af0d51ab6f8e661f8b3218729363dbea5b22d254729"},
+    {"path": "webounty/references/wiki-layout.md", "sha256": "df085ebe9b6625382da4ec3bdf393a1a76ad16fec96c690be7d64eedbe4f11a9"}
+  ]
+}

@@ -56,7 +56,7 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 
 当前角色选中的 Finding 另有 `findingContext` 导航：复用正式证据关联，列出明确引用关系产生的未关联候选、事实替代、声明反证、条件和相关尝试。补充索引按 ID 去重，不复制原始正文；省略项可通过现有 `blackboard.md` 的完整引用索引补查。它不自动关联证据、评定影响或保存第二份状态，详见 [Finding 证据视图](finding-context.md)。
 
-任务 Wiki 从同一 SQLite 黑板生成自动记录页，Execute 可通过现有最终输出 / checkpoint 提交 `wikiPages` 作者解释。稳定页面与块 ID、来源签名及历史保存在原黑板中；来源变化只产生页面待复核标记。研究调用拿到 Wiki 首页和按需编写说明的路径，普通聊天不加载；没有引入检索引擎或额外 Agent / 工具。见 [Wiki 与来源关系](wiki.md)。
+任务 Wiki 从同一 SQLite 黑板生成自动记录页，Execute 可通过现有最终输出 / checkpoint 提交 `wikiPages` 作者解释。稳定页面与块 ID、来源签名及历史保存在原黑板中；来源变化只产生页面待复核标记。研究调用拿到 Wiki 首页、按需编写说明及任务内词法 `rag` 结果；普通聊天不加载。`wiki/catalog.ts` 生成公开记录倒排与整理投影，`wiki/retrieval.ts` 装包完整判断和来源，`wiki/audit.ts` 只读核对生成文件及原件；`wiki/local.ts` 可由原 powershell 调用。没有额外 Agent / 工具注册，角色 system prompt 不变。见 [Wiki 与来源关系](wiki.md) 和 [本地检索与审计](retrieval.md)。
 
 `pendingStepReviews(snapshot)` 找出 ready Step 对已修正事实的直接或间接依赖，包括来源链和组合反证。公开 `projection.stepReviews` 给出旧事实与替代事实 ID；Policy 不选取这些旧计划，Controller 先交 fresh Decide 重新规划。若复核后仍只有失效计划，则保留未完成状态并暂停，不能因该队列为空而宣称 Goal 完成。
 

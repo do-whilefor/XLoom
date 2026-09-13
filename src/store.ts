@@ -10,7 +10,8 @@ import { inspectGoalDeclarations } from "./loop/goals.js";
 import { findingReviewErrors } from "./loop/reviews.js";
 import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
-import { wikiMarker, writeWiki } from "./wiki/projection.js";
+import { writeWiki } from "./wiki/projection.js";
+import { isWikiDerived } from "./wiki/format.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -441,7 +442,7 @@ export class BlackboardStore {
     assert(inside(artifactDir, canonical), "Evidence must be a regular file inside this run's artifacts directory.");
     assert(statSync(canonical).isFile() && statSync(canonical).size <= 10 * 1024 * 1024, "Evidence must be a regular file at most 10 MiB.");
     const data = readFileSync(canonical);
-    assert(!data.toString("utf8").trimStart().startsWith(wikiMarker), "Generated Wiki pages are derived explanations, not original evidence. Reference their underlying Facts/Evidence instead.");
+    assert(!isWikiDerived(data.toString("utf8")), "Generated Wiki/RAG/audit materials are derived explanations, not original evidence. Reference their underlying Facts/Evidence instead.");
     assert(data.length > 0 && data.length <= 10 * 1024 * 1024, "Evidence must contain 1 byte–10 MiB.");
     const sha256 = hash(data);
     const targetDir = path.join(this.dataDir, "evidence");

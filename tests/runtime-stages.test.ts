@@ -11,6 +11,7 @@ import { PiRunner } from "../src/runtime/pi-runner.js";
 import type { ModelResolver } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent } from "../src/types.js";
+import type { retrievalContext } from "../src/wiki/retrieval.js";
 
 // Only the provider stream is synthetic. Pi Agent, native tools, controller,
 // checkpoint submission, evidence archiving and SQLite transactions are real.
@@ -20,7 +21,7 @@ const model: Model<"openai-completions"> = {
   id: "offline", name: "offline", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
   reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64_000, maxTokens: 2_000,
 };
-interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string; wiki?: { indexFile: string; authoringGuide?: string } }
+interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string; wiki?: { indexFile: string; authoringGuide?: string }; rag?: NonNullable<ReturnType<typeof retrievalContext>> }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
 
@@ -121,6 +122,48 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("uses local organization through existing powershell and retrieves the sourced explanation in the next role", async () => {
+    let reviewed = false;
+    const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+        if (run.contexts.length === 1) {
+          const local = input.rag!.local!;
+          return message([{ type: "toolCall", id: "local-organize", name: "powershell", arguments: {
+            command: `& ${quote(local.nodeExecutable)} ${quote(local.scriptFile)} organize --task ${quote(local.taskDirectory)} --workspace ${quote(input.workspace)}`,
+          } }], "toolUse");
+        }
+        if (run.contexts.length === 2) {
+          expect(toolText(context)).toContain('"type": "organization"');
+          return write("local-evidence", join(input.artifacts, "fixture.txt"), artifactBody);
+        }
+        return json({ summary: "Retain synthetic observation and full explanation", result: "done",
+          evidence: [{ ref: "e", path: join(input.artifacts, "fixture.txt"), description: "Synthetic local original" }],
+          facts: [{ ref: "f", description: "Synthetic local checkpoint preservation fixture", evidenceRefs: ["e"] }],
+          wikiPages: [{ id: "WK-retrieval", title: "Synthetic local checkpoint preservation and handoff", blocks: [{ id: "B-context", title: "Validation and remaining gap",
+            text: "Synthetic local checkpoint preservation and handoff were observed in the fixture; another identity remains unverified.", sources: [{ kind: "fact", id: "f" }] }] }],
+        });
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      if (reviewed) return json({ summary: "No new synthetic observation" });
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
+      expect(input.rag).not.toHaveProperty("local");
+      expect(input.rag!.hits).toContainEqual(expect.objectContaining({ ref: { kind: "block", pageId: "WK-retrieval", id: "B-context" } }));
+      expect(JSON.stringify(input.rag!.records)).toContain("another identity remains unverified");
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-rag-original", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
+      expect(toolText(context)).toContain(artifactBody);
+      reviewed = true; return json({ summary: "Reviewed the original underlying the retrieved explanation" });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", completedSteps: 1, outcome: null });
+    expect(reviewed).toBe(true); expect(board.findings).toEqual([]);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId)).toEqual(["local-organize", "local-evidence", "read-rag-original"]);
+    assertExactUsage(test);
+  });
+
   it("recovers two reads with mixed task/run IDs through the current artifact directory without replaying writes", async () => {
     const files = ["response-25.txt", "response-26.txt"];
     const test = setup((run, context, input) => {

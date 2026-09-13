@@ -227,6 +227,8 @@ Finding 审查的状态规则也在同一次纠正前检查，并与 Store 共�
 
 研究任务还会生成 `wiki/index.md` 及按记录组织的页面。Execute 可按需读取提示中的 Wiki 编写说明，用原有输出或 checkpoint 保存带来源的解释页；来源修订后显示待复核，旧解释保留。Wiki 编辑本身不增加研究进展、不验证 Finding。普通聊天不参与，详见 [Wiki 与来源关系](wiki.md)。
 
+研究调用的 `rag` 会自动提供少量相关 Wiki／公开记录及完整来源包，`wiki/organization.json` 列出整理和复核入口。Execute 可用原 powershell 调用提示中的本地脚本进行精确检索、查看整理或完整审计；命令不会修改研究状态。当前是任务内词法检索，原始响应正文仍按需 read，详见 [本地检索与审计](retrieval.md)。
+
 失败 Step 的公开视图可带有 `recovery`，仅指向旧调用的 `artifacts` 目录，并标记为未验证。即使工具写入后模型报错、结果尚未入库，Decide 也可安排新 Step 检查残留文件；它们不会自动成为 Fact / Evidence，必须先检查并按正常证据流程提交。这个引用不包含旧聊天或运行日志。
 
 升级旧黑板时，若旧任务尚未完成却提前关闭了根 Goal，会恢复根 Goal 为 active；旧任务标记 completed 但根 Goal 没有 satisfied 的，会改为 paused 并提示重新复核。原结论记录进审计，证据、事实、线索和计数保留；迁移不会自动调用模型或重放步骤。
