@@ -17,6 +17,37 @@ function board(): BoardSnapshot {
 }
 
 describe("Decision reference validation", () => {
+  it("diagnoses review lifecycle and reference errors together without promoting a lead", () => {
+    const snapshot = board();
+    snapshot.findings[0]!.status = "lead";
+    const original = structuredClone(snapshot);
+    const proposal: Decision = { summary: "Both logged failure families", updateSteps: [{ id: "S-truncated", action: "abandon", reason: "Fixture" }], reviews: [
+      { findingId: "V-fixture", status: "closed", rating: "info", reason: "Fixture", pocEvidenceId: "E-unknown" },
+      { findingId: "V-fixture", status: "impact_verified", rating: "P2", reason: "Fixture", pocEvidenceId: "E-fixture" },
+    ] };
+    let error: Error | undefined;
+    try { validateDecisionReferences(snapshot, proposal); } catch (failure) { error = failure as Error; }
+    for (const text of ["updateSteps[0].id", "reviews[0].rating", "Closed findings remain unrated", "reviews[0].pocEvidenceId", "reviews[1].status", "A lead cannot skip technical validation", "Missing: impact", "existing Finding key"]) expect(error?.message).toContain(text);
+    expect(snapshot).toEqual(original);
+  });
+
+  it("retains ordered review transitions and does not infer technical validation from evidence", () => {
+    const snapshot = board();
+    const impact = { capability: "Fixture", object: "Fixture", result: "Fixture", scope: "Local", prerequisites: "Fixture" };
+    const verify = { findingId: "V-fixture", status: "impact_verified" as const, rating: "info" as const, reason: "Fixture", impact, pocEvidenceId: "E-fixture" };
+    snapshot.findings[0]!.status = "lead";
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [verify] })).toThrow('currently has status "lead"');
+    snapshot.findings[0]!.status = "technical_hit";
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [verify] })).not.toThrow();
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [
+      { findingId: "V-fixture", status: "closed", rating: "unrated", reason: "Fixture" }, verify,
+    ] })).toThrow('currently has status "closed"');
+    snapshot.findings[0]!.factIds = [];
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [
+      { findingId: "V-fixture", status: "closed", rating: "unrated", reason: "Fixture" },
+    ] })).toThrow("evidence-backed validation");
+  });
+
   it("reports all reference families together without changing IDs, records or state", () => {
     const snapshot = board();
     const proposal: Decision = {
@@ -59,9 +90,10 @@ describe("Decision reference validation", () => {
       steps: [{ goalId: "G-child", from: ["F-fixture"], description: "Synthetic comparison", successSignal: "Label", evidencePlan: "Save", priority: 1 }],
       updateSteps: [{ id: "S-fixture", action: "prioritize", priority: 2, reason: "Order fixture" }],
       updateGoals: [{ id: "G-parent", status: "satisfied", factIds: ["F-fixture"], reason: "Known fact" }],
-      reviews: [{ findingId: "V-fixture", status: "impact_verified", rating: "info", reason: "Synthetic reference check", pocEvidenceId: "E-fixture" }],
+      reviews: [{ findingId: "V-fixture", status: "impact_verified", rating: "info", reason: "Synthetic reference check", pocEvidenceId: "E-fixture",
+        impact: { capability: "Fixture", object: "Fixture", result: "Fixture", scope: "Local", prerequisites: "Fixture" } }],
     };
-    // This validates references only; Store still checks closure and goal lifecycle.
+    // Store still checks goal lifecycle and evidence files.
     expect(() => validateDecisionReferences(board(), proposal)).not.toThrow();
   });
 

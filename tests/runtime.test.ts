@@ -275,7 +275,8 @@ describe("Pi runtime isolation", () => {
     input.snapshot.evidence = ["E-attached", "E-other"].map(id => ({ id, path: "fixture.txt", sha256: "fixture", bytes: 1,
       description: "Synthetic local evidence", runId: "prior", stepId: "S-fixture" }));
     input.snapshot.findings = Array.from({ length: 6 }, (_, i) => ({ id: `V-fixture-${i}`, key: `fixture-${i}`, target: "local fixture",
-      title: "Synthetic hypothesis", status: "technical_hit", rating: "unrated", factIds: [], evidenceIds: ["E-attached"], next: "Review" }));
+      title: "Synthetic hypothesis", status: "technical_hit", rating: "unrated", factIds: ["F-fixture"], evidenceIds: ["E-attached"], next: "Review" }));
+    input.snapshot.facts = [{ id: "F-fixture", stepId: null, description: "Synthetic fixture", evidenceIds: ["E-attached"] }];
     const original = structuredClone(input.snapshot);
     const review = (fixed: boolean): Decision => ({ summary: "Synthetic review only", reviews: input.snapshot.findings.map((finding, i) => ({
       findingId: finding.id, status: "closed", rating: "unrated", reason: "Synthetic result; reopen if fixture changes",

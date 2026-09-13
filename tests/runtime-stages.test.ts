@@ -121,6 +121,50 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it.each(["closed_rating", "lead_promotion"] as const)("repairs %s with the bad reference in one request before Store commit", async kind => {
+    let corrected = false;
+    const followup = "Validate the still-unverified synthetic lead";
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (input.assignedStep?.description === followup) return json({ summary: "Synthetic prerequisite remains unavailable", result: "blocked" });
+        if (run.contexts.length === 1) return write("seed-review-file", join(input.artifacts, "fixture.txt"), artifactBody);
+        return json({ summary: "Registered an evidenced lead, not technical validation", result: "done",
+          evidence: [{ ref: "e", path: join(input.artifacts, "fixture.txt"), description: "Synthetic fixture" }],
+          facts: [{ ref: "f", description: "Synthetic partial observation", evidenceRefs: ["e"] }],
+          findings: [{ key: "fixture-lead", title: "Fixture", target: "local", status: "lead", factRefs: ["f"], evidenceRefs: ["e"], next: "Validate prerequisite" }],
+        });
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      if (corrected) return json({ summary: "Retain recorded state; no new conclusion" });
+      const finding = input.blackboard.findings[0]!;
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-review-file", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
+      if (run.contexts.length === 3) {
+        expect(context.tools).toEqual([]);
+        const repair = JSON.stringify(context.messages.at(-1));
+        expect(repair).toContain(kind === "closed_rating" ? "Closed findings remain unrated" : "A lead cannot skip technical validation");
+        expect(repair).toContain(kind === "closed_rating" ? "reviews[0].pocEvidenceId" : "updateSteps[0].id");
+        corrected = true;
+        return kind === "closed_rating"
+          ? json({ summary: "Evidenced closure with no impact rating", reviews: [{ findingId: finding.id, status: "closed", rating: "unrated", reason: "Synthetic denial; reopen when the prerequisite changes" }] })
+          : json({ summary: "Defer impact review until technical validation", steps: [{ goalId: "G0", from: finding.factIds, description: followup, successSignal: "Technical behavior validated", evidencePlan: "Existing fixture plus missing prerequisite", priority: 1 }] });
+      }
+      const review = { findingId: finding.id, reason: "Synthetic review", impact: { capability: "Fixture", object: "Fixture", result: "Fixture", scope: "Local", prerequisites: "Fixture" } };
+      return kind === "closed_rating"
+        ? json({ summary: "Reproduce closed plus info", reviews: [{ ...review, status: "closed", rating: "info", pocEvidenceId: "E-nonexistent" }] })
+        : json({ summary: "Reproduce lead directly to impact", updateSteps: [{ id: "S-truncated", action: "abandon", reason: "Fixture" }], reviews: [{ ...review, status: "impact_verified", rating: "P2", pocEvidenceId: finding.evidenceIds[0] }] });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", outcome: null });
+    expect(board.findings[0]).toMatchObject({ status: kind === "closed_rating" ? "closed" : "lead", rating: "unrated" });
+    expect(board.facts).toHaveLength(1);
+    expect(board.evidence).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId)).toEqual(["seed-review-file", "read-review-file"]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it("returns directly readable archive paths after a checkpoint outside the tool workspace", async () => {
     let archive = "";
     const test = setup((run, context, input) => {

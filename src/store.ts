@@ -7,6 +7,7 @@ import { taskDirectory } from "./workspace.js";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
+import { findingReviewErrors } from "./loop/reviews.js";
 import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
@@ -277,18 +278,16 @@ export class BlackboardStore {
         const equivalent = board.steps.some(step => step.goalId === proposal.goalId && normalize(step.description) === normalize(proposal.description) && JSON.stringify([...step.from].sort()) === JSON.stringify([...proposal.from].sort()) && conditions(step) === conditions(proposal));
         if (!equivalent) board.steps.push({ ...proposal, id: id("S"), status: "ready", attempts: 0, runId: null, leaseUntil: null });
       }
-      for (const review of decision.reviews ?? []) {
+      for (const [index, review] of (decision.reviews ?? []).entries()) {
         const finding = board.findings.find(item => item.id === review.findingId);
         assert(finding, "Unknown finding in review.");
+        const errors = findingReviewErrors(finding, review, `reviews[${index}]`);
+        assert(errors.length === 0, errors.join("; "));
         if (review.status === "impact_verified") {
-          assert(["technical_hit", "impact_verified"].includes(finding.status), "A lead cannot skip technical validation.");
-          assert(review.rating !== "unrated" && review.impact && review.pocEvidenceId, "Verified impact requires rating, impact and PoC evidence.");
-          assert(finding.evidenceIds.length > 0 && finding.factIds.length > 0 && finding.evidenceIds.includes(review.pocEvidenceId), "PoC and facts must belong to the finding.");
+          assert(review.pocEvidenceId && finding.evidenceIds.includes(review.pocEvidenceId), "PoC and facts must belong to the finding.");
           for (const evidenceId of finding.evidenceIds) this.verifyEvidence(board.evidence.find(item => item.id === evidenceId)!);
           finding.impact = review.impact; finding.pocEvidenceId = review.pocEvidenceId;
         } else {
-          assert(review.rating === "unrated", "Closed findings remain unrated.");
-          assert(finding.evidenceIds.length > 0 && finding.factIds.length > 0, "Closing a hypothesis requires evidence-backed validation, not just an assertion.");
           for (const ref of finding.evidenceIds) this.verifyEvidence(board.evidence.find(item => item.id === ref)!);
         }
         finding.status = review.status; finding.rating = review.rating; finding.review = review.reason;

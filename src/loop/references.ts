@@ -1,5 +1,6 @@
 import type { BoardSnapshot, Decision } from "../types.js";
 import { inspectGoalDeclarations } from "./goals.js";
+import { findingReviewErrors } from "./reviews.js";
 
 /** Check all explicit references against the complete board before the one repair
  * request. Report every bad reference together; never guess replacement IDs. */
@@ -7,7 +8,7 @@ export function validateDecisionReferences(board: BoardSnapshot, decision: Decis
   const facts = new Set(board.facts.map(fact => fact.id));
   const { goals, errors } = inspectGoalDeclarations(board.goals, decision.goals);
   const steps = new Map(board.steps.map(step => [step.id, step]));
-  const findings = new Map(board.findings.map(finding => [finding.id, finding]));
+  const findings = new Map(board.findings.map(finding => [finding.id, { ...finding }]));
   const evidence = new Set(board.evidence.map(item => item.id));
   const evidenceLinks = new Map<string, string[]>();
   const check = (known: { has(ref: string): boolean }, kind: string, ref: string, field: string) => {
@@ -33,9 +34,10 @@ export function validateDecisionReferences(board: BoardSnapshot, decision: Decis
   });
   decision.reviews?.forEach((review, index) => {
     check(findings, "Finding", review.findingId, `reviews[${index}].findingId`);
+    const finding = findings.get(review.findingId);
+    if (finding) errors.push(...findingReviewErrors(finding, review, `reviews[${index}]`));
     if (review.pocEvidenceId) {
       check(evidence, "Evidence", review.pocEvidenceId, `reviews[${index}].pocEvidenceId`);
-      const finding = findings.get(review.findingId);
       if (finding && (!evidence.has(review.pocEvidenceId) || !finding.evidenceIds.includes(review.pocEvidenceId))) {
         evidenceLinks.set(finding.id, finding.evidenceIds);
       }
@@ -43,6 +45,8 @@ export function validateDecisionReferences(board: BoardSnapshot, decision: Decis
         errors.push(`reviews[${index}].pocEvidenceId=${JSON.stringify(review.pocEvidenceId)} must belong to Finding ${JSON.stringify(finding.id)}`);
       }
     }
+    // Match Store's ordered reviews without changing the committed snapshot.
+    if (finding) finding.status = review.status;
   });
   const pocGuidance = evidenceLinks.size ? ` Attached evidenceIds by Finding: ${JSON.stringify(Object.fromEntries(evidenceLinks))}. Use an attached ID only if it supports the review; otherwise defer that review and plan Execute to report/link the required evidence via the existing Finding key. Do not substitute IDs merely to pass validation.` : "";
   if (errors.length) throw new Error(`${errors.join("; ")}.${pocGuidance} Copy exact IDs from the committed blackboard (Fact IDs also appear in factIndex); never change ID prefixes, truncate IDs or guess replacements. Evidence IDs and batch-local refs are not Fact IDs. New Goals may reference an existing or earlier new parent Goal.`);
