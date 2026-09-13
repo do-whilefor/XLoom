@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { BoardSnapshot, Execution } from "../types.js";
 import { knowledgeRecord } from "../knowledge/model.js";
+import { cvssIssues, projectCvss } from "../scoring/cvss.js";
 
 const text = (max: number) => z.string().trim().min(1).max(max).refine(value => !value.includes("\0"), "Must not contain NUL characters");
 export const wikiSourceSchema = z.object({ kind: z.enum(["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain"]), id: text(256) }).strict();
@@ -62,7 +63,8 @@ export function wikiRecord(board: BoardSnapshot, ref: WikiSource): { value: obje
     const attempts = (board.attempts ?? []).filter(item => item.hypothesis.trim().toLowerCase() === r.key.trim().toLowerCase() || item.evidenceIds.some(id => r.evidenceIds.includes(id))).map(item => item.id).sort();
     const impact = r.impact && { capability: r.impact.capability, object: r.impact.object, result: r.impact.result, scope: r.impact.scope, prerequisites: r.impact.prerequisites };
     return { value: { id: r.id, key: r.key, title: r.title, target: r.target, status: r.status, rating: r.rating, factIds: r.factIds,
-      evidenceIds: r.evidenceIds, next: r.next, review: r.review, impact, pocEvidenceId: r.pocEvidenceId, attempts },
+      evidenceIds: r.evidenceIds, next: r.next, review: r.review, impact, pocEvidenceId: r.pocEvidenceId, attempts,
+      ...(r.cvss ? { cvss: projectCvss(r.cvss), cvssIssues: cvssIssues(board, r) } : {}) },
     dependencies: [...source("fact", r.factIds), ...source("evidence", [...r.evidenceIds, ...(r.pocEvidenceId ? [r.pocEvidenceId] : [])]), ...source("attempt", attempts)] };
   }
   if (ref.kind === "evidence") {

@@ -16,6 +16,7 @@ import type { Decision, Execution, LoopEvent } from "../src/types.js";
 import type { knowledgeContext } from "../src/knowledge/context.js";
 import type { retrievalContext } from "../src/wiki/retrieval.js";
 import { gapQueue, type gapContext } from "../src/knowledge/gaps.js";
+import { metricKeys, type cvssContext, type CvssProposal } from "../src/scoring/cvss.js";
 
 // This suite replaces the provider stream only: Controller, SQLite, Pi Agent and
 // Pi's native file tools are real. It makes no network calls or vulnerability claims.
@@ -35,6 +36,7 @@ interface PromptData {
   knowledge?: ReturnType<typeof knowledgeContext>;
   rag?: ReturnType<typeof retrievalContext>;
   gaps?: ReturnType<typeof gapContext>;
+  scoring?: ReturnType<typeof cvssContext>;
 }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
@@ -138,6 +140,31 @@ describe("native gap workflow through Pi and Controller", () => {
     expect(board.steps[0]!.status).toBe("blocked"); expect(board.goals[0]!.status).toBe("active"); expect(board.outcome).toBeNull();
     expect(board.status).toBe("paused");
     for (const run of test.seen) expect(run.contexts[0]!.messages).toHaveLength(1);
+  });
+});
+
+describe("native CVSS through Pi and Controller", () => {
+  it("computes a submitted vector and exposes it to fresh Decide without promoting the Finding", async () => {
+    const vector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N";
+    const scoring = (factRefs: string[]): CvssProposal => ({ vector, rationale: Object.fromEntries(metricKeys.map(key => [key, { reason: `Synthetic ${key} rationale`, factRefs, assumption: false }])) as CvssProposal["rationale"] });
+    const test = setup((run, context, input) => {
+      expect(input.scoring!.metricGroup).toBe("Base");
+      if (run.channel === "offline-execute") {
+        if (run.contexts.length === 1) return message([{ type: "toolCall", id: "write-score", name: "write", arguments: { path: join(input.artifacts, "score.txt"), content: syntheticArtifact } }], "toolUse");
+        return json({ summary: "Synthetic scored finding", result: "done", evidence: [{ ref: "e", path: "score.txt", description: "Synthetic original" }], facts: [{ ref: "f", description: "Synthetic finding result", evidenceRefs: ["e"] }],
+          findings: [{ key: "fixture-scoring", target: "synthetic", title: "Scoring fixture", status: "technical_hit", factRefs: ["f"], evidenceRefs: ["e"], next: "Independent impact review", cvss: scoring(["f"]) }] });
+      }
+      if (!input.blackboard.findings.length) return json(plan());
+      const finding = input.blackboard.findings[0]!;
+      expect(finding.cvss).toMatchObject({ baseScore: 7.5, status: "proposed" });
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-score-evidence", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      return json({ summary: "Reviewed fixture scoring only", cvssReviews: [{ findingId: finding.id, assessment: scoring(finding.factIds), reason: "Read synthetic original; vector arithmetic and fixture reasons checked" }] });
+    });
+    await test.controller.start();
+    expect(test.controller.snapshot().findings[0]).toMatchObject({ status: "technical_hit", rating: "unrated", cvss: { baseScore: 7.5, status: "reviewed" } });
+    expect(test.controller.snapshot().outcome).toBeNull(); expect(test.controller.snapshot().goals[0]!.status).toBe("active");
+    expect(test.seen.map(run => run.channel)).toEqual(["offline-decide", "offline-execute", "offline-decide"]);
   });
 });
 

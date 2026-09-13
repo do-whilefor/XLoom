@@ -3,6 +3,7 @@ import { capabilitiesSchema, chainsSchema } from "./knowledge/schema.js";
 import { stepMethodIdsSchema } from "./methods.js";
 import { wikiPagesSchema } from "./wiki/model.js";
 import { gapsSchema, gapLinksSchema, gapReviewsSchema, revisitsSchema } from "./knowledge/gaps.js";
+import { cvssProposalSchema, cvssReviewsSchema } from "./scoring/cvss.js";
 
 const text = (max = 8_000) => z.string().trim().min(1).max(max).refine((value) => !value.includes("\0"), "Must not contain NUL characters");
 const id = text(256);
@@ -89,6 +90,7 @@ export const attemptSchema = z.object({
 
 export const decisionSchema = z.object({
   summary: text(),
+  cvssReviews: cvssReviewsSchema.optional(),
   gapReviews: gapReviewsSchema.optional(),
   steps: z.array(z.object({
     goalId: id,
@@ -151,6 +153,7 @@ export const executionSchema = z.object({
     next: text(),
     impact: impactSchema.optional(),
     pocEvidenceRef: id.optional(),
+    cvss: cvssProposalSchema.optional(),
   }).strict()).max(128).optional(),
 }).strict();
 

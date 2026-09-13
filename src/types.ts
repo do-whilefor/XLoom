@@ -4,6 +4,7 @@ import type { WikiPage, WikiPageProposal } from "./wiki/model.js";
 import type { Capability, CapabilityProposal, Chain, ChainProposal } from "./knowledge/schema.js";
 import type { Gap, GapProposal, GapRef } from "./knowledge/gaps.js";
 import type { WikiSource } from "./wiki/model.js";
+import type { CvssAssessment, CvssProposal } from "./scoring/cvss.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
@@ -59,6 +60,7 @@ export interface Impact { capability: string; object: string; result: string; sc
 export interface Finding {
   id: string; key: string; target: string; title: string; status: FindingStatus; rating: Rating;
   evidenceIds: string[]; factIds: string[]; next: string; impact?: Impact; review?: string; pocEvidenceId?: string;
+  cvss?: CvssAssessment;
 }
 export interface Hint { id: string; content: string; createdAt: string }
 export interface Usage { input: number; output: number; cost: number }
@@ -82,6 +84,7 @@ export interface BoardSnapshot {
 export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[]; revisits?: GapRef[] }
 export interface Decision {
   summary: string;
+  cvssReviews?: { findingId: string; assessment: CvssProposal; reason: string }[];
   gapReviews?: (GapRef & { action: "defer" | "resolve"; reason: string; factIds: string[] })[];
   steps?: StepProposal[];
   goals?: { id: string; description: string; parentId: string }[];
@@ -100,7 +103,7 @@ export interface Execution {
   attempts?: AttemptProposal[];
   evidence?: { ref: string; path: string; description: string }[];
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];
-  findings?: { key: string; title: string; target?: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string }[];
+  findings?: { key: string; title: string; target?: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string; cvss?: CvssProposal }[];
 }
 export interface RunRequest {
   id: string; mode: Mode; snapshot: BoardSnapshot; workspace: string; runDir: string; step?: Step;

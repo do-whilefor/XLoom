@@ -14,6 +14,7 @@ import { writeWiki } from "./wiki/projection.js";
 import { isWikiDerived } from "./wiki/format.js";
 import { applyKnowledge } from "./knowledge/model.js";
 import { applyGapDecision, applyGapRecords, gapQueue } from "./knowledge/gaps.js";
+import { assessCvss, cvssIssues } from "./scoring/cvss.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -302,6 +303,11 @@ export class BlackboardStore {
         finding.status = review.status; finding.rating = review.rating; finding.review = review.reason;
         if (review.status === "closed") finding.next = review.reason;
       }
+      for (const review of decision.cvssReviews ?? []) {
+        const finding = board.findings.find(item => item.id === review.findingId);
+        assert(finding, "Unknown Finding in CVSS review.");
+        finding.cvss = assessCvss(board, finding, review.assessment, ref => ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!), "reviewed", review.reason);
+      }
       if (run.mode === "metacog") { board.lastMetaStep = board.completedSteps; board.lastMetaRevision = board.revision + 1; }
       board.reason = decision.summary;
       if (decision.conclusion) {
@@ -419,6 +425,7 @@ export class BlackboardStore {
             ...(proposal.impact ? { impact: proposal.impact } : {}), ...(pocEvidenceId ? { pocEvidenceId } : {}) };
           board.findings.push(finding);
         }
+        if (finding.cvss) { finding.cvss.status = "proposed"; delete finding.cvss.reviewReason; }
       }
       let attemptProgress = false;
       for (const proposal of output.attempts ?? []) {
@@ -433,6 +440,10 @@ export class BlackboardStore {
           attempts.push({ ...attempt, ...keys, id: id("A"), runId, stepId: step.id, evidenceIds });
           if (proposal.outcome === "supports" || proposal.outcome === "refutes") attemptProgress = true;
         }
+      }
+      for (const proposal of output.findings ?? []) if (proposal.cvss) {
+        const finding = board.findings.find(item => item.key === normalize(proposal.key))!;
+        finding.cvss = assessCvss(board, finding, proposal.cvss, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!), "proposed");
       }
       applyKnowledge(board, output, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       applyGapRecords(board, step, output, ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id }));
@@ -520,6 +531,7 @@ export class BlackboardStore {
 export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspace: string): string {
   const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.methodIds?.length ? ` (methods: ${item.methodIds.join(", ")})` : ""}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
   for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
+  for (const finding of board.findings.filter(item => item.cvss)) rows.push(`  - cvss_finding: ${JSON.stringify(finding.id)}`, `    assessment: ${JSON.stringify(finding.cvss)}`, `    review_issues: ${JSON.stringify(cvssIssues(board, finding))}`);
   rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
   if (board.findings.length) rows.push("## Evidence navigation index", "", "Registered references only; not proof of support or current applicability.", "", "```jsonl",
     ...evidenceNavigationRecords(board).map(record => JSON.stringify(record)), "```", "");

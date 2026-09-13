@@ -2,6 +2,7 @@ import type { BoardSnapshot, Decision } from "../types.js";
 import { inspectGoalDeclarations } from "./goals.js";
 import { findingReviewErrors } from "./reviews.js";
 import { applyGapDecision } from "../knowledge/gaps.js";
+import { assessCvss } from "../scoring/cvss.js";
 
 /** Check all explicit references against the complete board before the one repair
  * request. Report every bad reference together; never guess replacement IDs. */
@@ -18,6 +19,11 @@ export function validateDecisionReferences(board: BoardSnapshot, decision: Decis
   const findings = new Map(board.findings.map(finding => [finding.id, { ...finding }]));
   const evidence = new Set(board.evidence.map(item => item.id));
   const evidenceLinks = new Map<string, string[]>();
+  for (const review of decision.cvssReviews ?? []) {
+    const finding = board.findings.find(item => item.id === review.findingId);
+    if (!finding) errors.push("Unknown Finding in CVSS review.");
+    else assessCvss(board, finding, review.assessment, ref => ref, () => {}, "reviewed", review.reason);
+  }
   const check = (known: { has(ref: string): boolean }, kind: string, ref: string, field: string) => {
     if (!known.has(ref)) errors.push(`Unknown ${kind} reference: ${field}=${JSON.stringify(ref)}`);
   };

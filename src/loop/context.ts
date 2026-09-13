@@ -2,6 +2,7 @@ import { evidencePath } from "../paths.js";
 import { dirname, join } from "node:path";
 import type { Attempt, BoardSnapshot, Evidence, Fact, Finding, Goal, Hint, Mode, RunRequest, Step } from "../types.js";
 import { projectFindingContext, type FindingContext } from "./finding-context.js";
+import { projectCvss } from "../scoring/cvss.js";
 
 export type ContextStep = Omit<Step, "runId" | "leaseUntil"> & {
   /** A failed run may have left files here; this is not committed or verified Evidence. */
@@ -188,6 +189,7 @@ function projectFinding(finding: Finding): Finding {
     factIds: [...finding.factIds], next: finding.next,
     ...(finding.review === undefined ? {} : { review: finding.review }),
     ...(finding.pocEvidenceId === undefined ? {} : { pocEvidenceId: finding.pocEvidenceId }),
+    ...(finding.cvss === undefined ? {} : { cvss: projectCvss(finding.cvss) }),
     ...(finding.impact === undefined ? {} : { impact: {
       capability: finding.impact.capability, object: finding.impact.object, result: finding.impact.result,
       scope: finding.impact.scope, prerequisites: finding.impact.prerequisites,

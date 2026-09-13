@@ -3,6 +3,7 @@ import type { AgentHandoff, BoardSnapshot, LoopEvent, Mode, RuntimeEvent, Usage 
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { retainToolOutput } from "./tool-output.js";
 import type { TaskInfo } from "../workspace.js";
+import { cvssIssues } from "../scoring/cvss.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -100,7 +101,7 @@ export function formatBoard(board: BoardSnapshot): string {
   section("Goals", board.goals, 8, (g) => `${g.id} [${g.status}] ${compact(g.description)}`);
   section("Facts", board.facts, 10, (f) => `${f.id} ${compact(f.description)} → ${f.evidenceIds.join(", ") || "无证据引用"}`);
   section("Steps", board.steps, 10, (s) => `${s.id} [${s.status}] ${s.goalId} ← ${s.from.join(",") || "—"} · ${compact(s.description)}`);
-  section("Findings", board.findings, 8, (f) => `${f.id} [${f.status}/${f.rating}] ${compact(f.title)}\n    evidence: ${f.evidenceIds.join(", ") || "—"}\n    next: ${compact(f.next)}`);
+  section("Findings", board.findings, 8, (f) => `${f.id} [${f.status}/${f.rating}] ${compact(f.title)}\n    evidence: ${f.evidenceIds.join(", ") || "—"}\n    next: ${compact(f.next)}${f.cvss ? `\n    CVSS 3.1 Base: ${f.cvss.baseScore.toFixed(1)} ${f.cvss.severity} · ${f.cvss.status}\n    ${f.cvss.vector}\n    ${cvssIssues(board, f).join(", ") || "指标已复核；评分不代表影响验证"}` : ""}`);
   section("Evidence", board.evidence, 8, (e) => `${e.id} ${e.pathBase === "task" ? "[任务目录] " : ""}${compact(e.path)} · sha256:${e.sha256.slice(0, 12)}`);
   section("Hints", board.hints, 4, (h) => `${h.id} ${compact(h.content)}`);
   return lines.join("\n");

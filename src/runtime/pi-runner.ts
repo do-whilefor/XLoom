@@ -19,6 +19,7 @@ import { createWorkspaceReadTool } from "./read.js";
 import { validateFinalJson } from "./protocol.js";
 import { validateWikiReferences } from "../wiki/model.js";
 import { validateKnowledgeSubmission } from "../knowledge/model.js";
+import { validateCvssExecution } from "../scoring/cvss.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -358,6 +359,7 @@ export class PiRunner implements AgentRunner {
           if (!validated.success) throw new Error(formatValidationError(validated.error));
           validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
           validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);
+          validateCvssExecution(stage?.snapshot ?? request.snapshot, validated.data);
           return validated.data;
         }
         const validated = decisionSchema.safeParse(parsed);
