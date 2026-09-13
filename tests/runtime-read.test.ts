@@ -31,6 +31,73 @@ describe("workspace read tool", () => {
     const original = createReadTool(directory);
     expect(tool.name).toBe(original.name);
     expect(tool.parameters).toEqual(original.parameters);
+    expect(createWorkspaceReadTool(directory, join(directory, "run", "artifacts")).parameters).toEqual(original.parameters);
+  });
+
+  it("reads exact run artifacts through short paths while keeping workspace and absolute paths unchanged", async () => {
+    const directory = await workspace();
+    const artifacts = join(directory, "run", "artifacts");
+    await mkdir(join(artifacts, "nested"), { recursive: true });
+    await writeFile(join(directory, "response.txt"), "workspace copy");
+    await writeFile(join(artifacts, "response.txt"), "run copy");
+    await writeFile(join(artifacts, "nested", "result %20 中文.txt"), "first\nsecond\nthird");
+    const tool = createWorkspaceReadTool(directory, artifacts);
+    expect(output(await tool.execute("root", { path: "artifact://" }))).toContain('[file] "response.txt"');
+    expect(output(await tool.execute("short", { path: "artifact://response.txt" }))).toBe("run copy");
+    expect(output(await tool.execute("relative", { path: "response.txt" }))).toBe("workspace copy");
+    expect(output(await tool.execute("absolute", { path: join(artifacts, "response.txt") }))).toBe("run copy");
+    for (const path of ["artifact://nested/result %20 中文.txt", String.raw`artifact://nested\result %20 中文.txt`]) {
+      const result = await tool.execute("literal", { path, offset: 2, limit: 1 });
+      expect(result).toEqual(await createReadTool(directory).execute("native", { path: join(artifacts, "nested", "result %20 中文.txt"), offset: 2, limit: 1 }));
+    }
+  });
+
+  it("keeps the same short filename bound to each run, without changing another reader's context", async () => {
+    const directory = await workspace();
+    const roots = [join(directory, "run-a", "artifacts"), join(directory, "run-b", "artifacts")];
+    await Promise.all(roots.map(async (root, index) => {
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, "response.txt"), `run ${index}`);
+    }));
+    const results = await Promise.all(roots.map(root => createWorkspaceReadTool(directory, root).execute("own-run", { path: "artifact://response.txt" })));
+    expect(results.map(output)).toEqual(["run 0", "run 1"]);
+    const ordinary = createWorkspaceReadTool(directory);
+    expect(ordinary.description).not.toContain("artifact://");
+    await expect(ordinary.execute("no-context", { path: "artifact://response.txt" })).rejects.toThrow();
+  });
+
+  it("does not fall back to artifacts for a missing ordinary path or to workspace files for a missing artifact", async () => {
+    const directory = await workspace();
+    const artifacts = join(directory, "run", "artifacts");
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(directory, "workspace-only.txt"), "workspace private content");
+    await writeFile(join(artifacts, "run-only.txt"), "run private content");
+    const tool = createWorkspaceReadTool(directory, artifacts);
+    for (const path of ["run-only.txt", "artifact://workspace-only.txt", "artifact://never-created.txt"]) {
+      const failure = await tool.execute("missing", { path }).catch(error => error);
+      expect(failure).toMatchObject({ code: "ENOENT" });
+      expect(failure.message).toContain('read path="artifact://"');
+      expect(failure.message).not.toContain("private content");
+    }
+    expect(await readFile(join(directory, "workspace-only.txt"), "utf8")).toBe("workspace private content");
+  });
+
+  it.each(["../outside.txt", "nested/../../outside.txt", String.raw`..\outside.txt`, "/outside.txt", "C:/outside.txt", String.raw`\\server\share\outside.txt`])("rejects an artifact prefix with non-local suffix %s", async suffix => {
+    const directory = await workspace();
+    await expect(createWorkspaceReadTool(directory, join(directory, "artifacts")).execute("non-local", { path: `artifact://${suffix}` })).rejects.toThrow("requires a relative path");
+  });
+
+  it("retains native image handling and cancellation with an artifact prefix", async () => {
+    const directory = await workspace();
+    const artifacts = join(directory, "artifacts");
+    await mkdir(artifacts);
+    const path = join(artifacts, "pixel.gif");
+    await writeFile(path, Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"));
+    const tool = createWorkspaceReadTool(directory, artifacts);
+    expect(await tool.execute("image", { path: "artifact://pixel.gif" })).toEqual(await createReadTool(directory).execute("native", { path }));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(tool.execute("cancel", { path: "artifact://" }, controller.signal)).rejects.toThrow("Operation aborted");
   });
 
   it("lists real immediate entries, including dotfiles, without claiming planned files exist", async () => {

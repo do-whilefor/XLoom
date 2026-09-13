@@ -121,6 +121,61 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("recovers two reads with mixed task/run IDs through the current artifact directory without replaying writes", async () => {
+    const files = ["response-25.txt", "response-26.txt"];
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.tools?.find(tool => tool.name === "read")?.description).toContain("prefer artifact://");
+      if (run.contexts.length === 1) return message(files.map((file, index) => ({ type: "toolCall" as const, id: `write-${index}`, name: "write",
+        arguments: { path: join(input.artifacts, file), content: `${artifactBody}file=${file}` } })), "toolUse");
+      if (run.contexts.length === 2) {
+        // Match the logged error: collapse task + runs/execute into one mixed task ID.
+        const runDir = dirname(input.artifacts);
+        const taskDir = dirname(dirname(runDir));
+        const malformed = join(dirname(taskDir), "task-4a5e0ac9-2d88-4d32-bf1d-0735d3c3f10e", "artifacts");
+        return message(files.map((file, index) => ({ type: "toolCall" as const, id: `bad-read-${index}`, name: "read",
+          arguments: { path: join(malformed, file) } })), "toolUse");
+      }
+      if (run.contexts.length === 3) {
+        const failures = context.messages.slice(-2);
+        expect(failures).toHaveLength(2);
+        for (const failure of failures) {
+          expect(failure).toMatchObject({ role: "toolResult", toolName: "read", isError: true });
+          expect(JSON.stringify(failure)).toContain("ENOENT");
+          expect(JSON.stringify(failure)).toContain("artifact://");
+          expect(JSON.stringify(failure)).not.toContain(artifactBody);
+        }
+        return message([{ type: "toolCall", id: "discover", name: "read", arguments: { path: "artifact://" } }], "toolUse");
+      }
+      if (run.contexts.length === 4) {
+        for (const file of files) expect(toolText(context)).toContain(`[file] "${file}"`);
+        return message(files.map((file, index) => ({ type: "toolCall" as const, id: `short-read-${index}`, name: "read",
+          arguments: { path: `artifact://${file}` } })), "toolUse");
+      }
+      const results = context.messages.slice(-2);
+      for (let index = 0; index < files.length; index++) {
+        expect(results[index]).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+        expect(JSON.stringify(results[index])).toContain(`file=${files[index]}`);
+      }
+      return json({ summary: "Read exact local artifacts after correcting the path reference", result: "done",
+        evidence: files.map((file, index) => ({ ref: `e${index}`, path: join(input.artifacts, file), description: "Synthetic local file" })),
+        facts: [{ ref: "f", description: "Observed both synthetic file labels", evidenceRefs: ["e0", "e1"] }],
+      });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", outcome: null, completedSteps: 1 });
+    expect(board.evidence).toHaveLength(2);
+    expect(board.facts).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    const tools = test.events.flatMap(event => event.runtime?.type === "tool_end" ? [event.runtime] : []);
+    expect(tools.filter(event => event.isError).map(event => event.toolCallId)).toEqual(["bad-read-0", "bad-read-1"]);
+    expect(tools.filter(event => event.toolName === "write")).toHaveLength(2);
+    expect(tools.some(event => event.toolName === "powershell")).toBe(false);
+    assertExactUsage(test);
+  });
+
   it("authors a sourced Wiki through checkpoint and final output, then reads it in a fresh role with existing tools", async () => {
     let factId = "", reviewed = false;
     const note = (id: string, title: string) => ({ id: "WK-flow", title, blocks: [{ id: "B-context", title: "Scope and gap",

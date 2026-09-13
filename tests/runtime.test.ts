@@ -119,6 +119,7 @@ describe("Pi runtime isolation", () => {
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
     expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read"], ["read", "write", "edit", "powershell"], ["read"]]);
+    expect(options.map(entry => entry.initialState?.tools?.find(tool => tool.name === "read")?.description.includes("artifact://"))).toEqual([false, true, false]);
     expect(options.every((entry) => entry.toolExecution === "sequential" && entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(seen.every((context) => context.messages.length === 1 && context.messages[0].role === "user")).toBe(true);
     expect(seen.every((context) => !JSON.stringify(context).includes("only this run") && !JSON.stringify(context).includes("DO_NOT_EXPOSE_ENV_NAME"))).toBe(true);

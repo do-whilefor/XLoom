@@ -24,8 +24,8 @@ export class RuntimeRunError extends Error {
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions) { super(message, options); this.name = "RuntimeRunError"; }
 }
 
-export function executeTools(workspace: string) {
-  return [createWorkspaceReadTool(workspace), createWriteTool(workspace), createWorkspaceEditTool(workspace), createCheckedPowerShellTool(workspace)];
+export function executeTools(workspace: string, artifactsDirectory?: string) {
+  return [createWorkspaceReadTool(workspace, artifactsDirectory), createWriteTool(workspace), createWorkspaceEditTool(workspace), createCheckedPowerShellTool(workspace)];
 }
 
 export function contentText(value: unknown): string {
@@ -186,7 +186,7 @@ export class PiRunner implements AgentRunner {
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
-      const tools = request.mode === "execute" ? executeTools(request.workspace).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createWorkspaceReadTool(request.workspace)];
+      const tools = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createWorkspaceReadTool(request.workspace)];
       const checkpointFile = join(request.runDir, "continuation.json");
       const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
         baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };

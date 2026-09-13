@@ -1,10 +1,21 @@
 import { constants } from "node:fs";
 import { access, opendir, readFile, stat } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { createReadTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 
 const maxDirectoryEntries = 200;
 const maxDirectoryBytes = 16 * 1024;
+const artifactPrefix = "artifact://";
+
+function artifactReadPath(path: string, artifactsDirectory: string): string {
+  const suffix = path.slice(artifactPrefix.length).replaceAll("\\", "/");
+  if (suffix.startsWith("/") || suffix.includes(":") || suffix.split("/").includes("..")) {
+    throw new Error("artifact:// requires a relative path inside this run's artifacts directory; parent traversal and absolute paths are not supported.");
+  }
+  // This is an explicit prefix, never a fallback for a missing workspace path.
+  // Names are literal: no URL decoding, fuzzy matching or cross-run searching.
+  return resolve(artifactsDirectory, suffix);
+}
 
 class DirectoryRead extends Error {
   constructor(readonly path: string) { super("Directory read"); }
@@ -88,7 +99,7 @@ async function listDirectory(path: string, offset = 1, limit = maxDirectoryEntri
 }
 
 /** Keep Pi's path resolution and file/image handling; add discovery for read-only stages. */
-export function createWorkspaceReadTool(workspace: string) {
+export function createWorkspaceReadTool(workspace: string, artifactsDirectory?: string) {
   const tool = createReadTool(workspace, { operations: {
     readFile,
     detectImageMimeType: detectSupportedImageMimeTypeFromFile,
@@ -99,7 +110,12 @@ export function createWorkspaceReadTool(workspace: string) {
   } });
   const execute = tool.execute;
   tool.description = "Read text/images or list immediate directory entries. Files: 2000 lines/50KB. Directories: 200 entries/16KB; no recursion. Use 1-indexed offset/limit to page lines or entries. Verify exact paths; planned files may not exist.";
+  if (artifactsDirectory) tool.description += " For this run's artifacts, prefer artifact://<exact relative filename>; artifact:// lists them. This prefix is read-only; writes and evidence submissions use filesystem paths.";
   tool.execute = async (id, params, signal, onUpdate) => {
+    checkAbort(signal);
+    if (artifactsDirectory && params.path.startsWith(artifactPrefix)) {
+      params = { ...params, path: artifactReadPath(params.path, artifactsDirectory) };
+    }
     try {
       return await execute(id, params, signal, onUpdate);
     } catch (error) {
@@ -119,6 +135,7 @@ export function createWorkspaceReadTool(workspace: string) {
         error.message += parent
           ? `\nNearest existing parent directory: ${JSON.stringify(parent)}. Read this directory to discover exact names; do not guess or retry the same missing path.`
           : "\nRead an existing parent directory to discover exact names; a planned artifact may not have been written yet. Do not guess or retry the same missing path.";
+        if (artifactsDirectory) error.message += '\nFor this run\'s artifacts, read path="artifact://" to discover exact filenames, then read path="artifact://<filename>". Do not reconstruct task/run IDs; no alternative file was read.';
       }
       throw error;
     }
