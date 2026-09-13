@@ -420,6 +420,179 @@ describe("Pi runtime isolation", () => {
     await expect(runner.run(input)).rejects.toThrow("length");
   });
 
+  it.each(["decide", "metacog", "execute"] as const)("continues multiple thinking-only %s length responses without adding a retry or output cap", async mode => {
+    const input = await request(mode);
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const output = { summary: "Continued fixture reasoning finished", ...(mode === "execute" ? { result: "no_progress" } : {}) };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      calls++;
+      expect(context.tools?.map(tool => tool.name)).toEqual(mode === "execute" ? ["read", "write", "edit", "powershell"] : ["read"]);
+      if (calls > 1) expect(context.messages.at(-1)?.role).toBe("user");
+      return message(calls <= 5 ? [{ type: "thinking", thinking: `Unfinished fixture consideration ${calls}` }]
+        : [{ type: "text", text: JSON.stringify(output) }], calls <= 5 ? "length" : "stop");
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual(output);
+    expect(calls).toBe(6);
+    expect(result.usage.input).toBe(6 * 13);
+    expect(result.usage.output).toBe(6 * 4);
+  });
+
+  it("joins multiple JSON suffixes exactly across quoted text and validates only the finished object", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    const output = { summary: 'Synthetic "quoted" fixture with a \\ separator and 中文文字', result: "no_progress" };
+    const body = JSON.stringify(output);
+    const cuts = [0, 11, 23, 25, 31, body.length];
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (calls) expect(context.tools).toEqual([]);
+      const text = body.slice(cuts[calls], cuts[calls + 1]);
+      calls++;
+      return message([{ type: "text", text }], calls < cuts.length - 1 ? "length" : "stop");
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual(output);
+    expect(calls).toBe(5);
+    expect(result.usage).toEqual({ input: 65, output: 20, cost: 0.1 });
+    expect(JSON.parse(await readFile(join(input.runDir, "output.json"), "utf8")).output).toEqual(output);
+  });
+
+  it("does not insert separators between text blocks inside a continued JSON string", async () => {
+    const input = await request();
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => ++calls === 1
+      ? message([{ type: "text", text: '{"summary":"hel' }], "length")
+      : message([{ type: "text", text: "lo" }, { type: "text", text: ' world"}' }])) }) });
+    expect((await runner.run(input)).output).toEqual({ summary: "hello world" });
+    expect(calls).toBe(2);
+  });
+
+  it("keeps the exact accumulating JSON prefix when older work history is compacted", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.config.limits.maxTokens = null;
+    const events: RuntimeEvent[] = [];
+    input.onEvent = event => events.push(event);
+    const fragments = ['{"summary":"' + "a".repeat(1_000), "b".repeat(1_000), "c".repeat(1_000), '","result":"no_progress"}'];
+    let mainCalls = 0;
+    let summaryCalls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model: { ...model, contextWindow: 4_000 }, streamFn: stream(context => {
+      if (context.systemPrompt?.startsWith("Summarize the older conversation")) {
+        summaryCalls++;
+        return message([{ type: "text", text: "Synthetic fixture was written once; use its completed read. No additional observations." }]);
+      }
+      mainCalls++;
+      if (mainCalls === 1) return message([{ type: "toolCall", id: "fixture-write", name: "write",
+        arguments: { path: "large-fixture.txt", content: "synthetic fixture ".repeat(300) } }], "toolUse");
+      if (mainCalls === 2) return message([{ type: "toolCall", id: "fixture-read", name: "read", arguments: { path: "large-fixture.txt" } }], "toolUse");
+      if (mainCalls > 3) {
+        expect(context.tools).toEqual([]);
+        const prefix = context.messages.findLast(item => item.role === "assistant");
+        expect(prefix?.content).toEqual([{ type: "text", text: fragments.slice(0, mainCalls - 3).join("") }]);
+      }
+      return message([{ type: "text", text: fragments[mainCalls - 3] }], mainCalls < 6 ? "length" : "stop");
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual({ summary: "a".repeat(1_000) + "b".repeat(1_000) + "c".repeat(1_000), result: "no_progress" });
+    expect(summaryCalls).toBeGreaterThan(0);
+    expect(events.some(event => event.type === "notice" && event.text.includes("Private context compacted"))).toBe(true);
+    expect(events.filter(event => event.type === "tool_start")).toHaveLength(2);
+    expect(mainCalls).toBe(6);
+    expect(result.usage.input).toBe((mainCalls + summaryCalls) * 13);
+    expect(result.usage.output).toBe((mainCalls + summaryCalls) * 4);
+  });
+
+  it.each(["restart", "whitespace"] as const)("requires a completed provider response even for an already complete JSON prefix (%s)", async style => {
+    const input = await request();
+    const output = { summary: "Complete fixture observation" };
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (calls) expect(context.tools).toEqual([]);
+      const text = ++calls === 1 || style === "restart" ? JSON.stringify(output) : " \n";
+      return message([{ type: "text", text }], calls === 1 ? "length" : "stop");
+    }) }) });
+    expect((await runner.run(input)).output).toEqual(output);
+    expect(calls).toBe(2);
+  });
+
+  it("continues a truncated protocol repair without accepting invalid assembled fields", async () => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    const chunks = ['{"summary":', "true}", '{"summary":"Corrected fixture', '"}'];
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (calls) expect(context.tools).toEqual([]);
+      if (calls === 2) expect(JSON.stringify(context.messages.at(-1))).toContain("summary: Expected string");
+      const text = chunks[calls++];
+      return message([{ type: "text", text }], calls % 2 ? "length" : "stop");
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual({ summary: "Corrected fixture" });
+    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08 });
+    expect(calls).toBe(4);
+  });
+
+  it("preserves Pi's refusal to execute tool calls from length-truncated responses", async () => {
+    const input = await request("execute");
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "toolCall", id: "truncated-write", name: "write",
+        arguments: { path: "must-not-exist.txt", content: "truncated fixture arguments" } }], "length");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "truncated-write", isError: true });
+      return message([{ type: "text", text: '{"summary":"Truncated write was not executed","result":"no_progress"}' }]);
+    }) }) });
+    await runner.run(input);
+    expect(calls).toBe(2);
+    await expect(readFile(join(input.workspace, "must-not-exist.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["maxTurnsPerRun", "maxTokens", "maxCost"] as const)("respects explicit %s when a length response needs continuation", async field => {
+    const input = await request();
+    input.snapshot.config.limits[field] = field === "maxCost" ? 0.001 : 1;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return message([{ type: "thinking", thinking: "Unfinished fixture consideration" }], "length");
+    }) }) });
+    await expect(runner.run(input)).rejects.toThrow("explicitly configured invocation budget");
+    expect(calls).toBe(1);
+    await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("stops length continuation when the user cancels and preserves consumed usage", async () => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    const control = new AbortController();
+    input.signal = control.signal;
+    let calls = 0;
+    input.onEvent = event => { if (event.type === "usage" && calls === 2) control.abort(new Error("User cancelled continuation")); };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      calls++;
+      return message([{ type: "thinking", thinking: "Unfinished fixture consideration" }], "length");
+    }) }) });
+    const failure = await runner.run(input).catch(error => error);
+    expect(failure.message).toBe("User cancelled continuation");
+    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+    expect(calls).toBe(2);
+  });
+
+  it("can recover one transient connection error between length continuations", async () => {
+    const input = await request();
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      if (++calls === 2) return { ...message([], "error"), errorMessage: "503 temporary provider failure" };
+      return message(calls < 4 ? [{ type: "thinking", thinking: "Unfinished fixture consideration" }]
+        : [{ type: "text", text: '{"summary":"Resumed fixture review"}' }], calls < 4 ? "length" : "stop");
+    }) }) });
+    const result = await runner.run(input);
+    expect(result.output).toEqual({ summary: "Resumed fixture review" });
+    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08 });
+    expect(calls).toBe(4);
+  });
+
   it("redacts JSON-encoded credentials across single-character streaming chunks", async () => {
     const input = await request();
     const secret = 'key-with-"quotes\\and-newline\n';

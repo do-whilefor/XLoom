@@ -1,7 +1,7 @@
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Agent, type AgentEvent, type AgentOptions } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentOptions } from "@earendil-works/pi-agent-core";
 import { createWriteTool, createEditTool } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
@@ -40,6 +40,9 @@ export function contentText(value: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.flatMap((part) => part && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n");
 }
+
+// Protocol fragments can split inside a JSON string or escape sequence.
+const protocolText = (message: AssistantMessage | undefined) => message?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("") ?? "";
 
 function isProtocolText(value: string): boolean {
   if (/^(?:\{|\[|```(?:json)?\s*[\[{]|```json\b)/i.test(value)) return true;
@@ -276,19 +279,73 @@ export class PiRunner implements AgentRunner {
       if (request.signal.aborted) agent.abort();
       await running;
       request.signal.throwIfAborted();
-      if (isTransientModelFailure(finalMessage) && canRequest() && !checkpointError && !stage?.yielded) {
-        const checkpoint = await loadCheckpoint(checkpointFile, identity);
-        if (!checkpoint) throw new Error("No complete private checkpoint is available for continuation.");
-        agent.state.messages = checkpoint.messages;
-        if (finalRequest()) {
-          agent.state.tools = [];
-          agent.state.systemPrompt += `\n${finalInstruction}`;
+      let retriedTransient = false;
+      let partialJson = "";
+      let completingJson = false;
+      let responseText: string | undefined;
+      let jsonBaseMessages: AgentMessage[] | undefined;
+      const recoverResponse = async () => {
+        // A provider's per-response boundary is not a task or retry-count budget.
+        // Keep requesting the remainder until it stops, fails, or the user cancels
+        // (or an explicitly configured budget is exhausted).
+        while (!stage?.yielded && !checkpointError) {
+          request.signal.throwIfAborted();
+          if (budget.error) throw new Error(budget.error);
+          if (isTransientModelFailure(finalMessage) && !retriedTransient && canRequest()) {
+            const checkpoint = await loadCheckpoint(checkpointFile, identity);
+            if (!checkpoint) throw new Error("No complete private checkpoint is available for continuation.");
+            agent!.state.messages = checkpoint.messages;
+            if (finalRequest()) {
+              agent!.state.tools = [];
+              agent!.state.systemPrompt += `\n${finalInstruction}`;
+            }
+            retriedTransient = true;
+            emit({ type: "notice", mode: request.mode, text: "Transient model failure; continuing once from this role's completed tool results. No tool calls are replayed." });
+            finalMessage = undefined;
+            await agent!.continue();
+            continue;
+          }
+          if (finalMessage?.stopReason !== "length") break;
+          if (!canRequest()) throw new Error("Cannot continue a provider length response: an explicitly configured invocation budget is exhausted. Completed results are retained.");
+          if (pending.size || agent!.state.pendingToolCalls.size) throw new Error("Cannot continue a length response with unfinished tool calls; inspect their state before resuming.");
+          const fragment = protocolText(finalMessage);
+          // Once a JSON reply has started, finish its bytes without tools. A
+          // thinking-only cutoff instead resumes the current work with its tools.
+          if (completingJson || isProtocolText(fragment.trimStart())) {
+            completingJson = true;
+            partialJson += fragment;
+            jsonBaseMessages ??= agent!.state.messages.slice(0, -1);
+            // Pin the exact accumulated prefix as the last indivisible message.
+            // Only earlier work history may be summarized, never protocol bytes.
+            agent!.state.messages = [...jsonBaseMessages, { ...finalMessage, content: [{ type: "text", text: partialJson }] }];
+            agent!.state.tools = [];
+            agent!.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
+          }
+          const prepared = await prepareContext(agent!.state.messages, selected.model, request.signal, summarizer);
+          if (completingJson) jsonBaseMessages = prepared.messages.slice(0, -1);
+          if (prepared.compacted) {
+            agent!.state.messages = prepared.messages;
+            await persist();
+            emit({ type: "notice", mode: request.mode, text: `Private context compacted (${prepared.estimatedTokensBefore} → ${prepared.estimatedTokensAfter} estimated tokens); original evidence remains available.` });
+          }
+          request.signal.throwIfAborted();
+          if (!canRequest()) throw new Error("Explicit invocation budget exhausted during length continuation; completed results are retained.");
+          if (finalRequest()) {
+            agent!.state.tools = [];
+            agent!.state.systemPrompt += `\n${finalInstruction}`;
+          }
+          emit({ type: "notice", mode: request.mode, text: completingJson
+            ? "Model response ended with length; continuing the unfinished JSON without tools. It will be validated only when complete."
+            : "Model response ended with length; continuing from retained private context and completed tool results." });
+          finalMessage = undefined;
+          await agent!.prompt(completingJson
+            ? "The provider cut off the JSON response. Continue exactly after its last character, outputting only the remaining JSON bytes; do not restart, repeat the prefix, or add fences. If the object is already complete, return only whitespace. Tools are unavailable. Only the complete validated object can be committed."
+            : "The provider cut off the previous response. Continue the current task from the retained context and completed tool results; do not repeat completed actions. Return the required complete JSON when ready. The cutoff is not task completion.");
         }
-        emit({ type: "notice", mode: request.mode, text: "Transient model failure; continuing once from this role's completed tool results. No tool calls are replayed." });
-        finalMessage = undefined;
-        await agent.continue();
-        request.signal.throwIfAborted();
-      }
+        if (completingJson) responseText = partialJson + protocolText(finalMessage);
+      };
+      await recoverResponse();
+      request.signal.throwIfAborted();
       if (budget.error) throw new Error(budget.error);
       if (requestLimitReached) throw new Error(`Agent budget reached before a final result (maxTurnsPerRun=${request.snapshot.config.limits.maxTurnsPerRun}, requests=${modelRequests}); completed evidence is retained.`);
       if (checkpointError) throw checkpointError;
@@ -299,8 +356,8 @@ export class PiRunner implements AgentRunner {
       }
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
       if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
-      const validate = () => {
-        const parsed = parseFinalJson(redact(contentText(finalMessage)));
+      const validateText = (text: string) => {
+        const parsed = parseFinalJson(redact(text));
         if (request.mode === "execute") {
           const validated = executionSchema.safeParse(parsed);
           if (!validated.success) throw new Error(formatValidationError(validated.error));
@@ -311,6 +368,17 @@ export class PiRunner implements AgentRunner {
         validateDecisionReferences(request.snapshot, validated.data);
         return validated.data;
       };
+      const validate = () => {
+        try { return validateText(responseText ?? protocolText(finalMessage)); }
+        catch (error) {
+          // Some providers restart with a full object despite a suffix request.
+          // Accept it only if that completed response independently validates.
+          if (completingJson) {
+            try { return validateText(protocolText(finalMessage)); } catch { /* Report the assembled response's error. */ }
+          }
+          throw error;
+        }
+      };
       let output: unknown;
       try { output = validate(); }
       catch (error) {
@@ -319,7 +387,12 @@ export class PiRunner implements AgentRunner {
         emit({ type: "notice", mode: request.mode, text: "Final response has an invalid protocol shape or reference; requesting one tool-free repair using existing results." });
         agent.state.tools = [];
         agent.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
+        partialJson = "";
+        completingJson = false;
+        responseText = undefined;
+        jsonBaseMessages = undefined;
         await agent.prompt(`Repair only the final JSON protocol. Validation error: ${reason}. Tools are unavailable. Use only observations already present; do not invent evidence, files, committed IDs, findings, or completion. New Goal IDs must be unused. Submit only records not already committed by checkpoints. Return the required single JSON object.`);
+        await recoverResponse();
         request.signal.throwIfAborted();
         if (budget.error) throw new Error(budget.error);
         if (finalMessage?.stopReason !== "stop") throw new Error(finalMessage?.errorMessage ?? "Protocol repair did not finish.");
