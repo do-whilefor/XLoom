@@ -25,6 +25,11 @@ PowerShell example (replace the four literals with the exact prompt values):
   duplicate text and unreferenced evidence. These are review suggestions; identical
   wording does not justify merging conditions or deleting material. Xloom already
   publishes `wiki/organization.json` and `wiki/search-index.json` after commits.
+- `discover`: inspect capability inputs, explicit providers and representative whole-plan
+  combinations. Candidates are non-evidence; inspect unknown conditions, unverified
+  capabilities and searchTruncated. This does not change records or execute experiments.
+- Exact capability/chain lookup: `search --kind capability --id C-name` or
+  `search --kind chain --id CH-name` expands the underlying original sources.
 - `audit`: stream hashes of registered original evidence and check the generated
   Wiki/index/organization against SQLite. Exit 0 means consistent or source review
   required; exit 2 means unavailable/corrupt material. Read `status` and `issues`.

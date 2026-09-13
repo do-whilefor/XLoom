@@ -1,11 +1,12 @@
 import type { Api } from "@earendil-works/pi-ai";
 import type { BlackboardContext } from "./loop/context.js";
 import type { WikiPage, WikiPageProposal } from "./wiki/model.js";
+import type { Capability, CapabilityProposal, Chain, ChainProposal } from "./knowledge/schema.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
 export interface OuterLoopTrigger {
-  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "hint" | "manual" | "completion" | "empty_plan";
+  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "knowledge_change" | "hint" | "manual" | "completion" | "empty_plan";
   reason: string;
 }
 export interface AgentHandoff {
@@ -71,6 +72,8 @@ export interface BoardSnapshot {
   usage: Usage; completedSteps: number; noProgressCount: number; lastMetaStep: number; lastMetaRevision: number; elapsedMs?: number;
   attempts?: Attempt[];
   wikiPages?: WikiPage[];
+  capabilities?: Capability[];
+  chains?: Chain[];
 }
 export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[] }
 export interface Decision {
@@ -85,6 +88,8 @@ export interface Decision {
 export interface Execution {
   summary: string; result: "done" | "no_progress" | "blocked";
   wikiPages?: WikiPageProposal[];
+  capabilities?: CapabilityProposal[];
+  chains?: ChainProposal[];
   attempts?: AttemptProposal[];
   evidence?: { ref: string; path: string; description: string }[];
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];

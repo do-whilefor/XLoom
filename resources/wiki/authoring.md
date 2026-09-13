@@ -37,8 +37,8 @@ block you intend to retain. Previous author versions remain as history.
 Each block states a complete judgment with scope, conditions, supporting sources,
 counterevidence or uncertainty, and the remaining gap where relevant. One or more
 explicit sources are required. Source kinds: goal, step, fact, finding, evidence,
-attempt. IDs must belong to this task; fact/evidence sources can also use refs
-created in the same submitted batch. A Finding source uses its committed ID,
+attempt, capability, chain. IDs must belong to this task; fact/evidence sources can also use refs
+created in the same submitted batch, and capability/chain sources can use stable IDs submitted in that batch. A Finding source uses its committed ID,
 not its key; use IDs returned by the checkpoint for subsequent batches.
 
 Do not include runtime state, private conversations, credentials or invented

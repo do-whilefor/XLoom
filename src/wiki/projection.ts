@@ -24,12 +24,13 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
   const groups = new Map<string, string[]>();
   const entries: object[] = [];
   const addIndex = (section: string, text: string) => { const rows = groups.get(section) ?? []; rows.push(text); groups.set(section, rows); };
-  const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [] };
+  const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [], capability: board.capabilities ?? [], chain: board.chains ?? [] };
   for (const kind of Object.keys(collections) as WikiSource["kind"][]) for (const item of collections[kind]) {
     const ref = { kind, id: item.id };
     const record = wikiRecord(board, ref)!;
     const title = "title" in item ? String(item.title) : "description" in item ? String(item.description) : "hypothesis" in item ? String(item.hypothesis) : ref.id;
     const status = "status" in item ? String(item.status) : "outcome" in item ? String(item.outcome) : "recorded";
+    const reviewRequired = "reviewIssues" in record.value && Array.isArray(record.value.reviewIssues) && record.value.reviewIssues.length > 0;
     const page = filename(kind, item.id);
     const lines = [wikiMarker, `# ${label(item.id)} · ${label(title)}`, "", notice, "", `记录类型：${kind} · 状态：${status}`, "", json(record.value), "", "## 来源与相关记录", "",
       ...record.dependencies.map(dependency => `- ${dependency.kind}: ${link(dependency)}${wikiRecord(board, dependency) ? "" : "（记录缺失）"}`)];
@@ -39,12 +40,14 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
       lines.push("", `原件：[${label(item.id)}](<${evidencePath(evidence, dataDir, workspace).replaceAll("\\", "/")}>)`, "", "这里只列出已登记的路径、大小和哈希；生成页面不会重新验证原件。");
     }
     if (kind === "fact" && board.facts.some(row => row.supersedes === item.id)) lines.push("", "此事实已有替代记录。保留历史观察；适用性及影响需结合修订原件复核。");
+    if (reviewRequired) lines.push("", "**待复核：来源记录发生变化；上方状态是原提交声明，不代表当前可用或已验证。**");
+    if ((kind === "capability" || kind === "chain") && "history" in item && item.history.length) lines.push("", "## 历史声明（不作为当前判断）", "", json(item.history));
     files.set(`pages/${page}`, `${lines.join("\n")}\n`);
     entries.push({ kind, id: item.id, path: `pages/${page}` });
     const section = kind === "goal" ? "目标" : kind === "step" ? (["ready", "claimed", "blocked", "failed"].includes(status) ? "活动与受阻步骤" : "步骤历史")
       : kind === "finding" ? (status === "closed" ? "关闭的命题" : status === "impact_verified" ? "已确认影响" : "未解决 Findings")
-      : kind === "fact" ? "事实与修订" : kind === "evidence" ? "原始证据入口" : "条件化尝试";
-    addIndex(section, `- [${label(item.id)} · ${label(title)}](pages/${page}) [${status}]`);
+      : kind === "fact" ? "事实与修订" : kind === "evidence" ? "原始证据入口" : kind === "capability" ? "能力与前提" : kind === "chain" ? "候选与已验证链路" : "条件化尝试";
+    addIndex(section, `- [${label(item.id)} · ${label(title)}](pages/${page}) [${reviewRequired ? "待复核；原声明 " : ""}${status}]`);
   }
   for (const page of board.wikiPages ?? []) {
     const issues = wikiIssues(board, page);
@@ -70,7 +73,7 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
   files.set("organization.json", `${JSON.stringify(organizeWiki(board, retrieval), null, 2)}\n`);
   const index = [wikiMarker, "# Xloom 研究 Wiki", "", notice, "", `黑板修订：${board.revision}`, "", "解释页沿用稳定 ID。来源变化会标记待复核，直接编辑 Markdown 不会提交研究记录。", "",
     "[整理与待复核入口](organization.json) · [本地检索索引](search-index.json)（派生资料；原件完整性需单独审计）", ""];
-  for (const name of ["目标", "活动与受阻步骤", "未解决 Findings", "已确认影响", "关闭的命题", "研究解释", "条件化尝试", "事实与修订", "步骤历史", "原始证据入口"]) {
+  for (const name of ["目标", "活动与受阻步骤", "未解决 Findings", "已确认影响", "关闭的命题", "研究解释", "能力与前提", "候选与已验证链路", "条件化尝试", "事实与修订", "步骤历史", "原始证据入口"]) {
     const rows = groups.get(name);
     if (rows?.length) index.push(`## ${name}`, "", ...rows, "");
   }

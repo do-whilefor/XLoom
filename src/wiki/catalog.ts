@@ -42,7 +42,7 @@ export function terms(text: string): string[] {
   return found;
 }
 
-const metadata = new Set(["id", "key", "stepId", "goalId", "parentId", "path", "pathBase", "sha256", "bytes", "status", "rating", "evidenceIds", "factIds", "from", "requires", "counterEvidence", "supersedes", "replacedBy", "attempts"]);
+const metadata = new Set(["id", "key", "stepId", "goalId", "parentId", "path", "pathBase", "sha256", "bytes", "status", "rating", "evidenceIds", "factIds", "from", "requires", "counterEvidence", "supersedes", "replacedBy", "attempts", "resultFactIds", "counterFactIds", "capabilityIds", "producerId", "consumerId", "revision"]);
 function searchable(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(searchable).join(" ");
@@ -53,7 +53,7 @@ function searchable(value: unknown): string {
 /** Only explicit public state is projected. Author history and raw files are read on demand. */
 export function buildRetrievalIndex(board: BoardSnapshot): RetrievalIndex {
   const documents: RetrievalDocument[] = [], fields: { title: string; body: string }[] = [];
-  const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [] };
+  const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [], capability: board.capabilities ?? [], chain: board.chains ?? [] };
   for (const kind of Object.keys(collections) as WikiSource["kind"][]) for (const item of collections[kind]) {
     const ref = { kind, id: item.id }, record = wikiRecord(board, ref)!;
     const title = "title" in item ? String(item.title) : "description" in item ? String(item.description) : "hypothesis" in item ? String(item.hypothesis) : ref.id;
@@ -63,7 +63,8 @@ export function buildRetrievalIndex(board: BoardSnapshot): RetrievalIndex {
     if ("stepId" in item && item.stepId) sources.push({ kind: "step", id: item.stepId });
     const unique = [...new Map(sources.map(source => [refKey(source), source])).values()];
     documents.push({ ref, title, text: JSON.stringify(record.value), path: `pages/${wikiFilename(kind, item.id)}`, sources: unique,
-      issues: unique.filter(source => !wikiRecord(board, source)).map(source => ({ code: "source_missing", source })) });
+      issues: [...unique.filter(source => !wikiRecord(board, source)).map(source => ({ code: "source_missing", source })),
+        ...("reviewIssues" in record.value && Array.isArray(record.value.reviewIssues) ? record.value.reviewIssues.map(code => ({ code: String(code), source: ref })) : [])] });
     fields.push({ title, body: searchable(record.value) });
   }
   for (const page of board.wikiPages ?? []) {
@@ -104,7 +105,7 @@ export function organizeWiki(board: BoardSnapshot, index = buildRetrievalIndex(b
   return { generator: wikiGenerator, type: "organization", evidence: false, boardRevision: board.revision,
     notice: "Derived navigation and review suggestions, not evidence or a verdict. Source equality does not verify original files. No records were merged, deleted or marked reviewed.",
     counts: { records: index.documents.length - blocks.length, pages: board.wikiPages?.length ?? 0, blocks: blocks.length },
-    reviewRequired: blocks.filter(doc => doc.issues.length).map(doc => ({ ref: doc.ref, path: doc.path, issues: doc.issues })),
+    reviewRequired: index.documents.filter(doc => ["block", "capability", "chain"].includes(doc.ref.kind) && doc.issues.length).map(doc => ({ ref: doc.ref, path: doc.path, issues: doc.issues })),
     missingSources: index.documents.flatMap(doc => doc.issues.filter(issue => issue.code === "source_missing").map(issue => ({ ref: doc.ref, source: issue.source }))),
     supersededFacts: board.facts.filter(fact => board.facts.some(other => other.supersedes === fact.id)).map(fact => ({ id: fact.id,
       replacedBy: board.facts.filter(other => other.supersedes === fact.id).map(other => other.id) })),

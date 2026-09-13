@@ -13,6 +13,8 @@ import { loadMethod, methodCatalog, type MethodContext } from "../src/methods.js
 import type { ModelResolver } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent } from "../src/types.js";
+import type { knowledgeContext } from "../src/knowledge/context.js";
+import type { retrievalContext } from "../src/wiki/retrieval.js";
 
 // This suite replaces the provider stream only: Controller, SQLite, Pi Agent and
 // Pi's native file tools are real. It makes no network calls or vulnerability claims.
@@ -29,6 +31,8 @@ interface PromptData {
   workspace: string;
   artifacts: string;
   methods?: MethodContext;
+  knowledge?: ReturnType<typeof knowledgeContext>;
+  rag?: ReturnType<typeof retrievalContext>;
 }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
@@ -113,6 +117,46 @@ function proposal(input: PromptData): Decision {
 }
 
 describe("real Pi inner loop with the two-Agent outer loop", () => {
+  it("hands committed native capability connections to a fresh Decide via Wiki/RAG and keeps the private execution transcript out", async () => {
+    let readKnowledge = false;
+    const test = setup((run, context, input) => {
+      expect(input.knowledge?.authoringGuide).toContain("authoring.md");
+      if (run.channel !== "offline-execute") {
+        if (!input.blackboard.completedSteps) return json(plan());
+        expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
+        expect(JSON.stringify(input)).not.toContain(privateTurn);
+        expect(input.knowledge?.discovery.items.find(item => item.consumerId === "C-download")?.plan?.capabilityIds).toEqual(["C-export", "C-download"]);
+        expect(input.knowledge?.chains[0]?.reviewIssues).toEqual([]);
+        expect(input.rag).toBeDefined();
+        if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-knowledge", name: "read", arguments: { path: input.knowledge!.chains[0]!.pageFile } }], "toolUse");
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+        expect(JSON.stringify(context.messages.at(-1))).toContain("CH-flow"); readKnowledge = true;
+        return json({ summary: "Synthetic knowledge handoff inspected; no target conclusion or next experiment is proposed by this fixture." });
+      }
+      if (run.contexts.length === 1) return message([{ type: "text", text: privateTurn }, { type: "toolCall", id: "write-knowledge", name: "write", arguments: { path: join(input.artifacts, "knowledge.txt"), content: syntheticArtifact } }], "toolUse");
+      const conditions = { scope: "local synthetic fixture", identity: "A", environment: "fixture", stateVersion: "1" };
+      const port = (type: string) => ({ type, aliases: [], description: `Synthetic ${type}` });
+      return json({ summary: "Record native capabilities and their synthetic connection", result: "done", evidence: [{ ref: "e", path: "knowledge.txt", description: "Synthetic source" }],
+        facts: [{ ref: "f", description: "Synthetic job-id was consumed and the final local result was read back", evidenceRefs: ["e"] }],
+        capabilities: [
+          { id: "C-export", title: "Synthetic export", status: "available", provides: [port("job-id")], needs: [], conditions, factRefs: ["f"], counterFactRefs: [], changeReason: "Synthetic source" },
+          { id: "C-download", title: "Synthetic download", status: "available", provides: [port("download")], needs: [port("job-id")], conditions, factRefs: ["f"], counterFactRefs: [], changeReason: "Synthetic consumer" },
+        ], chains: [{ id: "CH-flow", title: "Synthetic connection", status: "verified", capabilityIds: ["C-export", "C-download"], conditions,
+          links: [{ producerId: "C-export", consumerId: "C-download", provideIndex: 0, needIndex: 0, status: "verified", factRefs: ["f"], conditions, note: "Fixture consumption observation" }],
+          result: "Local fixture result", resultFactRefs: ["f"], counterFactRefs: [], changeReason: "Synthetic result" }],
+        wikiPages: [{ id: "WK-native", title: "Synthetic native connection", blocks: [{ id: "B-native", title: "Synthetic result", text: "Synthetic contract exercise only; no real vulnerability claim.", sources: [{ kind: "chain", id: "CH-flow" }] }] }],
+      });
+    });
+    await test.controller.start();
+    expect(readKnowledge).toBe(true); expect(test.store.snapshot().status, test.store.snapshot().reason).toBe("paused");
+    expect(test.store.snapshot().outcome).toBeNull();
+    expect(test.events.some(event => event.handoff?.trigger.kind === "knowledge_change")).toBe(true);
+    expect(test.store.snapshot().findings).toEqual([]);
+    const executionRun = test.store.runs().find(run => run.mode === "execute")!;
+    const savedInput = JSON.parse(readFileSync(join(test.store.dataDir, "runs", executionRun.id, "input.json"), "utf8"));
+    expect(savedInput.userPrompt).toContain('"knowledge"'); expect(savedInput.userPrompt).toContain('"rag"');
+  });
+
   it("reads an unlinked candidate through existing tools without changing Finding support or SQLite records", async () => {
     const inspect = "Inspect one related synthetic artifact";
     let candidateId = "";

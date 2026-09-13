@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { discoverKnowledge } from "../knowledge/discovery.js";
 import { parseArgs } from "node:util";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,7 +15,7 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
     limit: { type: "string" }, "budget-chars": { type: "string" }, kind: { type: "string" }, id: { type: "string" }, page: { type: "string" },
   } });
   const action = positionals[0];
-  if (positionals.length !== 1 || !["search", "organize", "audit"].includes(action ?? "")) throw new Error("Use search|organize|audit --task <absolute task directory> --workspace <absolute workspace>.");
+  if (positionals.length !== 1 || !["search", "organize", "audit", "discover"].includes(action ?? "")) throw new Error("Use search|organize|audit|discover --task <absolute task directory> --workspace <absolute workspace>.");
   if (!values.task || !values.workspace || !isAbsolute(values.task) || !isAbsolute(values.workspace)) throw new Error("task and workspace must be absolute directories.");
   const number = (value: string | undefined) => {
     if (value === undefined) return undefined;
@@ -24,7 +25,7 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
   const limit = number(values.limit), budgetChars = number(values["budget-chars"]);
   let anchors: RetrievalRef[] | undefined;
   if (values.kind || values.id || values.page) {
-    if (!values.id || !values.kind || !["goal", "step", "fact", "finding", "evidence", "attempt", "block"].includes(values.kind)
+    if (!values.id || !values.kind || !["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain", "block"].includes(values.kind)
       || (values.kind === "block") !== Boolean(values.page)) throw new Error("An exact reference requires --kind and --id; blocks also require --page.");
     anchors = [{ kind: values.kind as RetrievalRef["kind"], id: values.id, ...(values.page ? { pageId: values.page } : {}) }];
   }
@@ -36,7 +37,7 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
     if (!original) throw new Error("Task blackboard is empty.");
     const board = JSON.parse(original) as BoardSnapshot;
     const output = action === "search" ? retrieveWiki(board, values.task, values.workspace, values.query ?? "", { limit, budgetChars, anchors })
-      : action === "organize" ? organizeWiki(board) : auditWiki(board, values.task, values.workspace);
+      : action === "organize" ? organizeWiki(board) : action === "discover" ? discoverKnowledge(board) : auditWiki(board, values.task, values.workspace);
     // Do not open BlackboardStore: its constructor owns locks and recovers runs.
     if (read() !== original) throw new Error("Task changed during the local operation; retry against a stable snapshot. No result was published.");
     return { output, exitCode: "status" in output && output.status === "unavailable" ? 2 : 0 };

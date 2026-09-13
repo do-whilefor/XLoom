@@ -3,6 +3,7 @@ import type { RunRequest } from "../types.js";
 import { projectContext, projectStep } from "../loop/context.js";
 import { stagePath } from "./stage.js";
 import { projectMethods } from "../methods.js";
+import { knowledgeContext } from "../knowledge/context.js";
 import { wikiContext } from "../wiki/context.js";
 import { retrievalContext } from "../wiki/retrieval.js";
 
@@ -52,6 +53,7 @@ export function buildRunPrompt(request: RunRequest): { systemPrompt: string; use
       methods: projectMethods(request, context),
       wiki: wikiContext(request),
       rag: retrievalContext(request),
+      knowledge: knowledgeContext(request),
     })}`,
   };
 }

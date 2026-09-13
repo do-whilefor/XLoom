@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { capabilitiesSchema, chainsSchema } from "./knowledge/schema.js";
 import { stepMethodIdsSchema } from "./methods.js";
 import { wikiPagesSchema } from "./wiki/model.js";
 
@@ -125,6 +126,8 @@ export const executionSchema = z.object({
   summary: text(),
   result: z.enum(["done", "no_progress", "blocked"]),
   wikiPages: wikiPagesSchema.optional(),
+  capabilities: capabilitiesSchema.optional(),
+  chains: chainsSchema.optional(),
   attempts: z.array(attemptSchema).max(128).optional(),
   evidence: z.array(z.object({ ref: id, path: text(4_096), description: text() }).strict()).max(128).optional(),
   facts: z.array(z.object({

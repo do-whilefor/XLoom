@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { BoardSnapshot, Execution } from "../types.js";
+import { knowledgeRecord } from "../knowledge/model.js";
 
 const text = (max: number) => z.string().trim().min(1).max(max).refine(value => !value.includes("\0"), "Must not contain NUL characters");
-export const wikiSourceSchema = z.object({ kind: z.enum(["goal", "step", "fact", "finding", "evidence", "attempt"]), id: text(256) }).strict();
+export const wikiSourceSchema = z.object({ kind: z.enum(["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain"]), id: text(256) }).strict();
 export const wikiPagesSchema = z.array(z.object({
   id: z.string().regex(/^WK-[a-z0-9][a-z0-9_-]{0,63}$/, "Use WK- followed by lowercase letters, digits, underscores or hyphens"),
   title: text(512),
@@ -26,6 +27,7 @@ const source = (kind: WikiSource["kind"], ids: string[]): WikiSource[] => ids.ma
 /** Explicit public records only. Runtime fields and conversation data are never
  * hashed into the author basis or copied into a Wiki page. */
 export function wikiRecord(board: BoardSnapshot, ref: WikiSource): { value: object; dependencies: WikiSource[] } | undefined {
+  if (ref.kind === "capability" || ref.kind === "chain") return knowledgeRecord(board, ref);
   if (ref.kind === "goal") {
     const r = board.goals.find(item => item.id === ref.id);
     return r && { value: { id: r.id, description: r.description, status: r.status, parentId: r.parentId, factIds: r.factIds }, dependencies: source("fact", r.factIds) };
@@ -89,10 +91,11 @@ export function wikiBasis(board: BoardSnapshot, roots: WikiSource[]): WikiStamp[
 /** Preflight even before new batch IDs exist; Store resolves and seals the same
  * sources after committing their records in its transaction. */
 export function validateWikiReferences(board: BoardSnapshot, output: Execution): void {
-  const local = { fact: new Set(output.facts?.map(item => item.ref)), evidence: new Set(output.evidence?.map(item => item.ref)) };
+  const local = { fact: new Set(output.facts?.map(item => item.ref)), evidence: new Set(output.evidence?.map(item => item.ref)),
+    capability: new Set(output.capabilities?.map(item => item.id)), chain: new Set(output.chains?.map(item => item.id)) };
   const errors: string[] = [];
   output.wikiPages?.forEach((page, p) => page.blocks.forEach((block, b) => block.sources.forEach((ref, s) => {
-    if ((ref.kind === "fact" || ref.kind === "evidence") && local[ref.kind].has(ref.id)) return;
+    if ((ref.kind === "fact" || ref.kind === "evidence" || ref.kind === "capability" || ref.kind === "chain") && local[ref.kind].has(ref.id)) return;
     if (!wikiRecord(board, ref)) errors.push(`wikiPages[${p}].blocks[${b}].sources[${s}]: Unknown ${ref.kind} ${JSON.stringify(ref.id)}`);
   })));
   if (errors.length) throw new Error(`${errors.join("; ")}. Wiki sources must belong to this task. Use exact committed IDs or this batch's fact/evidence refs; omit unsupported blocks instead of inventing sources.`);

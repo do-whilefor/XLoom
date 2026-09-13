@@ -1,5 +1,6 @@
 import type { BoardSnapshot, OuterLoopTrigger, Step } from "../types.js";
 import { pendingStepReviews } from "./context.js";
+import { knowledgeChanges } from "../knowledge/model.js";
 
 /** Scheduling only: the Decide Agent, never this policy, judges evidence and Goal completion. */
 export interface LoopPolicy {
@@ -46,6 +47,11 @@ export const defaultLoopPolicy: LoopPolicy = {
     if (replacement) return {
       kind: "fact_revision",
       reason: `Fact ${replacement.id} supersedes ${replacement.supersedes}. Compare their evidence and revisit dependent assumptions and Steps.`,
+    };
+
+    const knowledge = knowledgeChanges(before, after);
+    if (knowledge.capabilityIds.length || knowledge.chainIds.length) return { kind: "knowledge_change",
+      reason: `Research knowledge changed: ${[...knowledge.capabilityIds, ...knowledge.chainIds].slice(0, 12).join(", ")}. Revisit consumers, missing inputs and source-change warnings; matching types are only candidate connections.`,
     };
 
     if (after.noProgressCount >= after.config.limits.maxNoProgress) return {

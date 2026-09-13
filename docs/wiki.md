@@ -2,7 +2,7 @@
 
 Xloom 在现有研究任务内生成 Wiki，不启动 Webounty 会话、Python 引擎、额外
 Agent、执行工具或 hook。现已包含阅读导航、有来源的作者解释、来源变化提示、
-任务内词法 RAG 及本地整理／审计；没有接入 CVSS、观察比较器或独立知识图谱。
+任务内词法 RAG、本地整理／审计及原生能力/链路记录；没有接入 CVSS、观察比较器或独立知识图谱。能力组合见 [原生能力与链路](knowledge.md)。
 
 ## 存储与阅读
 
@@ -29,8 +29,8 @@ SQLite 仍是正式记录的唯一权威；作者页面保存在黑板的可选 
 现有 Execute 最终输出或 checkpoint 的 execution 可带 `wikiPages`。结构示例及
 全部规则见 [安装包编写说明](../resources/wiki/authoring.md)。每页含稳定 ID、标题
 和判断块；每块含稳定 ID、标题、正文与带类型的 sources。来源类型为 goal、step、
-fact、finding、evidence、attempt，必须属于当前任务；fact/evidence 可以使用同批
-新提交的局部 ref，Store 会转换为正式 ID。其他类型使用已提交 ID，Finding key
+fact、finding、evidence、attempt、capability、chain，必须属于当前任务；fact/evidence 可以使用同批
+新提交的局部 ref，Store 会转换为正式 ID。capability/chain 可引用本批提交的稳定 ID。其他类型使用已提交 ID，Finding key
 不能冒充 Finding ID。已提交 checkpoint 的 ID 可用于同一次 run 后面的最终输出。
 
 一块保留一个完整判断及其适用条件、否定或未知范围。引用 Goal/Step 可以说明计划，

@@ -12,6 +12,7 @@ import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
 import { writeWiki } from "./wiki/projection.js";
 import { isWikiDerived } from "./wiki/format.js";
+import { applyKnowledge } from "./knowledge/model.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -429,6 +430,7 @@ export class BlackboardStore {
           if (proposal.outcome === "supports" || proposal.outcome === "refutes") attemptProgress = true;
         }
       }
+      applyKnowledge(board, output, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks.map(block => ({ ...block,
         sources: block.sources.map(ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id })),
       })) }));
