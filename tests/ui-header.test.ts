@@ -10,9 +10,9 @@ describe("pixel X session header", () => {
   it("renders three aligned information rows with a blank separator before the transcript", () => {
     const header = new HeaderView(() => info, "ignored");
     expect(header.render(90).map(plainText)).toEqual([
-      ` ▀█▄ ▄█▀   Xloom v${XLOOM_VERSION}`,
-      "   ███     deepseek-flash[1M] · API Key",
-      " ▄█▀ ▀█▄   D:\\工作区\\Xloom",
+      ` ⠙⢷⣄ ⣠⡾⠋   Xloom v${XLOOM_VERSION}`,
+      "   ⣹⣿⣏     deepseek-flash[1M] · API Key",
+      " ⣠⡾⠋ ⠙⢷⣄   D:\\工作区\\Xloom",
       "",
     ]);
     expect(header.render(90).map(plainText).join("\n")).not.toMatch(/Claude|Usage Billing/);
@@ -34,7 +34,7 @@ describe("pixel X session header", () => {
     expect(rows).toHaveLength(4);
     expect(rows.at(-1)).toBe("");
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
-    if (width < 32) expect(rows.map(plainText).join("\n")).not.toContain("▀█▄");
+    if (width < 32) expect(rows.map(plainText).join("\n")).not.toMatch(/[\u2800-\u28ff]/);
   });
 
   it("sanitizes display values before adding renderer-owned styling", () => {

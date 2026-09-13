@@ -4,7 +4,8 @@ import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { compact, type SessionInfo } from "./model.js";
 
 export const XLOOM_VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
-const PIXEL_X = ["▀█▄ ▄█▀", "  ███  ", "▄█▀ ▀█▄"];
+// Braille cells give the diagonals a 14×12 dot grid in the same 7×3 text footprint.
+const PIXEL_X = ["⠙⢷⣄ ⣠⡾⠋", "  ⣹⣿⣏  ", "⣠⡾⠋ ⠙⢷⣄"];
 const coral = chalk.hex("#D98B73");
 
 /** Model capacity is catalog/configuration metadata, never an inferred runtime budget. */
