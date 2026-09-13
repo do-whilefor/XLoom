@@ -1,6 +1,6 @@
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Agent, type AgentEvent, type AgentMessage, type AgentOptions } from "@earendil-works/pi-agent-core";
 import { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceEditTool } from "./edit.js";
@@ -15,6 +15,7 @@ import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint
 import { stageWriter } from "./stage.js";
 import { validateDecisionReferences } from "../loop/references.js";
 import { decisionRepairGuidance, normalizeDecisionInput } from "../loop/decision-input.js";
+import { normalizeExecutionInput } from "../loop/execution-input.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
 import { createWorkspaceReadTool } from "./read.js";
 import { validateFinalJson } from "./protocol.js";
@@ -189,7 +190,10 @@ export class PiRunner implements AgentRunner {
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
-      const tools = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "write" && stage ? stage.tool : tool) : [createWorkspaceReadTool(request.workspace)];
+      const readTool = createWorkspaceReadTool(request.workspace, request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,
+        request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot } : undefined);
+      const tools = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
+        : tool.name === "edit" && stage ? createWorkspaceEditTool(request.workspace, join(request.runDir, "artifacts", "checkpoint.json")) : tool) : [readTool];
       const checkpointFile = join(request.runDir, "continuation.json");
       const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
         baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };
@@ -357,7 +361,7 @@ export class PiRunner implements AgentRunner {
       let normalizationChanges: string[] = [];
       const validateText = (text: string) => validateFinalJson(redact(text), parsed => {
         if (request.mode === "execute") {
-          const validated = executionSchema.safeParse(parsed);
+          const validated = executionSchema.safeParse(normalizeExecutionInput(parsed, stage?.snapshot ?? request.snapshot));
           if (!validated.success) throw new Error(formatValidationError(validated.error));
           validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
           validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);

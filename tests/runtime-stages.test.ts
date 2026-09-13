@@ -122,6 +122,39 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("searches a committed gap's original body through native read before Decide creates a revisit", async () => {
+    let replanned = false;
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (input.blackboard.completedSteps) return json({ summary: "Revisit still needs a new local fixture observation", result: "blocked" });
+        if (run.contexts.length === 1) return write("original", join(input.artifacts, "fixture.txt"), artifactBody + "\ndownloadGrant LOCAL_FIXTURE; actual download remains unverified.\n");
+        const submission = JSON.parse(checkpoint(input, "gap-source", true));
+        submission.execution.gaps = [{ id: "gap-download", missing: "downloadGrant", why: "Download needs a grant", reopenWhen: "New grant material arrives", needs: [],
+          conditions: { scope: "local fixture", identity: "alice", environment: "test", stateVersion: "v1" } }];
+        return write("checkpoint-gap", input.checkpointFile!, JSON.stringify(submission));
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      if (replanned) return json({ summary: "New observation still required; no duplicate revisit" });
+      const question = input.rag!.questions[0]!;
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-question", name: "read", arguments: { path: question.readPath } }], "toolUse");
+      if (run.contexts.length === 2) {
+        const result = JSON.parse(toolText(context)); expect(result.answerSupport).toBe("not_assessed");
+        return message([{ type: "toolCall", id: "read-original", name: "read", arguments: { path: result.originals.hits[0].readPath } }], "toolUse");
+      }
+      const original = JSON.parse(toolText(context)); expect(original.integrity).toBe("verified"); expect(original.text).toContain("actual download remains unverified");
+      replanned = true;
+      return json({ summary: "Original contains a candidate grant; schedule the remaining local check", steps: [{ goalId: "G0", from: [input.blackboard.facts[0]!.id],
+        description: "Read remaining local fixture condition", successSignal: "Recorded local download result", evidencePlan: "Preserve original fixture result", priority: 80,
+        revisits: [{ stepId: question.stepId, gapId: question.gapId }] }] });
+    });
+    await test.controller.start();
+    expect(replanned).toBe(true);
+    expect(test.controller.snapshot().steps).toHaveLength(2);
+    expect(test.controller.snapshot().steps[1]!.revisits).toEqual([{ stepId: test.controller.snapshot().steps[0]!.id, gapId: "gap-download" }]);
+    expect(test.controller.snapshot().steps[0]!.status).toBe("blocked");
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toHaveLength(0);
+    assertExactUsage(test);
+  });
   it("uses local organization through existing powershell and retrieves the sourced explanation in the next role", async () => {
     let reviewed = false;
     const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
@@ -636,7 +669,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     assertExactUsage(test);
   });
 
-  it("returns finding identities and recovers a conflicting target by omitting it without duplicating findings", async () => {
+  it("retains an existing finding title and recovers a conflicting target without duplicating findings", async () => {
     let findingId = "";
     let factId = "";
     const target = "local synthetic fixture";
@@ -655,7 +688,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
         findingId = accepted.findings[0].id;
         factId = accepted.facts[0].id;
       }
-      const finding = { key: "fixture-lead", title: "Synthetic hypothesis", status: "lead" as const,
+      const finding = { key: "fixture-lead", status: "lead" as const,
         factRefs: [factId], evidenceRefs: [], next: "Review the observed fixture state" };
       if (run.contexts.length === 4) {
         expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", isError: true });
@@ -669,14 +702,14 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
       }));
       expect(JSON.parse(toolText(context))).toMatchObject({ committed: true, checkpoint: "batch-2",
         findings: [{ id: findingId, key: "fixture-lead", target }] });
-      return json({ summary: "Fixture updates committed; no duplicate records", result: "done",
-        findings: [{ ...finding, next: "Review final fixture observations" }] });
+      return message([{ type: "text", text: JSON.stringify({ summary: "Fixture updates committed; no duplicate records", result: "done",
+        findings: [{ ...finding, next: "Review final fixture observations" }] }) }]);
     });
     await test.controller.start();
     const board = test.controller.snapshot();
     expect(board.status).toBe("paused");
     expect(board.findings).toHaveLength(1);
-    expect(board.findings[0]).toMatchObject({ id: findingId, target, factIds: [factId], next: "Review final fixture observations" });
+    expect(board.findings[0]).toMatchObject({ id: findingId, title: "Synthetic hypothesis", target, factIds: [factId], next: "Review final fixture observations" });
     expect(board.facts).toHaveLength(1);
     expect(board.evidence).toHaveLength(1);
     expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(2);

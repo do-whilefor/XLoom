@@ -21,6 +21,19 @@ async function workspace() {
 }
 
 describe("workspace edit diagnostics", () => {
+  it.each([false, true])("directs checkpoint edits to complete write submissions without touching files (exists: %s)", async exists => {
+    const directory = await workspace(), path = join(directory, "checkpoint.json");
+    if (exists) await writeFile(path, "accepted checkpoint");
+    for (const requested of [path, "checkpoint.json", pathToFileURL(path).href, `~/${relative(homedir(), path).replaceAll("\\", "/")}`]) {
+      await expect(createWorkspaceEditTool(directory, path).execute("checkpoint", { path: requested, edits: [{ oldText: "accepted", newText: "changed" }] }))
+        .rejects.toThrow("Checkpoint must be submitted with write");
+      if (exists) expect(await readFile(path, "utf8")).toBe("accepted checkpoint");
+      else await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const other = join(directory, "ordinary.json"); await writeFile(other, "before");
+    await createWorkspaceEditTool(directory, path).execute("ordinary", { path: other, edits: [{ oldText: "before", newText: "after" }] });
+    expect(await readFile(other, "utf8")).toBe("after");
+  });
   it("retains Pi's tool name, description and schema without adding normal-request prompt overhead", async () => {
     const directory = await workspace();
     const original = createEditTool(directory);

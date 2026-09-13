@@ -5,6 +5,7 @@ import type { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { executionSchema, formatValidationError } from "../schema.js";
 import type { RunRequest, Usage } from "../types.js";
 import { evidencePath } from "../paths.js";
+import { normalizeExecutionInput } from "../loop/execution-input.js";
 
 export const stageSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
@@ -47,9 +48,11 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
         catch (error) {
           throw new Error(`Checkpoint JSON is invalid: ${redact(error instanceof Error ? error.message : String(error))}\nNo checkpoint file was written or committed. Check matching double quotes and escape control characters inside strings (for example, \\n). Correct write.content and call write again; editing the file alone does not submit a checkpoint.`);
         }
-        const validated = stageSchema.safeParse(clean(parsed));
+        const cleaned = clean(parsed);
+        if (cleaned && typeof cleaned === "object" && "execution" in cleaned) cleaned.execution = normalizeExecutionInput(cleaned.execution, snapshot);
+        const validated = stageSchema.safeParse(cleaned);
         if (!validated.success) {
-          throw new Error(`Checkpoint content is invalid: ${formatValidationError(validated.error)}\nNo checkpoint file was written or committed. Correct the listed fields in write.content and call write again.`);
+          throw new Error(`Checkpoint content is invalid: ${formatValidationError(validated.error)}\nNo checkpoint file was written or committed. Correct the listed fields in the complete write.content and call write again; do not edit checkpointFile. New finding keys require title and target; exact existing keys may omit them to retain their committed values.`);
         }
         const submission = validated.data;
         const result = await tool.execute(...args);

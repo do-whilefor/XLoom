@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evidencePath } from "../paths.js";
 import type { BoardSnapshot, RunRequest } from "../types.js";
+import { gapQueue, gapReadPath, gapSearchQuery } from "../knowledge/gaps.js";
 import { buildRetrievalIndex, refKey, terms, type RetrievalIndex, type RetrievalRef } from "./catalog.js";
 
 export interface RetrievalOptions { limit?: number; budgetChars?: number; anchors?: RetrievalRef[] }
@@ -59,11 +60,21 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
 export function retrievalContext(request: RunRequest) {
   if (!request.blackboardPath) return undefined;
   const dataDir = dirname(request.blackboardPath), board = request.snapshot;
-  const query = request.mode === "execute" && request.step
+  const revisits = request.step?.revisits ?? [];
+  const questions = gapQueue(board).filter(item => item.active && item.state !== "resolved")
+    .sort((a, b) => Number(revisits.some(ref => ref.stepId === b.stepId && ref.gapId === b.gapId)) - Number(revisits.some(ref => ref.stepId === a.stepId && ref.gapId === a.gapId)));
+  const focused = request.mode === "execute" ? questions.find(item => item.stepId === request.step?.id || revisits.some(ref => ref.stepId === item.stepId && ref.gapId === item.gapId)) : questions[0];
+  const query = focused ? gapSearchQuery(focused)
+    : request.mode === "execute" && request.step
     ? [request.step.description, request.step.successSignal, request.step.combination?.missing.join(" ")].filter(Boolean).join(" ")
     : [board.config.goal, request.trigger?.reason, ...board.findings.filter(finding => finding.status !== "closed").slice(-3).map(finding => `${finding.title} ${finding.next}`)].filter(Boolean).join(" ");
-  const anchors = request.mode === "execute" ? request.step?.from.map(id => ({ kind: "fact" as const, id })) : undefined;
+  const anchors: RetrievalRef[] | undefined = focused ? [{ kind: "step", id: focused.stepId }, ...focused.sources.map(item => item.source)]
+    : request.mode === "execute" ? request.step?.from.map(id => ({ kind: "fact" as const, id })) : undefined;
   return { ...retrieveWiki(board, dataDir, request.workspace, query, { limit: 3, budgetChars: 8000, anchors }),
+    queryOrigin: focused ? "step_gap" : "current_task",
+    questions: questions.slice(0, 3).map(item => ({ stepId: item.stepId, gapId: item.gapId, missing: item.missing, readPath: gapReadPath(item) })),
+    deferredQuestions: questions.slice(3).map(({ stepId, gapId }) => ({ stepId, gapId })),
+    originalReading: "Use read with a gaps/rag.questions readPath to search originals for that specific gap. Optional query narrows it. Follow returned original readPath locators, inspect sourceContext and corrections, then use revisits/gapReviews; hits alone never resolve a gap. xloom://search?query=<URL-encoded query> searches task originals without a gap.",
     organizationFile: join(dataDir, "wiki", "organization.json"),
     ...(request.wikiProjectionError ? { projection: "unavailable", projectionReason: request.wikiProjectionError } : {}),
     ...(request.mode === "execute" ? { local: { guideFile: fileURLToPath(new URL("../../resources/wiki/local.md", import.meta.url)),

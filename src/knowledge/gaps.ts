@@ -17,6 +17,13 @@ export const revisitsSchema = z.array(gapRef).min(1).max(16);
 export const gapReviewsSchema = z.array(gapRef.extend({ action: z.enum(["defer", "resolve"]), reason: text(), factIds: z.array(text(256)).max(64) }).strict()).max(32);
 export type GapProposal = z.infer<typeof gapSchema>;
 export type GapRef = z.infer<typeof gapRef>;
+export function gapReadPath(ref: GapRef): string { return `xloom://question?${new URLSearchParams({ stepId: ref.stepId, gapId: ref.gapId })}`; }
+export function gapSearchQuery(gap: Pick<GapProposal, "missing" | "needs">): string {
+  const expanded = [gap.missing, ...gap.needs.map(need => [need.type, need.description, ...need.aliases].join(" "))].join(" ");
+  // Keep the whole missing-input question if all aliases would overfill a query.
+  // Full needs/conditions remain in the question package for focused follow-ups.
+  return expanded.length <= 4000 ? expanded : gap.missing;
+}
 export interface Gap extends GapProposal {
   sources: { source: z.infer<typeof sourceSchema>; reason: string }[];
   review?: { signature: string; action: "defer" | "resolve" | "plan"; reason: string; factIds: string[]; stepIds: string[]; revision: number };
@@ -129,10 +136,10 @@ export function gapContext(board: BoardSnapshot, assigned?: Step) {
   let used = 0;
   const deferred: GapRef[] = [];
   const items = ordered.filter(item => {
-    const size = JSON.stringify(item).length;
+    const size = JSON.stringify({ ...item, readPath: gapReadPath(item) }).length;
     if (used + size > 12000) { deferred.push({ stepId: item.stepId, gapId: item.gapId }); return false; }
     used += size; return true;
-  });
+  }).map(item => ({ ...item, readPath: gapReadPath(item) }));
   return { items, deferred,
     recording: "Execute may submit gaps:[{id:gap-name,missing,why,reopenWhen,needs:[{type,aliases,description}],conditions:{scope,identity,environment,stateVersion},capabilityId?}] on assignedStep. Unknown condition values are null. Empty needs means explicit source links only. gapLinks:[{stepId,gapId,sources:[{kind:fact|evidence|capability|chain,id}],reason}] associates new material using exact IDs or same-batch refs. Revisit Facts are linked automatically. Reuse a gap ID only with identical requirements. See knowledge.authoringGuide.",
     notice: "Step-local gaps. Review changed sources and originals, then create bounded steps with revisits:[{stepId,gapId}], or gapReviews:[{stepId,gapId,action:defer|resolve,reason,factIds}]. Resolve requires demonstrated Facts. Candidates/unknown conditions are not proof; old Step status is unchanged. Deferred entries remain in the blackboard and local gaps command." };

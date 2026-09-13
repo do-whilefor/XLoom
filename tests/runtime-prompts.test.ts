@@ -172,8 +172,8 @@ describe("compact built-in prompts", () => {
     expect(data.blackboard.project.goal).toBe("Synthetic prompt fixture");
     if (mode === "execute") {
       expect(data.artifacts).toBeTypeOf("string");
-      expect(protocol).toContain("New finding keys require target");
-      expect(protocol).toContain("omit target to retain it or copy it exactly");
+      expect(protocol).toContain("New finding keys require title and target");
+      expect(protocol).toContain("existing keys may omit both to retain them");
       expect(protocol).toContain("Put new observations in facts/next");
     }
     else {
@@ -235,9 +235,9 @@ describe("compact built-in prompts", () => {
     expect(JSON.parse(withCheckpoint.userPrompt.split("\n").at(-1)!)).toMatchObject({ checkpointFile: stagePath(request) });
     expect(protocol.split("Checkpoints:")).toHaveLength(2);
     for (const rule of [
-      "use write on checkpointFile after useful work", 'id:"unique-batch-id"', "execution:{same contract},yieldToDecide:false",
+      "write complete JSON to checkpointFile", "never edit checkpointFile", 'id:"unique-batch-id"', "execution:{same contract},yieldToDecide:false",
       "Only controller acceptance commits evidence; reuse returned IDs/keys",
-      "Checkpoints and final output: new, uncommitted records only",
+      "Submit new, uncommitted records only",
       "Set yieldToDecide:true on the last tool call for fresh planning, not Goal completion",
     ]) expect(protocol).toContain(rule);
   });

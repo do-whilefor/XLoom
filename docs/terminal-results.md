@@ -23,3 +23,8 @@ expectedCapability/counterEvidence 必须放在 combination 内。
 在展开详情中。错误正文会换行，避免恢复指引被单行截断。长摘要中的 `<name>`
 等参数占位符不会再阻止分段，内联代码和引号内容保持完整。排版只作用于界面，
 不更改 Agent 上下文和证据。
+
+已有 Finding 使用精确 key 更新时，可省略 title 和 target，保留已提交的值。
+新 key 仍必须提供标题与目标；不会根据相似名称猜测记录。非法 checkpoint
+不写文件，需用 Write 重交完整 JSON。Edit 当前 checkpoint 会直接返回提交指引，
+避免编辑不存在的文件或只改文件却未提交。终端优先显示失败原因，完整路径在详情中。

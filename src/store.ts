@@ -5,6 +5,7 @@ import path from "node:path";
 import { ensureProject, evidencePath } from "./paths.js";
 import { taskDirectory } from "./workspace.js";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
+import { normalizeExecutionInput } from "./loop/execution-input.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
 import { findingReviewErrors } from "./loop/reviews.js";
@@ -321,7 +322,7 @@ export class BlackboardStore {
   }
 
   applyExecution(runId: string, input: unknown, usage: Usage): BoardSnapshot {
-    const output: Execution = executionSchema.parse(input);
+    const output: Execution = executionSchema.parse(normalizeExecutionInput(input, this.snapshot()));
     return this.mutate("execution", { runId, output }, board => {
       const run = this.finishRun(board, runId, usage, "completed");
       assert(run.mode === "execute", "Wrong run channel.");
@@ -340,7 +341,7 @@ export class BlackboardStore {
   /** Commit durable observations without releasing the current Step or replaying its tools. */
   applyExecutionCheckpoint(runId: string, checkpointId: string, input: unknown, cumulativeUsage: Usage): BoardSnapshot {
     assert(/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId), "Invalid checkpoint ID.");
-    const output: Execution = executionSchema.parse(input);
+    const output: Execution = executionSchema.parse(normalizeExecutionInput(input, this.snapshot()));
     cumulativeUsage = usageSchema.parse(cumulativeUsage);
     const payloadHash = hash(Buffer.from(JSON.stringify(output)));
     const previous = this.db.prepare("SELECT payloadHash FROM execution_checkpoints WHERE runId=? AND checkpointId=?").get(runId, checkpointId);

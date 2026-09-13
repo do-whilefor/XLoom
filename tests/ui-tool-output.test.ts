@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { retainToolOutput, summarizeToolFailure } from "../src/ui/tool-output.js";
 
 describe("tool output diagnostics", () => {
+  it("puts checkpoint and missing-file causes ahead of long paths", () => {
+    expect(summarizeToolFailure("Checkpoint content is invalid: execution.findings.0.title: Required\nNo checkpoint file was written or committed."))
+      .toContain("execution.findings.0.title: Required");
+    expect(summarizeToolFailure("Checkpoint must be submitted with write. No file was edited or committed.")).toContain("Write 提交完整 JSON");
+    expect(summarizeToolFailure(`Could not edit file: C:\\${"long-path\\".repeat(40)}checkpoint.json. Error code: ENOENT.`)).toContain("文件不存在（ENOENT）");
+  });
   const response = "HTTP/1.1 200 OK\n" + "synthetic response body\n".repeat(800);
   const failure = [
     "2>&1:",

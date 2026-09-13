@@ -24,6 +24,11 @@ Revisit 的新 Facts 自动关联原缺口；步骤结束，即使没有新进�
 相关旧 consumer 优先进入能力组合发现，其余发现仍有搜索预算和省略说明。
 完整内容在黑板、原 Step Wiki 页面，以及本地只读命令中：
 
+每个缺口也提供原生 `readPath`。用现有 read 即可围绕该缺口搜索已登记的原始正文，
+再读取返回的原件字节位置；活动缺口优先驱动 rag 查询。问题条件、旧来源、更正与
+候选原件一起返回。具体入口与限制见 [原文检索](retrieval.md)。读取命中不会自动
+resolve；仍需 Decide 核对适用条件和未验证部分，再创建 revisits 或记录 gapReviews。
+
 ```powershell
 node dist/wiki/local.js gaps --task '<绝对任务目录>' --workspace '<绝对项目目录>'
 ```
