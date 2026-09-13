@@ -134,10 +134,10 @@ describe("Pi runtime isolation", () => {
     expect(prompt.userPrompt).not.toContain("DO_NOT_EXPOSE_ENV_NAME");
     expect(prompt.userPrompt).toContain("original result");
     expect(prompt.userPrompt).toContain("Resolve pending Steps");
-    expect(prompt.userPrompt).toContain("synthetic narrative");
+    expect(prompt.userPrompt).toContain("Narratives, files or hashes alone prove nothing");
     expect(prompt.userPrompt).toContain("Priority is an integer 0–1000");
     expect(prompt.userPrompt).toContain("Never abandon the root Goal");
-    expect(prompt.userPrompt).toContain("whole Goal is met");
+    expect(prompt.userPrompt).toContain("covering the whole Goal, results, evidence and remaining work");
     expect(JSON.parse(prompt.userPrompt.split("\n").at(-1)!)).toMatchObject({ blackboardFile: input.blackboardPath });
   });
 

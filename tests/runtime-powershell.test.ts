@@ -127,7 +127,7 @@ $items | ConvertTo-Json -Compress`;
 
   it("allows truthful tool progress while retaining the final JSON contract in all research modes", () => {
     for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) {
-      expect(prompt).toContain("Brief factual progress narration is optional");
+      expect(prompt).toContain("Optional progress must be factual");
       expect(prompt).toContain("Never invent evidence or private reasoning");
       expect(prompt).toContain("Final response: one JSON object");
     }
