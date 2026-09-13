@@ -102,7 +102,7 @@ export function summarizeActivity(group: ActivityGroup, now: number): { text: st
   const parts: string[] = [];
   if (thoughts.length) {
     const milliseconds = thinkingMilliseconds(thoughts, now);
-    parts.push(milliseconds === undefined ? thoughtActive ? "Thinking…" : "Thought" : `${thoughtActive ? "Thinking" : "Thought"} for ${Math.floor(milliseconds / 1000)}s`);
+    parts.push(milliseconds === undefined ? thoughtActive ? "Thinking…" : "Thought" : `${thoughtActive ? "Thinking" : "Thought"} for ${milliseconds < 1000 ? "<1" : Math.floor(milliseconds / 1000)}s`);
   }
   for (const kind of TOOL_KINDS) if (done.has(kind)) parts.push(toolPhrase(kind, done.get(kind)!, false));
   for (const kind of TOOL_KINDS) if (running.has(kind)) parts.push(toolPhrase(kind, running.get(kind)!, true));

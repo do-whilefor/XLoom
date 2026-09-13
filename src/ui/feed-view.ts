@@ -3,6 +3,7 @@ import { hyperlink, Markdown, truncateToWidth, visibleWidth, type Component, typ
 import { compact, EventFeed, fitLines, plainText, type FeedEntry } from "./model.js";
 import { summarizeToolFailure } from "./tool-output.js";
 import { emptyThought, groupActivities, summarizeActivity, type ActivityGroup } from "./activity.js";
+import { readableProse } from "./prose.js";
 
 const coral = chalk.hex("#D98B73");
 const muted = chalk.gray;
@@ -106,7 +107,10 @@ export class FeedView implements Component {
   }
 
   private body(entry: FeedEntry, width: number, user: boolean): string[] {
-    const text = plainText(entry.text);
+    const source = plainText(entry.text);
+    const text = user || entry.key === "stream" ? source : readableProse(source);
+    // Keep prose readable on wide terminals; code and tables keep the full width.
+    if (!user && !/[`|]|^ {4}/m.test(text)) width = Math.min(width, 100);
     // Deep lists/quotes can also reduce Pi's inner wrapping width to one cell.
     const deepLayout = text.split("\n").some(line => {
       const prefix = /^(\s*(?:>\s*)*(?:\d+[.)]\s+)?)/.exec(line)?.[1] ?? "";

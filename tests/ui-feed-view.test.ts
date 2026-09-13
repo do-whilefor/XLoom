@@ -482,7 +482,7 @@ describe("real provider thinking blocks and response duration", () => {
       { kind: "thinking", label: "Assistant", text: "", startedAt: Number.NaN, endedAt: Infinity },
       { kind: "work", label: "Assistant", text: "", startedAt: undefined, workStatus: "running" },
     ], () => Number.NaN);
-    expect(screen()).toContain("Thought for 0s");
+    expect(screen()).toContain("Thought for <1s");
     expect(screen()).toContain("▸ Thinking…");
     expect(screen()).toContain("Working… 0s");
     expect(screen()).not.toMatch(/NaN|Infinity|-\ds/);

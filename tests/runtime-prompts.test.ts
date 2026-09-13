@@ -51,6 +51,15 @@ function promptFixture(mode: RunRequest["mode"], checkpoints = false): RunReques
 }
 
 describe("compact built-in prompts", () => {
+  it("asks every research role for readable public summaries inside the JSON contract", () => {
+    for (const mode of ["decide", "execute", "metacog"] as const) {
+      const prompt = buildRunPrompt(promptFixture(mode));
+      expect(prompt.systemPrompt).toContain("short Markdown paragraphs");
+      expect(prompt.systemPrompt).toContain("Separate each chain/problem");
+      expect(prompt.systemPrompt).toContain("JSON strings encode line breaks as \\n");
+      expect(prompt.systemPrompt).toContain("Final response: one JSON object");
+    }
+  });
   it.each(["你是什么模型", "你是什么模型？", "What model are you?", "你好"])("bounds characters and estimated tokens for ordinary chat: %s", async text => {
     const seen: Context[] = [];
     const session = captureChat(seen);
@@ -139,7 +148,7 @@ describe("compact built-in prompts", () => {
   });
 
   it.each([
-    ["decide", 550, 2_700, 815], ["execute", 450, 1_650, 525], ["metacog", 750, 2_700, 865],
+    ["decide", 760, 2_700, 870], ["execute", 660, 1_650, 580], ["metacog", 960, 2_700, 920],
   ] as const)("keeps %s instructions compact while retaining a valid JSON output contract", (mode, systemLimit, protocolLimit, tokenLimit) => {
     const request = promptFixture(mode);
     const { systemPrompt, userPrompt } = buildRunPrompt(request);
@@ -222,7 +231,7 @@ describe("compact built-in prompts", () => {
     }
     const protocol = withCheckpoint.userPrompt.slice(0, withCheckpoint.userPrompt.lastIndexOf("\n\n"));
     expect(protocol.length).toBeLessThanOrEqual(2_000);
-    expect(footprint(withCheckpoint.systemPrompt, protocol).estimatedTokens).toBeLessThanOrEqual(615);
+    expect(footprint(withCheckpoint.systemPrompt, protocol).estimatedTokens).toBeLessThanOrEqual(670);
     expect(JSON.parse(withCheckpoint.userPrompt.split("\n").at(-1)!)).toMatchObject({ checkpointFile: stagePath(request) });
     expect(protocol.split("Checkpoints:")).toHaveLength(2);
     for (const rule of [

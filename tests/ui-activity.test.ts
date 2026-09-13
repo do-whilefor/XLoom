@@ -128,8 +128,8 @@ describe("accurate activity summaries", () => {
   });
 
   it("clamps reversed clocks to zero and handles invalid current time without NaN output", () => {
-    expect(summarizeActivity(group(thought(5000, 1000, { text: "A real provider thought." })), 10000).text).toBe("Thought for 0s");
-    expect(summarizeActivity(group(thought(5000)), 1000).text).toBe("Thinking for 0s");
+    expect(summarizeActivity(group(thought(5000, 1000, { text: "A real provider thought." })), 10000).text).toBe("Thought for <1s");
+    expect(summarizeActivity(group(thought(5000)), 1000).text).toBe("Thinking for <1s");
     expect(summarizeActivity(group(thought(5000)), NaN).text).toBe("Thinking…");
   });
 
@@ -140,8 +140,8 @@ describe("accurate activity summaries", () => {
   });
 
   it("retains live empty thoughts and actual subsecond reasoning", () => {
-    expect(summarizeActivity(group(thought(1000)), 1000).text).toBe("Thinking for 0s");
-    expect(summarizeActivity(group(thought(1000, 1800, { text: "Problem: a response was incomplete." })), 9000).text).toBe("Thought for 0s");
+    expect(summarizeActivity(group(thought(1000)), 1000).text).toBe("Thinking for <1s");
+    expect(summarizeActivity(group(thought(1000, 1800, { text: "Problem: a response was incomplete." })), 9000).text).toBe("Thought for <1s");
   });
 
   it.each([{ durationKnown: false }, { startedAt: undefined }, { startedAt: NaN }, { endedAt: Infinity }])(
