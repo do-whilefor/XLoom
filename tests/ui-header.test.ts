@@ -1,18 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { contextLabel, HeaderView, XLOOM_VERSION } from "../src/ui/header.js";
 import { plainText, type SessionInfo } from "../src/ui/model.js";
+
+vi.mock("chalk", async importOriginal => {
+  const { Chalk } = await importOriginal<typeof import("chalk")>();
+  return { default: new Chalk({ level: 3 }) };
+});
 
 const workspace = "D:\\工作区\\Xloom";
 const info = { model: "fixture/deepseek-flash", modelName: "deepseek-flash", contextWindow: 1_048_576, authLabel: "API Key", workspace };
 
 describe("pixel X session header", () => {
-  it("renders a solid X and three aligned information rows followed by two blank rows", () => {
+  it("centers information on rows 2–4 beside a five-row solid X with two blank rows below", () => {
     const header = new HeaderView(() => info, "ignored");
     expect(header.render(90).map(plainText)).toEqual([
-      `▝█▄ ▄█▘   Xloom v${XLOOM_VERSION}`,
-      "  ▐█▌     deepseek-flash[1M] · API Key",
-      "▗█▀ ▀█▖   D:\\工作区\\Xloom",
+      "         ▄▘",
+      `  ▀██  ▄█▘    Xloom v${XLOOM_VERSION}`,
+      "     ▟██▘     deepseek-flash[1M] · API Key",
+      "  ▗▟█▛▐█▄     D:\\工作区\\Xloom",
+      "▄▟██▘      ",
       "",
       "",
     ]);
@@ -30,9 +37,14 @@ describe("pixel X session header", () => {
     expect(screen).not.toContain("first");
   });
 
+  it("keeps all five logo rows coral", () => {
+    const rows = new HeaderView(() => info, workspace).render(90);
+    for (const row of rows.slice(0, 5)) expect(row).toMatch(/^\x1b\[38;2;217;139;115m[ ▀-▟]+\x1b\[39m/);
+  });
+
   it.each([0, 1, 3, 8, 20, 31, 32, 90])("keeps every row within a %i-column terminal", width => {
     const rows = new HeaderView(() => ({ ...info, modelName: "测试模型".repeat(100), workspace: workspace.repeat(100) }), workspace).render(width);
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(width >= 32 ? 7 : 5);
     expect(rows.slice(-2)).toEqual(["", ""]);
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     if (width < 32) expect(rows.map(plainText).join("\n")).not.toMatch(/[\u2580-\u259f]/);

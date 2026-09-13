@@ -9,6 +9,15 @@ const muted = chalk.gray;
 const MAX_DETAIL_CHARS = 6000;
 const MAX_DETAIL_LINES = 40;
 export const THOUGHT_LINK_PREFIX = "xloom-thinking:";
+export const WORK_PULSE_INTERVAL_MS = 180;
+// Grow and shrink a six-point star in one cell, holding briefly at each extreme.
+const WORK_PULSE = ["·", "∗", "✻", "✻", "∗", "·"];
+
+function workPulse(startedAt: number | undefined, now: number): string {
+  const elapsed = Number.isFinite(startedAt) && Number.isFinite(now) ? Math.max(0, now - startedAt!) : 0;
+  return WORK_PULSE[Math.floor(elapsed / WORK_PULSE_INTERVAL_MS) % WORK_PULSE.length]!;
+}
+
 const theme: MarkdownTheme = {
   heading: text => chalk.bold(text), link: text => chalk.cyan(text), linkUrl: muted,
   code: text => coral(text), codeBlock: text => text, codeBlockBorder: muted,
@@ -187,8 +196,8 @@ export class FeedView implements Component {
         const status = entry.error ? "error" : entry.workStatus ?? (Number.isFinite(entry.endedAt) ? "stopped" : "running");
         const active = status === "running" && !Number.isFinite(entry.endedAt);
         const tokens = Number.isFinite(entry.tokens) && entry.tokens! >= 0 ? ` · ${Math.floor(entry.tokens!).toLocaleString("en-US")} tokens` : "";
-        const text = (active ? `✻ Working… ${this.duration(entry)}` : `✻ Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`) + tokens;
-        line((status === "error" ? chalk.red : muted)(text));
+        const text = (active ? `Working… ${this.duration(entry)}` : `Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`) + tokens;
+        line(active ? `${coral(workPulse(entry.startedAt, this.now()))} ${muted(text)}` : (status === "error" ? chalk.red : muted)(`✻ ${text}`));
       } else if (kind === "activity") {
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
         line(coral("● ") + muted(`${label}${entry.text ? ` · ${compact(entry.text, 240)}` : ""}`));

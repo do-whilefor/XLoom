@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getCapabilities, getOsc8LinkAtColumn, Markdown, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
-import { FeedView, THOUGHT_LINK_PREFIX } from "../src/ui/feed-view.js";
+import { FeedView, THOUGHT_LINK_PREFIX, WORK_PULSE_INTERVAL_MS } from "../src/ui/feed-view.js";
 import { EventFeed, plainText, type FeedEntry } from "../src/ui/model.js";
+
+vi.mock("chalk", async importOriginal => {
+  const { Chalk } = await importOriginal<typeof import("chalk")>();
+  return { default: new Chalk({ level: 3 }) };
+});
 
 const originalCapabilities = getCapabilities();
 afterEach(() => { setCapabilities(originalCapabilities); vi.restoreAllMocks(); });
@@ -419,10 +424,39 @@ describe("real provider thinking blocks and response duration", () => {
   it("keeps working markers live without claiming that an unfinished response is done", () => {
     let current = 7600;
     const { screen } = setup([{ kind: "work", label: "Assistant", text: "", startedAt: 1000, workStatus: "running" }], () => current);
-    expect(screen()).toContain("✻ Working… 6s");
+    expect(screen()).toContain("Working… 6s");
     current = 10000;
-    expect(screen()).toContain("✻ Working… 9s");
+    expect(screen()).toContain("Working… 9s");
     expect(screen()).not.toContain("done");
+  });
+
+  it("grows and shrinks the working star in place without rotating or changing work state", () => {
+    const entry: FeedEntry = { kind: "work", label: "Assistant", text: "", startedAt: 1000, workStatus: "running" };
+    const original = structuredClone(entry);
+    let current = 1000;
+    const { screen, view } = setup([entry], () => current);
+    const frames = ["·", "∗", "✻", "✻", "∗", "·", "·"];
+    for (const [frame, symbol] of frames.entries()) {
+      current = 1000 + frame * WORK_PULSE_INTERVAL_MS;
+      expect(screen().startsWith(`${symbol} Working…`)).toBe(true);
+      expect(screen().indexOf("Working…")).toBe(2);
+      for (const width of [1, 2, 8, 20]) for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+    expect(entry).toEqual(original);
+  });
+
+  it("keeps the pulsing star coral", () => {
+    const { view } = setup([{ kind: "work", label: "Assistant", text: "", startedAt: 1000, workStatus: "running" }], () => 1000 + 2 * WORK_PULSE_INTERVAL_MS);
+    expect(view.render(90).join("\n")).toContain("\x1b[38;2;217;139;115m✻\x1b[39m");
+  });
+
+  it.each(["done", "paused", "stopped", "error"] as const)("keeps the %s work marker still after completion or interruption", workStatus => {
+    let current = 2500;
+    const { screen } = setup([{ kind: "work", label: "Assistant", text: "", startedAt: 1000, endedAt: 2500, workStatus }], () => current);
+    const completed = screen();
+    expect(completed.startsWith("✻ Worked for")).toBe(true);
+    current += WORK_PULSE_INTERVAL_MS;
+    expect(screen()).toBe(completed);
   });
 
   it.each(["paused", "stopped", "error"] as const)("does not relabel a %s response as done", workStatus => {

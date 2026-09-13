@@ -5,6 +5,7 @@ import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import { runTui } from "../src/ui/index.js";
 import { EventFeed, plainText, statusLine, type UiController } from "../src/ui/model.js";
 import { SettingsDialogs, SettingsPanel } from "../src/ui/settings-dialog.js";
+import { WORK_PULSE_INTERVAL_MS } from "../src/ui/feed-view.js";
 
 class MemoryTerminal implements Terminal {
   output = "";
@@ -100,10 +101,10 @@ describe("ordinary chat and dual-agent task UI", () => {
     app.tui.renderNow(true);
     const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
       .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
-    expect(rows.get(3)).toContain(process.cwd());
-    expect(rows.get(4)).toBe("");
-    expect(rows.get(5)).toBe("");
-    expect(rows.get(6)).toBe("❯ 你是什么模型？");
+    expect(rows.get(4)).toContain(process.cwd());
+    expect(rows.get(6)).toBe("");
+    expect(rows.get(7)).toBe("");
+    expect(rows.get(8)).toBe("❯ 你是什么模型？");
   });
 
   it("renders live tokens in a narrow footer and replaces pending tokens with committed usage once", async () => {
@@ -255,21 +256,68 @@ describe("Claude-style response timeline", () => {
     expect(app.controller.hint).not.toHaveBeenCalled();
   });
 
+  it.each(["done", "paused", "error", "exit"] as const)("animates without provider events and stops refreshing after %s", async outcome => {
+    vi.useFakeTimers();
+    const app = launch({ now: () => Date.now() });
+    let release: () => void = () => {};
+    let reject!: (error: Error) => void;
+    try {
+      app.controller.chat.mockImplementation(() => new Promise((resolve, fail) => { release = resolve; reject = fail; }));
+      const requestRender = vi.spyOn(app.tui, "requestRender");
+      app.submit("你是什么模型？");
+      expect(screen(app)).toContain("· Working… 0s");
+      requestRender.mockClear();
+      app.terminal.output = "";
+      // Let the interval and Pi's queued render run without another model event.
+      await vi.advanceTimersByTimeAsync(WORK_PULSE_INTERVAL_MS + 20);
+      expect(requestRender).toHaveBeenCalledOnce();
+      expect(plainText(app.terminal.output)).toContain("∗ Working… 0s");
+      app.terminal.output = "";
+      await vi.advanceTimersByTimeAsync(WORK_PULSE_INTERVAL_MS);
+      expect(plainText(app.terminal.output)).toContain("✻ Working… 0s");
+      expect(app.controller.chat).toHaveBeenCalledExactlyOnceWith("你是什么模型？");
+      expect(app.controller.start).not.toHaveBeenCalled();
+      expect(app.controller.runGoal).not.toHaveBeenCalled();
+
+      if (outcome === "paused") app.terminal.input("\x1b");
+      if (outcome === "exit") app.submit("/exit");
+      if (outcome === "error") reject(new Error("Request timed out."));
+      else release();
+      await app.settled();
+      if (outcome === "exit") await app.session;
+      else {
+        expect(screen(app)).toContain(`· ${outcome}`);
+        expect(screen(app)).not.toContain("Working…");
+      }
+      // Drain the final frame, then check that idle/closed sessions no longer tick.
+      await vi.advanceTimersByTimeAsync(20);
+      requestRender.mockClear();
+      app.terminal.output = "";
+      await vi.advanceTimersByTimeAsync(6 * WORK_PULSE_INTERVAL_MS);
+      expect(requestRender).not.toHaveBeenCalled();
+      expect(app.terminal.output).toBe("");
+    } finally {
+      release();
+      await app.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("handles real mouse clicks on thinking headers without submitting text or copying a click", async () => {
     const app = launch();
     emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "click", text: "CLICK_THOUGHT" } });
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "click", text: "" } });
     screen(app);
-    // Three header rows and two blank rows precede the flush-left thought row 6.
-    app.terminal.input("\x1b[<0;1;6M");
-    app.terminal.input("\x1b[<0;1;6m");
+    // Five header rows and two blank rows precede the flush-left thought row 8.
+    app.terminal.input("\x1b[<0;1;8M");
+    app.terminal.input("\x1b[<0;1;8m");
     expect(screen(app)).toContain("CLICK_THOUGHT");
     expect(app.clipboard.writeText).not.toHaveBeenCalled();
     expect(app.controller.chat).not.toHaveBeenCalled();
     // Moving while held is selection, not a toggle.
-    app.terminal.input("\x1b[<0;3;6M");
-    app.terminal.input("\x1b[<32;8;6M");
-    app.terminal.input("\x1b[<0;8;6m");
+    app.terminal.input("\x1b[<0;3;8M");
+    app.terminal.input("\x1b[<32;8;8M");
+    app.terminal.input("\x1b[<0;8;8m");
     await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
     expect(screen(app)).toContain("CLICK_THOUGHT");
   });
@@ -356,7 +404,7 @@ describe("Claude-style response timeline", () => {
     screen(app);
     expect(app.tui.viewportTop).toBeGreaterThan(0);
     // Header + two blank rows + 40 notices + blank group separator + thought header.
-    const row = 47 - app.tui.viewportTop;
+    const row = 49 - app.tui.viewportTop;
     app.terminal.input(`\x1b[<0;1;${row}M`);
     app.terminal.input(`\x1b[<0;1;${row}m`);
     expect(screen(app)).toContain("SCROLLED_THOUGHT");
