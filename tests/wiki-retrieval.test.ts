@@ -94,7 +94,10 @@ describe("task-local lexical RAG and organization", () => {
     board.wikiPages![0]!.blocks = [];
     expect(retrieveWiki(board, task, workspace, "UniqueRenamedTopic").hits).toEqual([]);
     const index = buildRetrievalIndex(board);
-    expect(retrieveWiki(board, task, workspace, "report", {}, JSON.parse(JSON.stringify(index)))).toEqual(retrieveWiki(board, task, workspace, "report"));
+    const { index: suppliedStats, ...supplied } = retrieveWiki(board, task, workspace, "report", {}, JSON.parse(JSON.stringify(index)));
+    const { index: rebuiltStats, ...rebuilt } = retrieveWiki(board, task, workspace, "report");
+    expect(supplied).toEqual(rebuilt);
+    expect(suppliedStats).toBeUndefined(); expect(rebuiltStats?.added).toBe(index.documents.length);
   });
 
   it("does not inflate relevance with hashes or link IDs and preserves meaningful business strings", () => {

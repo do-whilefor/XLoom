@@ -5,6 +5,8 @@ import type { BoardSnapshot, Evidence } from "../types.js";
 import { evidencePath } from "../paths.js";
 import { terms } from "./catalog.js";
 import { wikiGenerator } from "./format.js";
+import { cachedEntry, pruneEntries, putEntry, removeEntry, withIndexCache } from "./cache.js";
+import { wikiDigest } from "./model.js";
 
 const fingerprint = (s: Stats) => [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].join(":");
 const inside = (root: string, file: string) => { const r = relative(root, file); return r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r); };
@@ -58,47 +60,94 @@ function scan(evidence: Evidence, dataDir: string, workspace: string, window: (t
   } finally { closeSync(fd); }
 }
 
-export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6) {
+export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false) {
   if (!query.trim() || query.length > 4000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("Use a nonempty query up to 4000 characters and limit 1–20.");
   const tokens = [...new Set(terms(query))];
   if (!tokens.length) throw new Error("Query has no searchable terms");
-  type Hit = { locator: OriginalLocator; readPath: string; snippet: string; score: number; matchedTerms: string[] };
-  const hits: Hit[] = [], issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
-  let matchedWindows = 0;
-  const order = (a: Hit, b: Hit) => b.score - a.score || a.locator.evidenceId.localeCompare(b.locator.evidenceId) || a.locator.byteOffset - b.locator.byteOffset;
-  for (const evidence of board.evidence) {
-    const candidates: Hit[] = []; let matches = 0;
-    try {
-      const checked = scan(evidence, dataDir, workspace, (text, offset) => {
-        const words = new Set(terms(text)), matchedTerms = tokens.filter(term => words.has(term));
-        if (!matchedTerms.length) return;
-        matches++;
-        const key = [...matchedTerms].sort((a, b) => b.length - a.length)[0]!;
-        const position = Math.max(0, text.toLowerCase().indexOf(key));
-        let start = Math.max(0, position - 160), end = Math.min(text.length, position + 1200);
-        if (start > 0 && /[\uDC00-\uDFFF]/.test(text[start]!)) start--;
-        if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
-        const snippet = text.slice(start, end);
-        const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: offset + Buffer.byteLength(text.slice(0, start)), byteLength: Buffer.byteLength(snippet) };
-        if (!locator.byteLength) return;
-        candidates.push({ locator, readPath: originalReadPath(locator), snippet, matchedTerms, score: matchedTerms.reduce((sum, term) => sum + 1 + Math.min(term.length, 24) / 24, 0) });
-        candidates.sort(order); if (candidates.length > limit) candidates.length = limit;
-      });
-      inspected.push({ evidenceId: evidence.id, ...checked }); matchedWindows += matches;
-      hits.push(...candidates); hits.sort(order); if (hits.length > limit) hits.length = limit;
-    } catch (error) { issues.push({ evidenceId: evidence.id, reason: (error as Error).message }); }
-  }
-  for (const item of inspected) {
-    try { if (fingerprint(lstatSync(item.file)) !== item.fingerprint) throw new Error("changed"); }
-    catch { issues.push({ evidenceId: item.evidenceId, reason: "Evidence changed during search; retry" }); }
-  }
-  const unavailable = new Set(issues.map(item => item.evidenceId));
-  const valid = hits.filter(hit => !unavailable.has(hit.locator.evidenceId));
-  return { generator: wikiGenerator, type: "original_search", evidence: false, boardRevision: board.revision, query,
-    coverage: "All registered evidence bodies in this task, streamed in overlapping UTF-8 windows. No private transcripts, unregistered files or other tasks.",
-    notice: "Lexical source windows are navigation, not independent evidence or an answer. Read originals and inspect conditions/corrections. No match does not establish absence.",
-    complete: !issues.length, inspectedCount: inspected.length, registeredCount: board.evidence.length, matchedWindows,
-    deferredWindows: Math.max(0, matchedWindows - valid.length), issues, hits: valid };
+  return withIndexCache(dataDir, workspace, (db, index) => {
+    type Hit = { locator: OriginalLocator; readPath: string; snippet: string; score: number; matchedTerms: string[] };
+    type Window = { offset: number; byteLength: number };
+    const hits: Hit[] = [], issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
+    const windows = new Map<string, Window[]>();
+    index.removed = pruneEntries(db, "original", new Set(board.evidence.map(item => item.id)));
+    for (const evidence of board.evidence) {
+      let cacheOperation = false;
+      try {
+        const file = archivePath(evidence, dataDir, workspace), stat = lstatSync(file);
+        if (!stat.isFile()) throw new Error("Evidence must be a regular file");
+        const signature = wikiDigest([evidence.path, evidence.pathBase, evidence.sha256, evidence.bytes, fingerprint(stat)]);
+        cacheOperation = true;
+        const previous = cachedEntry<Window[]>(db, "original", evidence.id);
+        if (previous && (!Array.isArray(previous.value) || previous.value.some(window => !Number.isSafeInteger(window?.offset) || window.offset < 0
+          || !Number.isSafeInteger(window?.byteLength) || window.byteLength < 1))) throw new Error("Invalid original cache windows");
+        cacheOperation = false;
+        let current: Window[];
+        if (!refresh && previous?.signature === signature) { current = previous.value; index.reused++; }
+        else {
+          current = []; const units: string[][] = [];
+          scan(evidence, dataDir, workspace, (text, offset) => {
+            current.push({ offset, byteLength: Buffer.byteLength(text) }); units.push([...new Set(terms(text))]);
+          });
+          index.indexedBytes += evidence.bytes;
+          previous ? index.updated++ : index.added++;
+          cacheOperation = true;
+          putEntry(db, "original", evidence.id, signature, current, units);
+          cacheOperation = false;
+        }
+        windows.set(evidence.id, current);
+        inspected.push({ evidenceId: evidence.id, file, fingerprint: fingerprint(stat) });
+      } catch (error) {
+        if (cacheOperation) throw error;
+        removeEntry(db, "original", evidence.id);
+        issues.push({ evidenceId: evidence.id, reason: (error as Error).message });
+      }
+    }
+    const selected = new Map<string, Set<number>>();
+    const lookup = db.prepare("SELECT key,unit FROM terms WHERE namespace='original' AND term=?");
+    for (const term of tokens) for (const row of lookup.all(term)) {
+      const key = String(row.key), set = selected.get(key) ?? new Set<number>();
+      set.add(Number(row.unit)); selected.set(key, set);
+    }
+    let matchedWindows = 0;
+    const order = (a: Hit, b: Hit) => b.score - a.score || a.locator.evidenceId.localeCompare(b.locator.evidenceId) || a.locator.byteOffset - b.locator.byteOffset;
+    for (const evidence of board.evidence) {
+      if (!windows.has(evidence.id) || !selected.has(evidence.id)) continue;
+      const offsets = new Set([...selected.get(evidence.id)!].map(unit => windows.get(evidence.id)![unit]?.offset));
+      const candidates: Hit[] = []; let matches = 0;
+      try {
+        scan(evidence, dataDir, workspace, (text, offset) => {
+          if (!offsets.has(offset)) return;
+          const words = new Set(terms(text)), matchedTerms = tokens.filter(term => words.has(term));
+          if (!matchedTerms.length) return;
+          matches++;
+          const key = [...matchedTerms].sort((a, b) => b.length - a.length)[0]!;
+          const position = Math.max(0, text.toLowerCase().indexOf(key));
+          let start = Math.max(0, position - 160), end = Math.min(text.length, position + 1200);
+          if (start > 0 && /[\uDC00-\uDFFF]/.test(text[start]!)) start--;
+          if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
+          const snippet = text.slice(start, end);
+          const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: offset + Buffer.byteLength(text.slice(0, start)), byteLength: Buffer.byteLength(snippet) };
+          if (!locator.byteLength) return;
+          candidates.push({ locator, readPath: originalReadPath(locator), snippet, matchedTerms, score: matchedTerms.reduce((sum, term) => sum + 1 + Math.min(term.length, 24) / 24, 0) });
+          candidates.sort(order); if (candidates.length > limit) candidates.length = limit;
+        });
+        index.verifiedOriginals++; matchedWindows += matches;
+        hits.push(...candidates); hits.sort(order); if (hits.length > limit) hits.length = limit;
+      } catch (error) { issues.push({ evidenceId: evidence.id, reason: (error as Error).message }); }
+    }
+    for (const item of inspected) {
+      try { if (fingerprint(lstatSync(item.file)) !== item.fingerprint) throw new Error("changed"); }
+      catch { issues.push({ evidenceId: item.evidenceId, reason: "Evidence changed during search; retry" }); }
+    }
+    const unavailable = new Set(issues.map(item => item.evidenceId));
+    const valid = hits.filter(hit => !unavailable.has(hit.locator.evidenceId));
+    return { generator: wikiGenerator, type: "original_search", evidence: false, boardRevision: board.revision, query,
+      coverage: "All registered task evidence bodies, indexed in overlapping UTF-8 windows. Unchanged file fingerprints reuse term postings; candidate originals are fully hash/size/UTF-8 verified before delivery. No private transcripts or other tasks.",
+      notice: "Lexical source windows are navigation, not independent evidence or an answer. Read originals and inspect conditions/corrections. Warm no-match is not a fresh integrity audit and does not establish absence; use refresh=true to rebuild from bytes.",
+      index,
+      complete: !issues.length, inspectedCount: inspected.length, registeredCount: board.evidence.length, matchedWindows,
+      deferredWindows: Math.max(0, matchedWindows - valid.length), issues, hits: valid };
+  });
 }
 
 export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: string, locator: OriginalLocator) {

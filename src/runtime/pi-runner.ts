@@ -56,7 +56,12 @@ export function runtimeEvent(event: AgentEvent, mode: RuntimeEvent["mode"]): Run
       return;
     case "tool_execution_start": return { type: "tool_start", mode, toolName: event.toolName, toolCallId: event.toolCallId, text: JSON.stringify(event.args) };
     case "tool_execution_update": return { type: "tool_update", mode, toolName: event.toolName, toolCallId: event.toolCallId, text: contentText(event.partialResult) };
-    case "tool_execution_end": return { type: "tool_end", mode, toolName: event.toolName, toolCallId: event.toolCallId, text: contentText(event.result), isError: event.isError };
+    case "tool_execution_end": {
+      const details = event.result?.details;
+      return { type: "tool_end", mode, toolName: event.toolName, toolCallId: event.toolCallId, text: contentText(event.result), isError: event.isError,
+        ...(event.toolName === "read" && !event.isError && details?.nativeRetrieval === true && typeof details.retrievalFeedback === "string"
+          ? { retrievalFeedback: details.retrievalFeedback } : {}) };
+    }
     default: return;
   }
 }
@@ -186,12 +191,15 @@ export class PiRunner implements AgentRunner {
       const prompt = buildRunPrompt(request);
       prompt.systemPrompt += `\n\n${budget.instruction}`;
       await writeFile(join(request.runDir, "input.json"), redact(JSON.stringify({ mode: request.mode, ...prompt }, null, 2)), { flag: "wx" });
-      const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
+      const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text),
+        ...(event.retrievalFeedback ? { retrievalFeedback: redact(event.retrievalFeedback) } : {}) });
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
       const readTool = createWorkspaceReadTool(request.workspace, request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,
-        request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot } : undefined);
+        request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
+          materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
+          onAnnounced: items => { if (request.materials) (request.materialReads ??= []).push(...items); } } : undefined);
       const tools = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
         : tool.name === "edit" && stage ? createWorkspaceEditTool(request.workspace, join(request.runDir, "artifacts", "checkpoint.json")) : tool) : [readTool];
       const checkpointFile = join(request.runDir, "continuation.json");

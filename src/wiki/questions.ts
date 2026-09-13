@@ -8,7 +8,7 @@ import type { RetrievalRef } from "./catalog.js";
 /** Search one recorded missing prerequisite, carrying its original context and
  * the explicit provenance/corrections of candidate material back to Decide. */
 export function retrieveQuestion(board: BoardSnapshot, dataDir: string, workspace: string, ref: GapRef,
-  options: { query?: string; limit?: number; budgetChars?: number } = {}) {
+  options: { query?: string; limit?: number; budgetChars?: number; refresh?: boolean } = {}) {
   const question = gapQueue(board).find(item => item.stepId === ref.stepId && item.gapId === ref.gapId);
   if (!question) throw new Error("Unknown Step/gap in this task; use an exact gaps.readPath");
   const budget = options.budgetChars ?? 16000;
@@ -20,7 +20,7 @@ export function retrieveQuestion(board: BoardSnapshot, dataDir: string, workspac
     notice: "Full question/source material exceeds delivery budget; increase budgetChars or narrow the query. Omitted material is not absent; no gap was resolved." };
   const questionSize = JSON.stringify({ ...base, question }).length;
   if (questionSize > budget / 2) return incomplete;
-  const originals = searchOriginals(board, dataDir, workspace, query, options.limit ?? 3);
+  const originals = searchOriginals(board, dataDir, workspace, query, options.limit ?? 3, options.refresh);
   const anchors: RetrievalRef[] = [{ kind: "step", id: ref.stepId }, ...question.sources.map(item => item.source),
     ...question.candidates.map(item => ({ kind: "capability" as const, id: item.capabilityId })),
     ...originals.hits.flatMap(hit => [{ kind: "evidence" as const, id: hit.locator.evidenceId },

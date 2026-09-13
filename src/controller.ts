@@ -6,6 +6,7 @@ import { decisionSchema, usageSchema } from "./schema.js";
 import { pendingStepReviews, projectContext, type ContextProjector } from "./loop/context.js";
 import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
 import { normalizeDecisionInput } from "./loop/decision-input.js";
+import { planningMaterials } from "./wiki/materials.js";
 import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
 
 /** Code-level extension seams, not dynamically loaded plugins or Agent tools. */
@@ -125,7 +126,12 @@ export class LoopController {
           return committed;
         };
         request.context = this.projectContext(request);
+        if (mode !== "execute") {
+          request.materialBaseline = this.store.materialReceipts();
+          request.materials = planningMaterials(snapshot, request.materialBaseline, this.store.dataDir, this.store.workspace);
+        }
         this.emit({ type: "handoff", handoff: { role: mode === "execute" ? "execute" : "decide", mode, runId, revision: snapshot.revision, stepId: claimedStep?.id, trigger } });
+        if (request.materials && (request.materials.items.length || request.materials.deferredCount)) this.emit({ type: "materials", materials: request.materials });
         cancellation.signal.throwIfAborted();
         result = await this.runner.run(request);
         if (cancellation.signal.aborted) throw new Error(timedOut ? timeoutReason : this.interruptReason);
@@ -167,7 +173,8 @@ export class LoopController {
             if (decision.updateGoals) decision.updateGoals = decision.updateGoals.filter(goal => !rootIds.has(goal.id));
             this.notice(hintsChanged ? "New hint arrived during planning; conclusion deferred for a fresh review." : "Completion proposed; starting a fresh metacognitive review before concluding.");
           }
-          committed = this.store.applyDecision(runId, decision, result.usage);
+          committed = this.store.applyDecision(runId, decision, result.usage, request.materials ? { ...request.materials,
+            items: [...new Map([...request.materials.items, ...request.materialReads ?? []].map(item => [item.key, item])).values()] } : undefined);
         }
         this.board();
         const repeatedCheckpoint = !committed.outcome && committed.reason === lastCheckpointSummary;

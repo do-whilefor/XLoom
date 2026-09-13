@@ -56,6 +56,7 @@ export function buildRunPrompt(request: RunRequest): { systemPrompt: string; use
       methods: projectMethods(request, context),
       wiki: wikiContext(request),
       rag: retrievalContext(request),
+      materials: request.materials,
       knowledge: knowledgeContext(request),
       gaps: request.blackboardPath ? gapContext(request.snapshot, request.step) : undefined,
       scoring: request.blackboardPath ? cvssContext() : undefined,

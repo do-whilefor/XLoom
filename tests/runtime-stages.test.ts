@@ -12,6 +12,7 @@ import type { ModelResolver } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent } from "../src/types.js";
 import type { retrievalContext } from "../src/wiki/retrieval.js";
+import type { MaterialDelivery } from "../src/wiki/materials.js";
 
 // Only the provider stream is synthetic. Pi Agent, native tools, controller,
 // checkpoint submission, evidence archiving and SQLite transactions are real.
@@ -21,7 +22,7 @@ const model: Model<"openai-completions"> = {
   id: "offline", name: "offline", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
   reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64_000, maxTokens: 2_000,
 };
-interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string; wiki?: { indexFile: string; authoringGuide?: string }; rag?: NonNullable<ReturnType<typeof retrievalContext>> }
+interface PromptData { blackboard: BlackboardContext; assignedStep?: ContextStep; workspace: string; artifacts: string; checkpointFile?: string; wiki?: { indexFile: string; authoringGuide?: string }; rag?: NonNullable<ReturnType<typeof retrievalContext>>; materials?: MaterialDelivery }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
 
@@ -122,6 +123,40 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("expands deferred material cards with native read and commits their receipts with Decide", async () => {
+    let expanded = false, extraPath = "";
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (run.contexts.length === 1) return write("raw", join(input.artifacts, "fixture.txt"), artifactBody);
+        return json({ summary: "Many distinct sourced navigation blocks", result: "done",
+          evidence: [{ ref: "e", path: join(input.artifacts, "fixture.txt"), description: "Original synthetic fixture" }],
+          facts: [{ ref: "f", description: "Observed synthetic fixture", evidenceRefs: ["e"] }],
+          wikiPages: [{ id: "WK-many", title: "Local material delivery", blocks: Array.from({ length: 20 }, (_, i) => ({ id: `B-${i}`, title: `Full local authored condition ${i}`,
+            text: `Synthetic scoped observation ${i}; missing input remains unverified.`, sources: [{ kind: "fact" as const, id: "f" }] })) }] });
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      if (expanded) { expect(input.materials!.items).toEqual([]); return json({ summary: "No new materials; keep task unresolved" }); }
+      if (run.contexts.length === 1) {
+        expect(input.materials!.deferredCount).toBeGreaterThan(0);
+        return message([{ type: "toolCall", id: "extra-materials", name: "read", arguments: { path: input.materials!.readPath } }], "toolUse");
+      }
+      if (run.contexts.length === 2) {
+        const extra = JSON.parse(toolText(context));
+        expect(extra.deferredCount).toBe(0); expect(extra.items.length).toBe(input.materials!.deferredCount);
+        expect(extra.items.every((item: any) => !input.materials!.items.some(old => old.key === item.key))).toBe(true);
+        extraPath = extra.items[0].readPath;
+        return message([{ type: "toolCall", id: "extra-record", name: "read", arguments: { path: extraPath } }], "toolUse");
+      }
+      expect(JSON.parse(toolText(context)).complete).toBe(true);
+      expanded = true; return json({ summary: "Received additional source packages; still no verified completion" });
+    });
+    await test.controller.start();
+    expect(expanded).toBe(true); expect(extraPath).toContain("xloom://record");
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", outcome: null, completedSteps: 1 });
+    expect(Object.keys(test.store.materialReceipts())).toHaveLength(22);
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toHaveLength(0);
+    assertExactUsage(test);
+  });
   it("searches a committed gap's original body through native read before Decide creates a revisit", async () => {
     let replanned = false;
     const test = setup((run, context, input) => {
@@ -134,7 +169,11 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
         return write("checkpoint-gap", input.checkpointFile!, JSON.stringify(submission));
       }
       if (!input.blackboard.completedSteps) return planning(input);
-      if (replanned) return json({ summary: "New observation still required; no duplicate revisit" });
+      if (replanned) {
+        expect(input.materials!.items.filter(item => ["fact", "evidence"].includes(item.kind))).toEqual([]);
+        return json({ summary: "New observation still required; no duplicate revisit" });
+      }
+      expect(input.materials!.items).toContainEqual(expect.objectContaining({ kind: "evidence", relatedGaps: [expect.objectContaining({ gapId: "gap-download", relation: "lexical" })] }));
       const question = input.rag!.questions[0]!;
       if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-question", name: "read", arguments: { path: question.readPath } }], "toolUse");
       if (run.contexts.length === 2) {
@@ -153,6 +192,9 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(test.controller.snapshot().steps[1]!.revisits).toEqual([{ stepId: test.controller.snapshot().steps[0]!.id, gapId: "gap-download" }]);
     expect(test.controller.snapshot().steps[0]!.status).toBe("blocked");
     expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toHaveLength(0);
+    expect(test.events.some(event => event.type === "materials" && event.materials?.items.some(item => item.kind === "evidence"))).toBe(true);
+    expect(test.events.some(event => event.runtime?.retrievalFeedback?.includes("完整校验"))).toBe(true);
+    expect(Object.keys(test.store.materialReceipts()).length).toBeGreaterThanOrEqual(3);
     assertExactUsage(test);
   });
   it("uses local organization through existing powershell and retrieves the sourced explanation in the next role", async () => {
@@ -182,9 +224,14 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
       if (reviewed) return json({ summary: "No new synthetic observation" });
       expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
       expect(input.rag).not.toHaveProperty("local");
-      expect(input.rag!.hits).toContainEqual(expect.objectContaining({ ref: { kind: "block", pageId: "WK-retrieval", id: "B-context" } }));
-      expect(JSON.stringify(input.rag!.records)).toContain("another identity remains unverified");
-      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-rag-original", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
+      expect(input.rag).toMatchObject({ type: "planning_navigation" });
+      const card = input.materials!.items.find(item => item.kind === "block" && item.id === "B-context")!;
+      expect(card).toBeDefined();
+      if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-source-package", name: "read", arguments: { path: card.readPath } }], "toolUse");
+      if (run.contexts.length === 2) {
+        expect(toolText(context)).toContain("another identity remains unverified");
+        return message([{ type: "toolCall", id: "read-rag-original", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } }], "toolUse");
+      }
       expect(toolText(context)).toContain(artifactBody);
       reviewed = true; return json({ summary: "Reviewed the original underlying the retrieved explanation" });
     });
@@ -193,7 +240,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board, board.reason).toMatchObject({ status: "paused", completedSteps: 1, outcome: null });
     expect(reviewed).toBe(true); expect(board.findings).toEqual([]);
     expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
-    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId)).toEqual(["local-organize", "local-evidence", "read-rag-original"]);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId)).toEqual(["local-organize", "local-evidence", "read-source-package", "read-rag-original"]);
     assertExactUsage(test);
   });
 

@@ -239,6 +239,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
     if (event.type === "runtime" && event.runtime) feed.runtime(event.runtime);
     else if (event.type === "handoff" && event.handoff) { beginWork(); feed.handoff(event.handoff); }
     else if (event.type === "notice" && event.message) feed.notice(event.message);
+    else if (event.type === "materials" && event.materials) feed.materials(event.materials);
     else if (event.type === "result" && event.result) { feed.usageCommitted(); feed.result(event.result.mode, event.result.summary, event.result.outcome, event.result.final, event.result); }
     else if (event.type === "board") feed.breakStream();
     else if (event.type === "state") {

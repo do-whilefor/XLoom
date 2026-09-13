@@ -17,7 +17,7 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
     task: { type: "string" }, workspace: { type: "string" }, query: { type: "string" },
     limit: { type: "string" }, "budget-chars": { type: "string" }, kind: { type: "string" }, id: { type: "string" }, page: { type: "string" },
     step: { type: "string" }, gap: { type: "string" }, evidence: { type: "string" }, sha256: { type: "string" },
-    "byte-offset": { type: "string" }, "byte-length": { type: "string" },
+    "byte-offset": { type: "string" }, "byte-length": { type: "string" }, refresh: { type: "boolean" },
   } });
   const action = positionals[0];
   if (positionals.length !== 1 || !["search", "organize", "audit", "discover", "gaps", "question", "search-originals", "read-original"].includes(action ?? "")) throw new Error("Use search|organize|audit|discover|gaps|question|search-originals|read-original --task <absolute task directory> --workspace <absolute workspace>.");
@@ -34,11 +34,11 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
       || (values.kind === "block") !== Boolean(values.page)) throw new Error("An exact reference requires --kind and --id; blocks also require --page.");
     anchors = [{ kind: values.kind as RetrievalRef["kind"], id: values.id, ...(values.page ? { pageId: values.page } : {}) }];
   }
-  const allowed = action === "search" ? ["query", "limit", "budget-chars", "kind", "id", "page"]
-    : action === "question" ? ["step", "gap", "query", "limit", "budget-chars"]
-    : action === "search-originals" ? ["query", "limit"] : action === "read-original" ? ["evidence", "sha256", "byte-offset", "byte-length"] : [];
+  const allowed = action === "search" ? ["query", "limit", "budget-chars", "kind", "id", "page", "refresh"]
+    : action === "question" ? ["step", "gap", "query", "limit", "budget-chars", "refresh"]
+    : action === "search-originals" ? ["query", "limit", "refresh"] : action === "read-original" ? ["evidence", "sha256", "byte-offset", "byte-length"] : [];
   if (Object.keys(values).some(key => !["task", "workspace", ...allowed].includes(key))) throw new Error("Options do not apply to this local action.");
-  const required = (key: keyof typeof values) => { const value = values[key]; if (!value) throw new Error(`Missing --${key}`); return value; };
+  const required = (key: keyof typeof values) => { const value = values[key]; if (typeof value !== "string" || !value) throw new Error(`Missing --${key}`); return value; };
   const offset = values["byte-offset"] === undefined ? 0 : /^\d+$/.test(values["byte-offset"]) ? Number(values["byte-offset"]) : NaN;
   const db = new DatabaseSync(join(values.task, "blackboard.sqlite"), { readOnly: true });
   try {
@@ -46,9 +46,9 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
     const original = read();
     if (!original) throw new Error("Task blackboard is empty.");
     const board = JSON.parse(original) as BoardSnapshot;
-    const output = action === "search" ? retrieveWiki(board, values.task, values.workspace, values.query ?? "", { limit, budgetChars, anchors })
-      : action === "question" ? retrieveQuestion(board, values.task, values.workspace, { stepId: required("step"), gapId: required("gap") }, { query: values.query, limit, budgetChars })
-      : action === "search-originals" ? searchOriginals(board, values.task, values.workspace, required("query"), limit)
+    const output = action === "search" ? retrieveWiki(board, values.task, values.workspace, values.query ?? "", { limit, budgetChars, anchors, refresh: values.refresh })
+      : action === "question" ? retrieveQuestion(board, values.task, values.workspace, { stepId: required("step"), gapId: required("gap") }, { query: values.query, limit, budgetChars, refresh: values.refresh })
+      : action === "search-originals" ? searchOriginals(board, values.task, values.workspace, required("query"), limit, values.refresh)
       : action === "read-original" ? readOriginal(board, values.task, values.workspace, { evidenceId: required("evidence"), sha256: required("sha256"), byteOffset: offset, byteLength: number(values["byte-length"]) ?? 4096 })
       : action === "organize" ? organizeWiki(board) : action === "discover" ? discoverKnowledge(board)
       : action === "gaps" ? { type: "gap_review", evidence: false, boardRevision: board.revision, items: gapQueue(board) } : auditWiki(board, values.task, values.workspace);

@@ -105,6 +105,7 @@ describe("gap-driven original search and located reading", () => {
       const locator = result.originals.hits[0].locator;
       expect(runLocal(["read-original", ...common, "--evidence", locator.evidenceId, "--sha256", locator.sha256, "--byte-offset", String(locator.byteOffset), "--byte-length", String(locator.byteLength)]).output).toMatchObject({ integrity: "verified" });
       expect(runLocal(["search-originals", ...common, "--query", "downloadGrant"]).output).toMatchObject({ inspectedCount: 1 });
+      expect(runLocal(["search-originals", ...common, "--query", "downloadGrant", "--refresh"]).output).toMatchObject({ index: { updated: 1, reused: 0, indexedBytes: board.evidence[0]!.bytes } });
       expect(db.prepare("SELECT value FROM board WHERE id=1").get()!.value).toBe(saved);
     } finally { db.close(); }
   });

@@ -51,7 +51,7 @@ function searchable(value: unknown): string {
 }
 
 /** Only explicit public state is projected. Author history and raw files are read on demand. */
-export function buildRetrievalIndex(board: BoardSnapshot): RetrievalIndex {
+export function retrievalDocuments(board: BoardSnapshot) {
   const documents: RetrievalDocument[] = [], fields: { title: string; body: string }[] = [];
   const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [], capability: board.capabilities ?? [], chain: board.chains ?? [] };
   for (const kind of Object.keys(collections) as WikiSource["kind"][]) for (const item of collections[kind]) {
@@ -80,6 +80,11 @@ export function buildRetrievalIndex(board: BoardSnapshot): RetrievalIndex {
       fields.push({ title: `${page.title} ${block.title}`, body: block.text });
     }
   }
+  return { documents, fields };
+}
+
+export function buildRetrievalIndex(board: BoardSnapshot): RetrievalIndex {
+  const { documents, fields } = retrievalDocuments(board);
   const postings: RetrievalIndex["postings"] = Object.create(null), lengths: number[] = [];
   fields.forEach((field, index) => {
     const counts = new Map<string, number>();

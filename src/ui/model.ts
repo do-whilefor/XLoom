@@ -5,6 +5,8 @@ import { retainToolOutput } from "./tool-output.js";
 import type { TaskInfo } from "../workspace.js";
 import { cvssIssues } from "../scoring/cvss.js";
 import { progressNotice, protocolFailure } from "./diagnostics.js";
+import { materialFeedback } from "../wiki/feedback.js";
+import type { MaterialDelivery } from "../wiki/materials.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -250,6 +252,12 @@ export class EventFeed {
     this.trim();
   }
 
+  materials(delivery: MaterialDelivery): void {
+    if (!delivery.items.length && !delivery.deferredCount) return;
+    this.breakStream();
+    this.append({ kind: "message", label: "资料 → Decide", text: plainText(materialFeedback(delivery)), details: JSON.stringify(delivery, null, 2) });
+  }
+
   runtime(event: RuntimeEvent): void {
     const label = roleLabel(event.mode);
     if (event.type === "usage") {
@@ -318,6 +326,9 @@ export class EventFeed {
       if (event.type === "tool_end") entry.endedAt = this.now();
       entry.error = event.isError;
       if (!existing) this.append(entry);
+      if (event.type === "tool_end" && !event.isError && event.retrievalFeedback) {
+        this.append({ kind: "message", label: "资料读取", text: plainText(event.retrievalFeedback) });
+      }
     }
     this.trim();
   }

@@ -2,7 +2,7 @@
 
 Use the existing powershell/read tools. `rag.local` gives the installed script,
 Node executable and current task directory; `workspace` is the existing workspace.
-All operations read only the task's committed SQLite snapshot. They do not start
+All operations read the task's committed SQLite snapshot; lexical caches are disposable writes. They do not start
 another session, recover runs, change Findings, or acknowledge source changes.
 
 PowerShell example (replace the four literals with the exact prompt values):
@@ -14,6 +14,16 @@ PowerShell example (replace the four literals with the exact prompt values):
 - `search`: local lexical search over current Wiki blocks, public facts, findings,
   attempts, plans and evidence metadata. Chinese bigrams and identifier components
   are supported; no embeddings, translation, raw-body search or cross-task search.
+- Planning `materials` announces new/changed navigation since the previous successful
+  planning run. It is not a review receipt. Use `xloom://materials?budgetChars=64000`
+  for remaining cards, or `refresh=true` for all current navigation. Budget 1024–64000.
+  Cards may abbreviate titles and list up to three related gaps (`relatedGapCount`
+  reports more); use the exact readPath for full current records and conditions.
+- `xloom://record?kind=<kind>&id=<exact ID>` expands the full source/correction package;
+  blocks also require `page=<page ID>`. budgetChars defaults to 16000, range 1024–64000.
+  Read unchanged sources too when needed: a fresh role has not retained their text.
+  Only fully delivered record packages advance local navigation; successful planning
+  commits announced signatures, while failed/cancelled planning keeps them pending.
 - Native `read` accepts `gaps.items[].readPath` / `rag.questions[].readPath`:
   `xloom://question?stepId=<exact ID>&gapId=<exact ID>`. It searches registered original
   bodies for that gap's missing input and retains the question, declared conditions,
@@ -31,6 +41,13 @@ PowerShell example (replace the four literals with the exact prompt values):
   Result limits bound delivery, not the streamed corpus. Do not retry unchanged
   queries when retrievalProgress says stop_repeating_query; inspect originals,
   narrow the missing input or obtain a new observation.
+- Search reuses unchanged metadata tokens and original window postings in task-local
+  `cache/retrieval.sqlite`. Returned records come from the current board; delivered
+  original hits are fully reverified from bytes. `index` reports actual work counters.
+  `refresh=true` on question/search (or CLI `--refresh`) rebuilds original postings;
+  CLI metadata search also accepts `--refresh`. Damaged/foreign/unwritable caches
+  are preserved and bypassed with in-memory indexing. Warm no-match is not a fresh
+  integrity audit, a proof of absence, or a reason to resolve a gap.
 - After reading, Decide uses revisits/gapReviews and Execute records new facts and
   source links in the existing workflow. Search/read does not mutate research state.
 - Exact reference: add `--kind fact --id 'F-exact-id'`; for a Wiki block use

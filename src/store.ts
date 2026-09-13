@@ -13,6 +13,7 @@ import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
 import { writeWiki } from "./wiki/projection.js";
 import { isWikiDerived } from "./wiki/format.js";
+import type { MaterialDelivery } from "./wiki/materials.js";
 import { applyKnowledge } from "./knowledge/model.js";
 import { applyGapDecision, applyGapRecords, gapQueue } from "./knowledge/gaps.js";
 import { assessCvss, cvssIssues } from "./scoring/cvss.js";
@@ -58,7 +59,8 @@ export class BlackboardStore {
         CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, mode TEXT NOT NULL, stepId TEXT, status TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER);
         CREATE TABLE IF NOT EXISTS run_progress (runId TEXT PRIMARY KEY, usage TEXT NOT NULL, progressed INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS execution_checkpoints (runId TEXT NOT NULL, checkpointId TEXT NOT NULL, payloadHash TEXT NOT NULL, PRIMARY KEY(runId, checkpointId));`);
+        CREATE TABLE IF NOT EXISTS execution_checkpoints (runId TEXT NOT NULL, checkpointId TEXT NOT NULL, payloadHash TEXT NOT NULL, PRIMARY KEY(runId, checkpointId));
+        CREATE TABLE IF NOT EXISTS material_receipts (key TEXT PRIMARY KEY, signature TEXT NOT NULL, runId TEXT NOT NULL);`);
       const old = this.db.prepare("SELECT value FROM board WHERE id=1").get();
       if (!old) {
         const board: BoardSnapshot = { revision: 0, config, status: "idle", outcome: null, reason: "Ready",
@@ -114,6 +116,9 @@ export class BlackboardStore {
   }
 
   snapshot(): BoardSnapshot { return JSON.parse(String(this.db.prepare("SELECT value FROM board WHERE id=1").get()!.value)); }
+  materialReceipts(): Record<string, string> {
+    return Object.fromEntries((this.db.prepare("SELECT key,signature FROM material_receipts").all() as { key: string; signature: string }[]).map(row => [row.key, row.signature]));
+  }
   events(): { seq: number; at: string; kind: string; payload: string }[] { return this.db.prepare("SELECT * FROM events ORDER BY seq").all() as never; }
   runs(): StoredRun[] { return this.db.prepare("SELECT * FROM runs ORDER BY startedAt").all() as never; }
   private event(kind: string, payload: unknown): void { this.db.prepare("INSERT INTO events (at,kind,payload) VALUES (?,?,?)").run(new Date().toISOString(), kind, JSON.stringify(payload)); }
@@ -241,7 +246,7 @@ export class BlackboardStore {
     });
   }
 
-  applyDecision(runId: string, input: unknown, usage: Usage): BoardSnapshot {
+  applyDecision(runId: string, input: unknown, usage: Usage, delivery?: Pick<MaterialDelivery, "boardRevision" | "deferredCount"> & { items: { key: string; signature: string }[] }): BoardSnapshot {
     const decision: Decision = decisionSchema.parse(input);
     return this.mutate("decision", { runId, decision }, board => {
       const run = this.finishRun(board, runId, usage, "completed");
@@ -310,6 +315,10 @@ export class BlackboardStore {
         finding.cvss = assessCvss(board, finding, review.assessment, ref => ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!), "reviewed", review.reason);
       }
       if (run.mode === "metacog") { board.lastMetaStep = board.completedSteps; board.lastMetaRevision = board.revision + 1; }
+      if (delivery) {
+        for (const item of delivery.items) this.db.prepare("INSERT INTO material_receipts VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET signature=excluded.signature,runId=excluded.runId").run(item.key, item.signature, runId);
+        if (delivery.items.length) this.event("materials_announced", { runId, boardRevision: delivery.boardRevision, stamps: delivery.items.map(({ key, signature }) => ({ key, signature })), deferredCount: delivery.deferredCount });
+      }
       board.reason = decision.summary;
       if (decision.conclusion) {
         assert(run.mode === "metacog", "Completion requires a fresh metacognitive review.");

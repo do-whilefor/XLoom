@@ -29,6 +29,13 @@ Revisit 的新 Facts 自动关联原缺口；步骤结束，即使没有新进�
 候选原件一起返回。具体入口与限制见 [原文检索](retrieval.md)。读取命中不会自动
 resolve；仍需 Decide 核对适用条件和未验证部分，再创建 revisits 或记录 gapReviews。
 
+Decide 的 `materials` 提供新资料／修订版本与旧问题的交接导航。明确来源、能力
+候选和词法候选分别标识；原文匹配产生的关联只是检索线索，不自动写入 gapLinks。
+按卡片读取完整来源及更正，再用 question 入口针对缺口补检索。资料提示记录跨轮
+保存在任务 SQLite，与成功规划事务一起提交；失败、取消和未交付资料继续待提示。
+这份记录不改变缺口的复核状态。默认只装入 6,000 字符的导航，其余可继续读取；
+重复查询提示和增量索引工作量也在终端分段显示，见 [交接与缓存](retrieval.md)。
+
 ```powershell
 node dist/wiki/local.js gaps --task '<绝对任务目录>' --workspace '<绝对项目目录>'
 ```

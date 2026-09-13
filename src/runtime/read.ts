@@ -3,6 +3,7 @@ import { access, opendir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { createReadTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 import { createTaskReader, type TaskReadContext } from "../wiki/read.js";
+import { retrievalFeedback } from "../wiki/feedback.js";
 
 const maxDirectoryEntries = 200;
 const maxDirectoryBytes = 16 * 1024;
@@ -113,14 +114,14 @@ export function createWorkspaceReadTool(workspace: string, artifactsDirectory?: 
   const readTask = task && createTaskReader(workspace, task);
   tool.description = "Read text/images or list immediate directory entries. Files: 2000 lines/50KB. Directories: 200 entries/16KB; no recursion. Use 1-indexed offset/limit to page lines or entries. Verify exact paths; planned files may not exist.";
   if (artifactsDirectory) tool.description += " For this run's artifacts, prefer artifact://<exact relative filename>; artifact:// lists them. This prefix is read-only; writes and evidence submissions use filesystem paths.";
-  if (readTask) tool.description += " Read xloom://question/search/original paths from gaps/rag to search this task's original evidence and read exact verified ranges. URI parameters control retrieval; offset/limit here apply to filesystem reads only.";
+  if (readTask) tool.description += " Read xloom://materials/record/question/search/original paths from materials/gaps/rag to expand source packages, search this task's original evidence and read verified ranges. materials refresh=true shows all current navigation; search/question refresh=true rebuilds term indexes from bytes. URI parameters control retrieval; offset/limit here apply to filesystem reads only.";
   tool.execute = async (id, params, signal, onUpdate) => {
     checkAbort(signal);
     if (params.path.startsWith("xloom://")) {
       if (!readTask) throw new Error("Task original retrieval is unavailable outside a research task");
       if (params.offset !== undefined || params.limit !== undefined) throw new Error("Use the xloom URI parameters for retrieval, not filesystem offset/limit");
       const result = readTask(params.path); checkAbort(signal);
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { nativeRetrieval: true } };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { nativeRetrieval: true, retrievalFeedback: retrievalFeedback(result) } };
     }
     if (artifactsDirectory && params.path.startsWith(artifactPrefix)) {
       params = { ...params, path: artifactReadPath(params.path, artifactsDirectory) };

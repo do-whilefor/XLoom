@@ -5,6 +5,7 @@ import type { Capability, CapabilityProposal, Chain, ChainProposal } from "./kno
 import type { Gap, GapProposal, GapRef } from "./knowledge/gaps.js";
 import type { WikiSource } from "./wiki/model.js";
 import type { CvssAssessment, CvssProposal } from "./scoring/cvss.js";
+import type { MaterialDelivery } from "./wiki/materials.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
@@ -112,6 +113,9 @@ export interface RunRequest {
   trigger?: OuterLoopTrigger;
   blackboardPath?: string;
   wikiProjectionError?: string;
+  materials?: MaterialDelivery;
+  materialBaseline?: Record<string, string>;
+  materialReads?: { key: string; signature: string }[];
   onCheckpoint?: (checkpointId: string, output: unknown, cumulativeUsage: Usage) => Promise<BoardSnapshot> | BoardSnapshot;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }
@@ -123,9 +127,11 @@ export interface RuntimeEvent {
   /** Stable ID shared by one assistant message's text, thoughts and narration. */
   messageId?: string;
   usage?: Usage;
+  retrievalFeedback?: string;
 }
 export interface LoopEvent {
-  type: "state" | "board" | "runtime" | "notice" | "handoff" | "session" | "result";
+  type: "state" | "board" | "runtime" | "notice" | "handoff" | "session" | "result" | "materials";
+  materials?: MaterialDelivery;
   snapshot?: BoardSnapshot; runtime?: RuntimeEvent; message?: string; handoff?: AgentHandoff;
   /** Public summary of an already-committed proposal, never the raw model response. */
   result?: { mode: Mode; summary: string; outcome?: Outcome; final?: boolean; kind?: "checkpoint" | "transition"; runId?: string; checkpointId?: string };
