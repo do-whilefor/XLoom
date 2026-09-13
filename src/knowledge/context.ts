@@ -13,7 +13,8 @@ export function knowledgeContext(request: RunRequest) {
   const page = (kind: string, id: string) => join(directory, wikiFilename(kind, id));
   const capabilities = (board.capabilities ?? []).slice().reverse().map(record => ({ id: record.id, title: record.title, status: record.status,
     reviewIssues: capabilityIssues(board, record), provides: record.provides.map(port => port.type), needs: record.needs.map(port => port.type),
-    factIds: record.factIds, counterFactIds: record.counterFactIds, conditions: record.conditions, pageFile: page("capability", record.id) }));
+    factIds: record.factIds, counterFactIds: record.counterFactIds, conditions: record.conditions, pageFile: page("capability", record.id),
+    discoverReadPath: `xloom://discover?${new URLSearchParams({ consumerId: record.id })}` }));
   const chains = (board.chains ?? []).slice().reverse().map(record => ({ id: record.id, title: record.title, status: record.status,
     reviewIssues: chainIssues(board, record), capabilityIds: record.capabilityIds, resultFactIds: record.resultFactIds, pageFile: page("chain", record.id) }));
   const focus = gapQueue(board).filter(item => item.active && item.state === "review_required").flatMap(item => item.capabilityId ? [item.capabilityId] : []);
@@ -32,6 +33,7 @@ export function knowledgeContext(request: RunRequest) {
   return { notice: "Task-local knowledge, not proof. Review changed sources first. Execute may submit optional capabilities/chains in existing final/checkpoint output; read authoringGuide before first submission. A chain cannot rate a Finding or complete a Goal. Read referenced pages and original Facts/Evidence before planning tests.",
     authoringGuide: fileURLToPath(new URL("../../resources/knowledge/authoring.md", import.meta.url)),
     capabilities: selectedCapabilities, chains: selectedChains, discovery: { ...discovery, items }, deferred,
+    discoveryReading: { readPath: "xloom://discover", usage: "Use existing read to expand candidate plans and source packages. Specify consumerId to focus on any known capability, including omitted consumers; limit=1–20, maxAlternatives=1–20, budgetChars=1024–64000. Provider search still uses all task capabilities. No plan is a validity verdict." },
     ...(request.mode === "execute" ? { local: { nodeExecutable: process.execPath, scriptFile: fileURLToPath(new URL("../../dist/wiki/local.js", import.meta.url)), taskDirectory, workspace: request.workspace,
       action: "discover", note: "Use existing powershell for full discovery." } } : {}) };
 }

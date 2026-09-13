@@ -32,7 +32,7 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
   const byRef = new Map(docs.map(doc => [refKey(doc.ref), doc]));
   const delivered = new Map<string, object>();
   const hits: { ref: RetrievalRef; reason: string }[] = [], deferred: RetrievalRef[] = [];
-  let deferredCount = 0;
+  let deferredCount = 0, budgetDeferredCount = 0;
   const defer = (ref: RetrievalRef) => { deferredCount++; if (deferred.length < 6) deferred.push(ref); };
   for (const [i] of ranked) {
     const root = docs[i]!, pending = [root.ref], added = new Map<string, object>();
@@ -50,11 +50,11 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
     }
     const hit = { ref: root.ref, reason: exact.has(i) ? "exact_reference" : "lexical_match" };
     const size = JSON.stringify({ hits: [...hits, hit], records: [...delivered.values(), ...added.values()] }).length;
-    if (size > budget) { defer(root.ref); continue; }
+    if (size > budget) { budgetDeferredCount++; defer(root.ref); continue; }
     hits.push(hit); for (const [key, value] of added) delivered.set(key, value);
   }
   return { generator: index.generator, type: "retrieval", evidence: false, boardRevision: board.revision, corpusSignature: index.signature,
-    query, notice, hits, records: [...delivered.values()], matchedCount: ranked.length, deferredCount, deferred, index: cached?.stats,
+    query, notice, hits, records: [...delivered.values()], matchedCount: ranked.length, deferredCount, budgetDeferredCount, deferred, index: cached?.stats,
     missingAnchors: (options.anchors ?? []).filter(ref => !byRef.has(refKey(ref))),
     coverage: "Current Wiki blocks and public records/conditions/evidence metadata; excludes raw evidence bodies, author history, private conversations and other tasks." };
 }
@@ -79,6 +79,8 @@ export function retrievalContext(request: RunRequest) {
     queryOrigin: focused ? "step_gap" : "current_task",
     questions: questions.slice(0, 3).map(item => ({ stepId: item.stepId, gapId: item.gapId, missing: item.missing, readPath: gapReadPath(item) })),
     deferredQuestions: questions.slice(3).map(({ stepId, gapId }) => ({ stepId, gapId })),
+    search: { readPath: `xloom://search?${new URLSearchParams({ mode: "combined", query: query.slice(0, 2048) })}`,
+      usage: "Use read with mode=wiki for authored judgments/public records, originals for source text, combined for both. Query is explicit; preserve conditions and corrections. limit=1–20, budgetChars=1024–64000. No mode retains legacy original search. Narrow the query or increase budget when delivery is incomplete." },
     originalReading: "Use read with a gaps/rag.questions readPath to search originals for that specific gap. Optional query narrows it. Follow returned original readPath locators, inspect sourceContext and corrections, then use revisits/gapReviews; hits alone never resolve a gap. xloom://search?query=<URL-encoded query> searches task originals without a gap.",
     organizationFile: join(dataDir, "wiki", "organization.json"),
     ...(request.wikiProjectionError ? { projection: "unavailable", projectionReason: request.wikiProjectionError } : {}),

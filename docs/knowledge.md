@@ -51,6 +51,13 @@ Controller 在 Execute 结算后检测能力/链变化，并请求 fresh Decide 
 也报告它们的待复核状态。`search --kind capability --id C-...` 或 `--kind chain
 --id CH-...` 精确补查；`discover --task ... --workspace ...` 为只读候选发现。
 
+Decide、Execute 和元认知也可直接 `read("xloom://discover?consumerId=C-...")`。
+`knowledge.discoveryReading` 提供入口，每个能力摘要附带 discoverReadPath。
+consumerId 精确选择一个当前任务消费者，仍使用全部任务能力寻找提供者；省略时
+默认返回最近三个消费者，未显示的消费者 ID 保留在结果中。候选计划与完整来源包
+一起交付，保留未知条件、来源变化、未验证能力和搜索限制。没有声明 needs 的能力
+返回空候选及自身来源，不视为已验证结果。使用说明见 [原生查询](retrieval.md#原生主动查询)。
+
 验证覆盖事务回滚、同批引用、checkpoint 幂等、SQLite 重开、来源变化、Wiki/RAG
 传播、AND/OR 回溯、共同条件、未知/循环/缺失前提，以及真实 Controller + Pi
 文件工具的跨角色交接。供应商响应使用合成流，不代表真实模型会正确选取能力、
@@ -58,4 +65,4 @@ Controller 在 Execute 结算后检测能力/链变化，并请求 fresh Decide 
 
 本阶段参考本地 Webounty 的 `references/retrieval.md`、`references/storage.md`
 和能力发现/组合脚本的设计，围绕 Xloom 数据模型重新实现；不运行原脚本。全文
-原文索引、增量缓存、观察比较器和 CVSS 仍未接入。
+原文索引、增量缓存和 CVSS 已分别原生接入；观察比较器尚未接入。

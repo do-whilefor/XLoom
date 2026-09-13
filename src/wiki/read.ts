@@ -5,6 +5,7 @@ import { retrieveQuestion } from "./questions.js";
 import { planningMaterials } from "./materials.js";
 import { retrieveWiki } from "./retrieval.js";
 import { refKey, retrievalDocuments, type RetrievalRef } from "./catalog.js";
+import { readDiscovery, searchTask } from "./query.js";
 
 export interface TaskReadContext {
   dataDir: string; snapshot: () => BoardSnapshot; materialBaseline?: Record<string, string>;
@@ -24,7 +25,9 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     if (url.protocol !== "xloom:" || url.username || url.password || url.port || url.hash || url.pathname && url.pathname !== "/") throw new Error("Invalid xloom read path");
     const allowed = url.hostname === "question" ? ["stepId", "gapId", "query", "limit", "budgetChars", "refresh"]
       : url.hostname === "materials" ? ["budgetChars", "refresh"] : url.hostname === "record" ? ["kind", "id", "page", "budgetChars"]
-      : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength"] : url.hostname === "search" ? ["query", "limit", "refresh"] : [];
+      : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength"]
+      : url.hostname === "discover" ? ["consumerId", "limit", "maxAlternatives", "budgetChars"]
+      : url.hostname === "search" ? ["query", "limit", "refresh", "mode", "budgetChars"] : [];
     if (!allowed.length || [...p.keys()].some(key => !allowed.includes(key) || p.getAll(key).length !== 1)) throw new Error("Unknown or duplicate xloom read parameters");
     const required = (key: string) => { const value = p.get(key); if (!value) throw new Error(`Missing xloom read parameter: ${key}`); return value; };
     const number = (key: string) => { if (!p.has(key)) return undefined; const value = required(key); if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`Invalid ${key}`); return Number(value); };
@@ -58,6 +61,10 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     if (url.hostname === "original") return readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength") ?? 4096 });
     const result = url.hostname === "question" ? retrieveQuestion(board, context.dataDir, workspace, { stepId: required("stepId"), gapId: required("gapId") },
       { query: p.get("query") ?? undefined, limit: number("limit"), budgetChars: number("budgetChars"), refresh })
+      : url.hostname === "discover" ? readDiscovery(board, context.dataDir, workspace,
+        { consumerId: p.has("consumerId") ? required("consumerId") : undefined, limit: number("limit"), maxAlternatives: number("maxAlternatives"), budgetChars: number("budgetChars") })
+      : p.has("mode") || p.has("budgetChars") ? searchTask(board, context.dataDir, workspace, required("query"),
+        { mode: p.has("mode") ? required("mode") : "originals", limit: number("limit"), budgetChars: number("budgetChars"), refresh })
       : searchOriginals(board, context.dataDir, workspace, required("query"), number("limit"), refresh);
     // Cache work counters change between cold/warm reads, not source material.
     const signature = wikiDigest(JSON.parse(JSON.stringify(result, (key, value) => key === "index" && value?.storage ? undefined : value)));

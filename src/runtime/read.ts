@@ -114,7 +114,7 @@ export function createWorkspaceReadTool(workspace: string, artifactsDirectory?: 
   const readTask = task && createTaskReader(workspace, task);
   tool.description = "Read text/images or list immediate directory entries. Files: 2000 lines/50KB. Directories: 200 entries/16KB; no recursion. Use 1-indexed offset/limit to page lines or entries. Verify exact paths; planned files may not exist.";
   if (artifactsDirectory) tool.description += " For this run's artifacts, prefer artifact://<exact relative filename>; artifact:// lists them. This prefix is read-only; writes and evidence submissions use filesystem paths.";
-  if (readTask) tool.description += " Read xloom://materials/record/question/search/original paths from materials/gaps/rag to expand source packages, search this task's original evidence and read verified ranges. materials refresh=true shows all current navigation; search/question refresh=true rebuilds term indexes from bytes. URI parameters control retrieval; offset/limit here apply to filesystem reads only.";
+  if (readTask) tool.description += " Read xloom://materials/record/question/search/original/discover paths from materials/gaps/rag/knowledge. search?mode=wiki|originals|combined&query=<encoded query> searches current task material; discover?consumerId=<ID> expands candidate prerequisites and sources. materials refresh=true shows all current navigation; search/question refresh=true rebuilds term indexes. URI parameters control retrieval; offset/limit here apply to filesystem reads only.";
   tool.execute = async (id, params, signal, onUpdate) => {
     checkAbort(signal);
     if (params.path.startsWith("xloom://")) {

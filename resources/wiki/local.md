@@ -11,6 +11,30 @@ PowerShell example (replace the four literals with the exact prompt values):
 & '<rag.local.nodeExecutable>' '<rag.local.scriptFile>' search --task '<rag.local.taskDirectory>' --workspace '<workspace>' --query 'the current question' --limit 6
 ```
 
+All research roles, including read-only Decide, can use native queries directly:
+
+```text
+xloom://search?mode=wiki&query=<URL-encoded question>
+xloom://search?mode=originals&query=<URL-encoded terms>
+xloom://search?mode=combined&query=<URL-encoded terms>&budgetChars=64000
+xloom://discover?consumerId=<exact capability ID>&budgetChars=64000
+```
+
+Use `rag.search.readPath` or `knowledge.discoveryReading` as editable entry points.
+Modes are explicit. Wiki and original ranking remain separate; original windows
+and candidate plans carry current source/correction packages. Read the returned
+original locators to inspect actual bytes. Discovery matches declared prerequisites,
+never actual consumption. All providers remain eligible when selecting one consumer.
+New queries use limit=1–20 (default 3), budgetChars=1024–64000 (default 16000);
+search query length is 1–2048. Discovery maxAlternatives=1–20 (default 6) affects
+display, not the provider pool. No mode/budget preserves legacy original search.
+Budgets count compact JSON including progress diagnostics, not display indentation.
+Budget-exhausted packets deliver no partial judgment/source package. Reduce limit,
+narrow the query/consumer or increase budget. `complete` describes selected delivery,
+not exhaustive recall: omitted top-k matches and consumers are still reported.
+Wiki/discovery metadata is not original-file verification. Search/discovery do not
+acknowledge navigation or review sources; a fresh role may reread unchanged material.
+
 - `search`: local lexical search over current Wiki blocks, public facts, findings,
   attempts, plans and evidence metadata. Chinese bigrams and identifier components
   are supported; no embeddings, translation, raw-body search or cross-task search.

@@ -14,12 +14,20 @@ export function materialFeedback(delivery: MaterialDelivery): string {
 
 /** Formats only trusted native retrieval result structures, never tool prose. */
 export function retrievalFeedback(value: object): string {
-  const result = value as { type?: string; questionRef?: { stepId: string; gapId: string }; originals?: object;
+  const result = value as { type?: string; questionRef?: { stepId: string; gapId: string }; originals?: object; wiki?: object; items?: unknown[]; searchTruncated?: boolean;
     hits?: unknown[]; index?: IndexStats; issues?: unknown[]; deferredWindows?: number; deferredCount?: number;
     complete?: boolean; retrievalProgress?: string; locator?: { evidenceId: string; byteOffset: number; byteLength: number }; integrity?: string };
   if (result.type === "planning_materials") return materialFeedback(value as MaterialDelivery);
   const lines: string[] = [];
-  if (result.type === "question_context") {
+  if (result.type === "task_search") {
+    lines.push("检索当前任务的 Wiki／原件资料。");
+    if (result.wiki) lines.push(retrievalFeedback(result.wiki));
+    if (result.originals) lines.push(retrievalFeedback(result.originals));
+  } else if (result.type === "discovery_context") {
+    lines.push(`能力发现：返回 ${result.items?.length ?? 0} 个消费者的候选前提与来源。`);
+    if (result.searchTruncated) lines.push("候选搜索达到限制；未找到方案不表示不存在路径。");
+    lines.push("候选前提匹配不表示实际消费或最终结果已经验证。");
+  } else if (result.type === "question_context") {
     lines.push(`围绕问题 ${result.questionRef?.stepId}/${result.questionRef?.gapId} 检索资料。`);
     if (result.originals) lines.push(retrievalFeedback(result.originals));
   } else if (result.type === "original_search") {

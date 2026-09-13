@@ -123,7 +123,7 @@ export function applyGapDecision(board: BoardSnapshot, decision: Decision, newSt
   const plans = new Map<string, { ref: GapRef; steps: Step[] }>();
   for (const step of newSteps) for (const ref of step.revisits ?? []) {
     const origin = board.steps.find(item => item.id === ref.stepId);
-    if (origin?.goalId !== step.goalId) throw new Error("A revisit must retain the original gap's Goal.");
+    if (origin?.goalId !== step.goalId) throw new Error(`A revisit must retain the original gap's Goal. For ${refKey(ref)}, expected goalId=${JSON.stringify(origin?.goalId)}, received ${JSON.stringify(step.goalId)}. Do not move this revisit to a new child Goal; plan different Goals in separate Steps.`);
     const plan = plans.get(refKey(ref)) ?? { ref, steps: [] };
     plan.steps.push(step); plans.set(refKey(ref), plan);
   }
@@ -142,5 +142,5 @@ export function gapContext(board: BoardSnapshot, assigned?: Step) {
   }).map(item => ({ ...item, readPath: gapReadPath(item) }));
   return { items, deferred,
     recording: "Execute may submit gaps:[{id:gap-name,missing,why,reopenWhen,needs:[{type,aliases,description}],conditions:{scope,identity,environment,stateVersion},capabilityId?}] on assignedStep. Unknown condition values are null. Empty needs means explicit source links only. gapLinks:[{stepId,gapId,sources:[{kind:fact|evidence|capability|chain,id}],reason}] associates new material using exact IDs or same-batch refs. Revisit Facts are linked automatically. Reuse a gap ID only with identical requirements. See knowledge.authoringGuide.",
-    notice: "Step-local gaps. Review changed sources and originals, then create bounded steps with revisits:[{stepId,gapId}], or gapReviews:[{stepId,gapId,action:defer|resolve,reason,factIds}]. Resolve requires demonstrated Facts. Candidates/unknown conditions are not proof; old Step status is unchanged. Deferred entries remain in the blackboard and local gaps command." };
+    notice: "Step-local gaps. Review changed sources and originals, then create bounded steps with revisits:[{stepId,gapId}], or gapReviews:[{stepId,gapId,action:defer|resolve,reason,factIds}]. Each revisit Step must copy the original gap's goalId unchanged, not a new child Goal. Use separate Steps for gaps under different Goals. Resolve requires demonstrated Facts. Candidates/unknown conditions are not proof; old Step status is unchanged. Deferred entries remain in the blackboard and local gaps command." };
 }

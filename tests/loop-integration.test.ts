@@ -17,6 +17,7 @@ import type { knowledgeContext } from "../src/knowledge/context.js";
 import type { retrievalContext } from "../src/wiki/retrieval.js";
 import { gapQueue, type gapContext } from "../src/knowledge/gaps.js";
 import { metricKeys, type cvssContext, type CvssProposal } from "../src/scoring/cvss.js";
+import { consumer, conditions, port } from "./fixtures/native-retrieval.js";
 
 // This suite replaces the provider stream only: Controller, SQLite, Pi Agent and
 // Pi's native file tools are real. It makes no network calls or vulnerability claims.
@@ -113,6 +114,60 @@ function plan(): Decision {
 }
 
 describe("native gap workflow through Pi and Controller", () => {
+  it("uses read-only Wiki search and targeted discovery across new evidence, then revisits the blocked step", async () => {
+    const next = (description: string) => ({ ...plan().steps![0]!, description });
+    const calls: string[] = [];
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        const seed = input.assignedStep!.description === "Seed native Wiki";
+        const provider = input.assignedStep!.description === "Observe local grant";
+        if (run.contexts.length === 1) return message([{ type: "text", text: privateTurn }, { type: "toolCall", id: "write-native", name: "write",
+          arguments: { path: join(input.artifacts, "native.txt"), content: syntheticArtifact + (provider ? "downloadGrant=LOCAL_ONLY; download=NOT_ATTEMPTED" : seed ? "Download blocked by missing input" : "Local synthetic download result obtained") } }], "toolUse");
+        return json({ summary: "Synthetic local observation", result: seed ? "blocked" : "done",
+          evidence: [{ ref: "e", path: "native.txt", description: "Local original" }], facts: [{ ref: "f", description: input.assignedStep!.description, evidenceRefs: ["e"] }],
+          ...(seed ? { capabilities: [{ ...consumer, factRefs: ["f"] }],
+            gaps: [{ id: "gap-download", missing: "downloadGrant", why: "Missing local input", reopenWhen: "Compatible grant observed", needs: [port("downloadGrant")], conditions, capabilityId: consumer.id }],
+            wikiPages: [{ id: "WK-bridge", title: "BridgeNote", blocks: [{ id: "B-boundary", title: "Conditions", text: "BridgeNote: input availability does not establish actual download; preserve alice / v1 and verify consumption.", sources: [{ kind: "fact" as const, id: "f" }] }] }] }
+            : provider ? { capabilities: [{ id: "C-grant", title: "Local grant", status: "available" as const, provides: [port("downloadGrant")], needs: [], conditions,
+              factRefs: ["f"], counterFactRefs: [], changeReason: "New local sample" }] } : {}) });
+      }
+      expect(JSON.stringify(context)).not.toContain(privateTurn);
+      const gap = input.gaps!.items[0];
+      if (!gap) return json({ summary: "Seed sample", steps: [next("Seed native Wiki")] });
+      if (gap.sources.length) return json({ summary: "Resolve the sampled input only; root remains open",
+        gapReviews: [{ stepId: gap.stepId, gapId: gap.gapId, action: "resolve", factIds: [gap.sources[0]!.source.id], reason: "New local result observed under recorded conditions" }] });
+      const hasProvider = !!gap.candidates.length;
+      const outputs = context.messages.filter(item => item.role === "toolResult").map(item => JSON.parse(item.content.flatMap(part => part.type === "text" ? [part.text] : []).join("")));
+      const read = (path: string) => { calls.push(path); return message([{ type: "toolCall", id: `native-read-${run.contexts.length}`, name: "read", arguments: { path } }], "toolUse"); };
+      if (!outputs.length) {
+        const url = new URL(input.rag!.search.readPath);
+        url.searchParams.set("mode", hasProvider ? "combined" : "wiki");
+        url.searchParams.set("query", hasProvider ? "BridgeNote downloadGrant" : "BridgeNote"); url.searchParams.set("budgetChars", "64000");
+        return read(url.toString());
+      }
+      expect(outputs[0]).toMatchObject({ type: "task_search", complete: true });
+      expect(JSON.stringify(outputs[0].wiki)).toContain("preserve alice / v1");
+      if (outputs.length === 1) return read(input.knowledge!.discoveryReading.readPath + "?consumerId=C-download&budgetChars=64000");
+      expect(outputs[1]).toMatchObject({ type: "discovery_context", complete: true });
+      if (!hasProvider) {
+        expect(outputs[1].items[0].plan).toBeNull();
+        return json({ summary: "Missing grant; obtain a new sample", gapReviews: [{ stepId: gap.stepId, gapId: gap.gapId, action: "defer", reason: "No supplier observed", factIds: [] }], steps: [next("Observe local grant")] });
+      }
+      expect(outputs[1].items[0].plan).toMatchObject({ capabilityIds: ["C-grant", "C-download"], actualConsumption: "not_assessed" });
+      if (outputs.length === 2) return read(outputs[0].originals.hits.find((hit: any) => hit.snippet.includes("LOCAL_ONLY")).readPath);
+      expect(outputs[2]).toMatchObject({ integrity: "verified" }); expect(outputs[2].text).toContain("NOT_ATTEMPTED");
+      return json({ summary: "Read the new grant; verify actual local consumption", steps: [{ ...next("Validate local download"), from: gap.candidates[0]!.factIds,
+        revisits: [{ stepId: gap.stepId, gapId: gap.gapId }], priority: 100 }] });
+    });
+    await test.controller.start(); const board = test.store.snapshot();
+    expect(board.status).toBe("paused"); expect(board.outcome).toBeNull(); expect(board.goals[0]!.status).toBe("active");
+    expect(gapQueue(board)[0]!.state).toBe("resolved"); expect(board.steps[0]!.status).toBe("blocked");
+    expect(board.steps.at(-1)!.revisits).toEqual([{ stepId: board.steps[0]!.id, gapId: "gap-download" }]);
+    expect(calls).toHaveLength(5); expect(calls.some(path => path.startsWith("xloom://original"))).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toEqual([]);
+    expect(Object.keys(test.store.materialReceipts()).length).toBeGreaterThan(0);
+    for (const run of test.seen) expect(run.contexts[0]!.messages).toHaveLength(1);
+  });
   it("records a gap, associates new material, revisits with a fresh plan, and independently resolves it", async () => {
     const conditions = { scope: "fixture", identity: "fixture-a", environment: "local", stateVersion: "v1" };
     const next = (description: string) => ({ ...plan().steps![0]!, description });

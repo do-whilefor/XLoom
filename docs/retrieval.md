@@ -66,6 +66,47 @@ node dist/wiki/local.js search-originals --task '<任务目录>' --workspace '<�
 node dist/wiki/local.js read-original --task '<任务目录>' --workspace '<项目目录>' --evidence 'E-...' --sha256 '<原件哈希>' --byte-offset 0 --byte-length 1024
 ```
 
+## 原生主动查询
+
+所有研究角色都可用现有 read 主动查询，无需 PowerShell 或新工具。`rag.search`
+给出可编辑的查询入口，`knowledge.discoveryReading` 和能力摘要提供发现入口：
+
+```text
+xloom://search?mode=wiki&query=BridgeNote
+xloom://search?mode=originals&query=downloadGrant
+xloom://search?mode=combined&query=downloadGrant&budgetChars=64000
+xloom://discover?consumerId=C-download&budgetChars=64000
+```
+
+查询内容须 URL 编码。mode 必须显式选为 wiki、originals 或 combined，不根据
+关键词猜模式。wiki 搜索当前作者判断和公开记录；originals 搜原件并附当前来源
+与更正；combined 同时提供两者，保留各自的排名，不混加两种分数。均返回
+`answerSupport: not_assessed`。无 mode 且无 budgetChars 的旧 search URI 继续
+保持原来的 original_search 返回格式；仅提供 budgetChars 时使用 originals 模式。
+
+原生新入口 limit 默认 3、范围 1–20；它限制原文窗口及额外 Wiki 命中数，必要来源
+不计为额外命中。query 为 1–2048 字符。discover 的 consumerId 精确选择消费者，
+提供者仍从全任务查找；省略时按 limit 返回最近消费者。maxAlternatives 默认 6、
+范围 1–20，只限制展示的备选，求解仍检查其全部提供者。底层搜索沿用 2000 状态、
+64 层限制，searchTruncated 不表示没有可行方案。
+
+budgetChars 默认 16000、范围 1024–64000，按完整紧凑 JSON（含重复查询提示）
+计算；工具详情的缩进展示、工具定义及消息封装不计在内。判断／候选与来源包一起
+交付；装不下时返回 budget_exhausted，不先交付无来源的原件命中或候选结论。
+可缩小 query、limit、consumerId，或增加 budgetChars 后继续。
+预算失败包按剩余空间保留最多三个 deferredRefs 供 record／Wiki 文件导航；单个
+来源闭包超过最大预算时，从任务 wiki/index.md 找到页面与原件继续读，不能原样重查。
+底层 Wiki 结果中的 budgetDeferredCount
+区分来源包预算不足；deferredCount 还包括超过命中条数的结果。完整交付选中的
+材料可以 complete=true，同时仍有 top-k 省略；这不是全库穷尽、来源真实性或答案正确的声明。
+
+Wiki 元数据检索与能力发现不校验全部原件；已声明的来源变化照常保留，精读原件
+仍需 original 入口。原文搜索独立校验命中原件，篡改及缺失会报告 complete=false。
+新入口沿用本轮重复查询提示，新的角色仍可重新读取同一资料；搜索和发现不推进
+跨轮资料交接记录、不复核作者解释、不解决缺口，也不改变 Finding 或 Goal。
+
+本批的真实模型回放、失败修正及重跑命令见 [原生入口验证记录](native-retrieval-validation.md)。
+
 ## 本地模块入口
 
 每轮 Execute 的 `rag.local` 提供本机 Node、安装目录脚本、任务目录和按需说明：

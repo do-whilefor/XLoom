@@ -41,6 +41,7 @@ export function normalizeDecisionInput(input: unknown, board: BoardSnapshot): { 
 }
 
 export function decisionRepairGuidance(reason: string): string {
+  if (/A revisit must retain/.test(reason)) return " Preserve revisits and copy each original gap's goalId from gaps.items or the original Step. Do not silently drop revisits or relabel the gap. A new child Goal cannot own an existing gap; split Steps across different Goals.";
   return /steps\.\d+|combination|Unrecognized key/.test(reason)
     ? " New steps contain goalId, from, description, successSignal, evidencePlan, priority, and optional combination/methodIds/revisits. Omit id: the controller allocates new Step IDs. Use updateSteps with exact committed IDs for existing ready Steps. Put requires, missing, scope, stateVersion, expectedCapability and counterEvidence inside combination, never directly on a Step. Preserve all prerequisite and counterevidence values; do not remove conditions to pass validation."
     : "";
