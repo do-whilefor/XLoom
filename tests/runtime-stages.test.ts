@@ -569,6 +569,60 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     assertExactUsage(test);
   });
 
+  it("repairs a prose-wrapped PoC ownership error before final SQLite commit without replaying tools", async () => {
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        if (run.contexts.length === 1) return message([
+          { type: "toolCall", id: "write-a", name: "write", arguments: { path: join(input.artifacts, "a.txt"), content: `${artifactBody}branch=A` } },
+          { type: "toolCall", id: "write-b", name: "write", arguments: { path: join(input.artifacts, "b.txt"), content: `${artifactBody}branch=B` } },
+        ], "toolUse");
+        return json({ summary: "Saved two synthetic branches", result: "done",
+          evidence: ["a", "b"].map(ref => ({ ref, path: join(input.artifacts, `${ref}.txt`), description: "Synthetic fixture only" })),
+          facts: ["a", "b"].map(ref => ({ ref, description: `Synthetic branch ${ref}`, evidenceRefs: [ref] })),
+          findings: ["a", "b"].map(ref => ({ key: `branch-${ref}`, target: `synthetic ${ref}`, title: `Fixture ${ref}`,
+            status: "technical_hit", factRefs: [ref], evidenceRefs: [ref], next: "Review local fixture" })) });
+      }
+      if (!input.blackboard.completedSteps) return planning(input);
+      expect(input.blackboard.projection.mode).toBe("metacog");
+      if (run.contexts.length === 1) return message([
+        { type: "toolCall", id: "read-a", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } },
+      ], "toolUse");
+      const repaired = run.contexts.length === 3;
+      const [a, b] = input.blackboard.findings;
+      if (repaired) {
+        expect(context.tools).toEqual([]);
+        const repair = JSON.stringify(context.messages.at(-1));
+        expect(repair).toContain("single JSON object");
+        expect(repair).toContain("reviews[0].pocEvidenceId");
+        expect(repair).toContain(a!.evidenceIds[0]!);
+      }
+      const output: Decision = { summary: "Synthetic protocol review complete",
+        reviews: input.blackboard.findings.map(finding => ({ findingId: finding.id, status: "impact_verified", rating: "info",
+          reason: "Validated synthetic fixture branch only", pocEvidenceId: !repaired && finding.id === a!.id ? b!.evidenceIds[0] : finding.evidenceIds[0],
+          impact: { capability: "Fixture read", object: finding.target, result: "Synthetic label", scope: "Local fixture", prerequisites: "Generated data" } })),
+        updateGoals: [{ id: "G0", status: "satisfied", factIds: input.blackboard.facts.map(fact => fact.id), reason: "Fixture branches reviewed" }],
+        conclusion: { outcome: "LOW_ROI", reason: "Synthetic protocol test complete; no live target was tested" } };
+      return repaired ? json(output) : message([{ type: "text", text: `Review completed.\n\`\`\`json\n${JSON.stringify(output)}\n\`\`\`` }]);
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "completed", outcome: "LOW_ROI", completedSteps: 1 });
+    expect(board.facts).toHaveLength(2);
+    expect(board.evidence).toHaveLength(2);
+    for (const finding of board.findings) {
+      expect(finding.evidenceIds).toHaveLength(1);
+      expect(finding.pocEvidenceId).toBe(finding.evidenceIds[0]);
+      expect(finding.status).toBe("impact_verified");
+    }
+    expect(test.store.runs().map(run => [run.mode, run.status])).toEqual([
+      ["decide", "completed"], ["execute", "completed"], ["metacog", "completed"],
+    ]);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolCallId))
+      .toEqual(["write-a", "write-b", "read-a"]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("tool-free repair"))).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it("keeps accepted facts and evidence after a later model error without counting checkpoint usage twice", async () => {
     const test = setup((run, context, input) => {
       if (run.channel !== "offline-execute") return planning(input);

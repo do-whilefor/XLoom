@@ -16,18 +16,11 @@ import { stageWriter } from "./stage.js";
 import { validateDecisionReferences } from "../loop/references.js";
 import { credentialPatterns, redactCredentials } from "./redaction.js";
 import { createWorkspaceReadTool } from "./read.js";
+import { validateFinalJson } from "./protocol.js";
+export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
   constructor(message: string, public readonly usage: Usage, options?: ErrorOptions) { super(message, options); this.name = "RuntimeRunError"; }
-}
-
-export function parseFinalJson(text: string): Record<string, unknown> {
-  const trimmed = text.trim();
-  const body = trimmed.startsWith("```") ? trimmed.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "") : trimmed;
-  let value: unknown;
-  try { value = JSON.parse(body); } catch { throw new Error("Agent final response must be a single JSON object."); }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Agent final response must be a JSON object.");
-  return value as Record<string, unknown>;
 }
 
 export function executeTools(workspace: string) {
@@ -357,8 +350,7 @@ export class PiRunner implements AgentRunner {
       }
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
       if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
-      const validateText = (text: string) => {
-        const parsed = parseFinalJson(redact(text));
+      const validateText = (text: string) => validateFinalJson(redact(text), parsed => {
         if (request.mode === "execute") {
           const validated = executionSchema.safeParse(parsed);
           if (!validated.success) throw new Error(formatValidationError(validated.error));
@@ -368,7 +360,7 @@ export class PiRunner implements AgentRunner {
         if (!validated.success) throw new Error(formatValidationError(validated.error));
         validateDecisionReferences(request.snapshot, validated.data);
         return validated.data;
-      };
+      });
       const validate = () => {
         try { return validateText(responseText ?? protocolText(finalMessage)); }
         catch (error) {

@@ -78,6 +78,21 @@ describe("Decision reference validation", () => {
       { findingId: "V-fixture", status: "impact_verified", rating: "info", reason: "Synthetic check", pocEvidenceId: "E-other" },
     ] };
     expect(() => validateDecisionReferences(board(), proposal)).toThrow('must belong to Finding "V-fixture"');
+    const snapshot = board();
+    const original = structuredClone({ snapshot, proposal });
+    expect(() => validateDecisionReferences(snapshot, proposal)).toThrow('Attached evidenceIds by Finding: {"V-fixture":["E-fixture"]}');
+    expect(() => validateDecisionReferences(snapshot, proposal)).toThrow("Do not substitute IDs merely to pass validation");
+    expect({ snapshot, proposal }).toEqual(original);
+  });
+
+  it("also provides empty or nonempty evidence links for an unknown PoC without guessing a replacement", () => {
+    const snapshot = board();
+    const review = { findingId: "V-fixture", status: "impact_verified" as const, rating: "info" as const, reason: "Fixture", pocEvidenceId: "E-missing" };
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [review] }))
+      .toThrow('Attached evidenceIds by Finding: {"V-fixture":["E-fixture"]}');
+    snapshot.findings[0]!.evidenceIds = [];
+    expect(() => validateDecisionReferences(snapshot, { summary: "Fixture", reviews: [review] }))
+      .toThrow('Attached evidenceIds by Finding: {"V-fixture":[]}');
   });
 
   it.each(["done", "no_progress", "blocked", "failed", "abandoned"] satisfies StepStatus[])("leaves %s Step updates to the controller history filter", status => {

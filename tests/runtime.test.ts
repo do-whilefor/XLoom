@@ -269,6 +269,41 @@ describe("Pi runtime isolation", () => {
     expect(input.snapshot.facts).toEqual([]);
   });
 
+  it.each([true, false])("diagnoses prose plus a sixth review's wrong PoC in the same bounded repair (corrected=%s)", async corrected => {
+    const input = await request("metacog");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.evidence = ["E-attached", "E-other"].map(id => ({ id, path: "fixture.txt", sha256: "fixture", bytes: 1,
+      description: "Synthetic local evidence", runId: "prior", stepId: "S-fixture" }));
+    input.snapshot.findings = Array.from({ length: 6 }, (_, i) => ({ id: `V-fixture-${i}`, key: `fixture-${i}`, target: "local fixture",
+      title: "Synthetic hypothesis", status: "technical_hit", rating: "unrated", factIds: [], evidenceIds: ["E-attached"], next: "Review" }));
+    const original = structuredClone(input.snapshot);
+    const review = (fixed: boolean): Decision => ({ summary: "Synthetic review only", reviews: input.snapshot.findings.map((finding, i) => ({
+      findingId: finding.id, status: "closed", rating: "unrated", reason: "Synthetic result; reopen if fixture changes",
+      pocEvidenceId: i === 5 && !fixed ? "E-other" : "E-attached",
+    })) });
+    const seen: Context[] = [];
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (seen.length === 1) return message([{ type: "text", text: `Review follows.\n\`\`\`json\n${JSON.stringify(review(false))}\n\`\`\`` }]);
+      expect(context.tools).toEqual([]);
+      const repair = JSON.stringify(context.messages.at(-1));
+      expect(repair).toContain("single JSON object");
+      expect(repair).toContain("reviews[5].pocEvidenceId");
+      expect(repair).toContain("E-attached");
+      expect(repair).toContain("defer that review");
+      return message([{ type: "text", text: JSON.stringify(review(corrected)) }]);
+    }, seen) }) });
+    if (corrected) expect((await runner.run(input)).output).toEqual(review(true));
+    else {
+      const failure = await runner.run(input).catch(error => error);
+      expect(failure).toBeInstanceOf(RuntimeRunError);
+      expect(failure.message).toContain("reviews[5].pocEvidenceId");
+      expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+      await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(seen).toHaveLength(2);
+    expect(input.snapshot).toEqual(original);
+  });
+
   it("checks every Fact reference field against the full board without changing the proposal", async () => {
     const { snapshot } = await request();
     snapshot.goals.push(...["G0", "G1"].map(id => ({ id, parentId: null, status: "active" as const, description: "Synthetic fixture goal", factIds: [] })));
