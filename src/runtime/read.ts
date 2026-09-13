@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { access, opendir, readFile, stat } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
 import { createReadTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 
 const maxDirectoryEntries = 200;
@@ -11,6 +12,26 @@ class DirectoryRead extends Error {
 
 function checkAbort(signal?: AbortSignal) {
   if (signal?.aborted) throw new Error("Operation aborted");
+}
+
+async function nearestExistingParent(path: string, signal?: AbortSignal): Promise<string | undefined> {
+  let parent = dirname(path);
+  while (true) {
+    checkAbort(signal);
+    try {
+      const info = await stat(parent);
+      checkAbort(signal);
+      if (info.isDirectory()) return parent;
+    } catch (error) {
+      checkAbort(signal);
+      // An inaccessible ancestor cannot establish which parent exists. Keep
+      // the original read failure instead of replacing it with this diagnostic.
+      if (!(error instanceof Error) || !("code" in error) || !["ENOENT", "ENOTDIR"].includes(String(error.code))) return;
+    }
+    const ancestor = dirname(parent);
+    if (ancestor === parent) return;
+    parent = ancestor;
+  }
 }
 
 async function listDirectory(path: string, offset = 1, limit = maxDirectoryEntries, signal?: AbortSignal) {
@@ -90,7 +111,14 @@ export function createWorkspaceReadTool(workspace: string) {
         }
       }
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-        error.message += "\nRead an existing parent directory to discover exact names; a planned artifact may not have been written yet. Do not guess or retry the same missing path.";
+        checkAbort(signal);
+        // Native filesystem errors retain the exact path Pi already resolved.
+        // Use that call's error, not shared state or another path resolver.
+        const failedPath = (error as NodeJS.ErrnoException).path;
+        const parent = typeof failedPath === "string" && isAbsolute(failedPath) ? await nearestExistingParent(failedPath, signal) : undefined;
+        error.message += parent
+          ? `\nNearest existing parent directory: ${JSON.stringify(parent)}. Read this directory to discover exact names; do not guess or retry the same missing path.`
+          : "\nRead an existing parent directory to discover exact names; a planned artifact may not have been written yet. Do not guess or retry the same missing path.";
       }
       throw error;
     }

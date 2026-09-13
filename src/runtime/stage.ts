@@ -1,8 +1,8 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { createWriteTool } from "@earendil-works/pi-coding-agent";
-import { executionSchema } from "../schema.js";
+import { executionSchema, formatValidationError } from "../schema.js";
 import type { RunRequest, Usage } from "../types.js";
 
 export const stageSchema = z.object({
@@ -31,14 +31,30 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
       ...tool,
       async execute(...args: Parameters<typeof tool.execute>) {
         if (yielded) throw new Error("This Execute run has yielded after a committed checkpoint; remaining tools were not executed.");
-        const result = await tool.execute(...args);
         const canonical = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
-        if (!request.onCheckpoint || canonical(resolve(request.workspace, args[1].path)) !== canonical(stagePath(request))) return result;
+        if (!request.onCheckpoint || canonical(resolve(request.workspace, args[1].path)) !== canonical(stagePath(request))) return tool.execute(...args);
         request.signal.throwIfAborted();
-        if ((await stat(stagePath(request))).size > 1_048_576) throw new Error("Checkpoint proposal exceeds 1 MiB.");
-        const source = await readFile(stagePath(request), "utf8");
+        if (args[2]?.aborted) throw new Error("Operation aborted");
+        const source = args[1].content;
         if (Buffer.byteLength(source) > 1_048_576) throw new Error("Checkpoint proposal exceeds 1 MiB.");
-        const submission = stageSchema.parse(clean(JSON.parse(source.replace(/^\uFEFF/, ""))));
+        // Reject malformed proposals before Pi overwrites the last checkpoint.
+        // Keep the original bytes: guessing a quote/escape could change evidence.
+        let parsed: unknown;
+        try { parsed = JSON.parse(source.replace(/^\uFEFF/, "")); }
+        catch (error) {
+          throw new Error(`Checkpoint JSON is invalid: ${redact(error instanceof Error ? error.message : String(error))}\nNo checkpoint file was written or committed. Check matching double quotes and escape control characters inside strings (for example, \\n). Correct write.content and call write again; editing the file alone does not submit a checkpoint.`);
+        }
+        const validated = stageSchema.safeParse(clean(parsed));
+        if (!validated.success) {
+          throw new Error(`Checkpoint content is invalid: ${formatValidationError(validated.error)}\nNo checkpoint file was written or committed. Correct the listed fields in write.content and call write again.`);
+        }
+        const submission = validated.data;
+        const result = await tool.execute(...args);
+        request.signal.throwIfAborted();
+        if (args[2]?.aborted) throw new Error("Operation aborted");
+        if (await readFile(stagePath(request), "utf8") !== source) {
+          throw new Error("Checkpoint file changed after write; this proposal was not committed. Inspect the file before submitting again with write.");
+        }
         const board = await request.onCheckpoint(submission.id, submission.execution, { ...usage });
         yielded = submission.yieldToDecide ?? false;
         summary = submission.execution.summary;

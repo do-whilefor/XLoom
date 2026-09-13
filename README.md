@@ -28,7 +28,7 @@ npm start -- run
 
 ## 本版功能
 
-- Pi `0.84.4` 的真实 Agent 内核与工具工厂；普通聊天及 Execute 使用 `read / write / edit / powershell`，Decide / 元认知仅使用 `read`。工具顺序执行；PowerShell 增加语法预检，通过后交给 Pi 原样执行。`read` 的文件与图片读取沿用 Pi，目录读取返回真实的直接条目（不递归），最多 200 条/16 KiB，可用原 `offset` / `limit` 分页。不存在的路径仍报告失败并提示检查父目录，不猜测或替换文件名。
+- Pi `0.84.4` 的真实 Agent 内核与工具工厂；普通聊天及 Execute 使用 `read / write / edit / powershell`，Decide / 元认知仅使用 `read`。工具顺序执行；PowerShell 对传入命令做语法预检，通过后交给 Pi 原样执行。`read` 的文件与图片读取沿用 Pi，目录读取返回真实的直接条目（不递归），最多 200 条/16 KiB，可用原 `offset` / `limit` 分页。不存在的路径仍报告失败，并在可查询时给出最近存在的父目录，不猜测或替换文件名。`edit` 保留 Pi 的匹配规则；旧文本不匹配或不唯一时提示重读当前文件后再编辑。
 - 普通聊天保留当前进程内的独立会话，使用相同的私有上下文压缩和一次瞬断续接策略；`/new`、切换模型或凭据会清空会话。聊天不写入黑板，不持久化聊天记录。
 - 本地 Controller 串行调度；每次 Decide、每个 Execute Step、每次元认知都重新创建 Pi Agent，消息数组从空开始。
 - 同一次研究调用接近模型上下文窗口时压缩较早的完整交互，保留初始任务、近期工具结果和私有工作摘要；摘要不成为证据。可识别的模型瞬断在当前 run 内续接一次，最终 JSON 无效或规划实体引用不合法时尝试一次无工具纠正，仍受取消、超时及显式预算约束。
@@ -159,7 +159,7 @@ OpenCode Go 使用会话路由请求头 `x-opencode-session`。xloom 仅在 `ope
 
 供应商以 `length` 结束响应时，普通聊天及 Decide / Execute / 元认知会在当前调用中继续，不把截断直接当作任务失败，也不额外限制续接次数或累计回复长度。思考被截断时保留私有上下文和已完成工具结果；JSON 已开始时禁用工具续写后缀，按原字符拼接，保留完整前缀而不让上下文摘要替代它，直到正常结束并通过协议校验才入库。截断的工具调用仍由 Pi 拒绝执行，已有工具和 checkpoint 不重放。续接及上下文维护的实际 token 全部计入统计；用户取消和显式资源预算仍生效，提供方容量或请求错误仍可能中止调用。
 
-PowerShell 的 `command` 是 JSON 解码一次后的原始源码，反斜线不能转义 PowerShell 引号；例如单个双引号可写成单引号字符串 `'"'`。工具先用同一 PowerShell 解释器做 AST 语法检查，错误返回源码行列及修复提示，通过后原样执行一次。预检和执行共用工具超时，临时源码在结束时清理；程序不自动改写命令或重放副作用。外部脚本及动态生成的源码仍可能在运行时出错。
+PowerShell 的 `command` 是 JSON 解码一次后的原始源码，反斜线不能转义 PowerShell 引号；例如单个双引号可写成单引号字符串 `'"'`。工具先用同一 PowerShell 解释器对传入命令做 AST 语法检查，错误返回源码行列及修复提示，通过后原样执行一次。预检和执行共用工具超时，临时源码在结束时清理；程序不自动改写命令或重放副作用。`-File`、点调用的外部脚本及动态生成的源码不在这次预检范围内，它们的语法错误仍会原样返回；此时外层命令可能已有副作用，应先检查再修正和执行。
 
 兼容旧配置：旧 `limits.maxSteps` 会在加载时忽略；旧文件中已有的回合、单次/累计时间、Token、费用上限仍按显式配置保留。旧配置的 `stepTimeoutSeconds: 180` 会触发 `Run time limit reached`；取消时间上限须将 `limits.stepTimeoutSeconds` 和 `limits.maxMinutes` 设为 `null` 或删除并重启，恢复旧任务时也会使用新配置。取消回合和累计 token 上限同理修改 `limits.maxTurnsPerRun`、`limits.maxTokens`；去掉各角色的 `models.<role>.maxTokens` 则取消应用输出覆盖。任务证据和 token 计量不会清空。
 
@@ -210,6 +210,8 @@ Finding 自动继承所引用合法 Fact 的全部支持证据，并校验归档
 Finding 的 key 是稳定身份：新 key 必须给 target，更新已有 key 可省略 target 以保留原值，或原样提供已提交 target。新增观察写入 facts / next；不要因扩写描述而另建 key。显式冲突仍拒绝，并返回原 target 和修正方法，避免不同目标的证据混在一起。checkpoint 成功响应同时返回 Finding 的 id / key / target，可供后续批次或最终提交复用。旧任务中已存在的重复线索不会自动合并或删除。
 
 阶段提交是可选的 Execute 协议：使用原有 `write` 写入运行提示中的绝对 `artifacts/checkpoint.json` 路径，内容为 `{ "id": "checkpoint-1", "execution": { "summary": "已保存一批观察", "result": "done", "evidence": [], "facts": [] }, "yieldToDecide": false }`。实际观察仍必须引用本次 artifacts 中的原始证据。工具只有在 Controller 提交成功后才返回 `committed: true` 与公开引用；相同 ID / 内容重复提交幂等，不重复计费。相同 ID 改内容会被拒绝；后续批次使用新 ID 和已返回的证据 / Fact ID。`yieldToDecide: true` 提交后停止执行剩余工具，当前 Step 记为阶段性移交、尚未完整验证，交给 fresh Decide 重新规划。它不表示 Goal 完成。
+
+checkpoint 在覆盖文件前先检查 JSON 语法与字段结构；检查失败保留原文件和已提交记录，并提示修正 `write.content` 后重新提交，不自动补引号或改变证据文字。写入后核对文件内容，再由 Controller 验证引用并提交。普通文件仍沿用 Pi 的写入行为；直接 `edit` checkpoint 文件不触发提交。
 
 `Execution.attempts` 记录稳定 `hypothesis`、`scope`、`identity`、`stateVersion`、`baseline`、`changedVariable`、`outcome`、`observation` 和 `evidenceRefs`。新的支持 / 反证结论才算该条件下的进展；`inconclusive` / `blocked` 保留但不凭新增记录重置停滞。观察措辞和原始响应时间戳不参与试验去重；范围、身份和变量保留大小写。变更实际条件后可以重新验证。旧输出没有 attempts 时继续接受，仅按规范化事实和有证据的线索状态判断，不能可靠识别任意语义改写；仅添原始文件、未验证 lead 或重新打开旧结论不算新进展。
 

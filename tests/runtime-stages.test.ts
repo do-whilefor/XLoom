@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import { defaultConfig } from "../src/config.js";
 import { LoopController } from "../src/controller.js";
@@ -24,6 +24,7 @@ interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const entry of opened.splice(0)) {
     await entry.controller.waitForIdle();
     entry.store.close();
@@ -119,6 +120,67 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it.each(["json", "schema"] as const)("rejects invalid checkpoint %s before writing and preserves the previous accepted proposal through a corrected retry", async invalidKind => {
+    let acceptedSource = "";
+    let acceptedRevision = 0;
+    let evidenceId = "";
+    const invalid = invalidKind === "json" ? `{"id":"rejected","execution":{"summary":"Synthetic fixture.'
+}}` : JSON.stringify({ id: "rejected", execution: { summary: "Synthetic proposal missing required result" } });
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) return write("first-invalid", input.checkpointFile!, invalid);
+      if (run.contexts.length === 3) {
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "first-invalid", isError: true });
+        expect(toolText(context)).toContain("content");
+        expect(toolText(context)).toContain("write");
+        expect(existsSync(input.checkpointFile!)).toBe(false);
+        expect(submit).not.toHaveBeenCalled();
+        expect(test.store.snapshot()).toMatchObject({ facts: [], evidence: [] });
+        return write("first-accepted", input.checkpointFile!, checkpoint(input, "accepted-1"));
+      }
+      if (run.contexts.length === 4) {
+        expect(JSON.parse(toolText(context))).toMatchObject({ committed: true, checkpoint: "accepted-1" });
+        expect(submit).toHaveBeenCalledTimes(1);
+        acceptedSource = readFileSync(input.checkpointFile!, "utf8");
+        const committed = test.store.snapshot();
+        acceptedRevision = committed.revision;
+        evidenceId = committed.evidence[0]!.id;
+        expect(committed.facts).toHaveLength(1);
+        return write("second-invalid", input.checkpointFile!, invalid);
+      }
+      if (run.contexts.length === 5) {
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "second-invalid", isError: true });
+        expect(toolText(context)).toContain("content");
+        expect(toolText(context)).toContain("write");
+        expect(readFileSync(input.checkpointFile!, "utf8")).toBe(acceptedSource);
+        expect(submit).toHaveBeenCalledTimes(1);
+        expect(test.store.snapshot()).toMatchObject({ revision: acceptedRevision, facts: [expect.objectContaining({ evidenceIds: [evidenceId] })] });
+        return write("second-accepted", input.checkpointFile!, JSON.stringify({ id: "accepted-2", execution: {
+          summary: "Add only a new synthetic observation after correcting the submission", result: "done", facts: [
+            { ref: "new-f", description: "Synthetic fixture records both control and changed-object outcomes", evidenceRefs: [evidenceId] },
+          ],
+        } }));
+      }
+      expect(run.contexts).toHaveLength(6);
+      expect(JSON.parse(toolText(context))).toMatchObject({ committed: true, checkpoint: "accepted-2" });
+      expect(submit).toHaveBeenCalledTimes(2);
+      return json({ summary: "Both valid checkpoints retained; no further records to submit", result: "done" });
+    });
+    const submit = vi.spyOn(test.store, "applyExecutionCheckpoint");
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 1 });
+    expect(board.steps[0]).toMatchObject({ status: "done", attempts: 1 });
+    expect(board.facts).toHaveLength(2);
+    expect(board.evidence).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(2);
+    expect(test.events.filter(event => event.runtime?.type === "tool_end" && event.runtime.isError)).toHaveLength(2);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
   it.each([false, true])("recovers an Anthropic stream EOF after a completed write without committing its failed JSON tail (complete JSON: %s)", async completeJson => {
     const interruptedMarker = "UNCOMMITTED_INTERRUPTED_FIXTURE_RECORD";
     const test = setup((run, context, input) => {

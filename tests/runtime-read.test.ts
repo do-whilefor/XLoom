@@ -1,13 +1,19 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadTool } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceReadTool } from "../src/runtime/read.js";
 
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, stat: vi.fn(actual.stat) };
+});
+
 const directories: string[] = [];
 afterEach(async () => {
+  vi.mocked(stat).mockReset();
   for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
 });
 async function workspace() {
@@ -48,9 +54,71 @@ describe("workspace read tool", () => {
     expect(output(await tool.execute("empty", { path: directory }))).toContain("(empty directory)");
     await expect(tool.execute("missing", { path: "missing-plan.json" })).rejects.toMatchObject({
       code: "ENOENT",
-      message: expect.stringContaining("Read an existing parent directory to discover exact names"),
+      message: expect.stringContaining(`Nearest existing parent directory: ${JSON.stringify(directory)}`),
     });
     await expect(readFile(join(directory, "missing-plan.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reports the nearest existing ancestor of a repeated directory path without reading another file", async () => {
+    const directory = await workspace();
+    const existing = join(directory, "fixture", "artifacts");
+    await mkdir(existing, { recursive: true });
+    await writeFile(join(existing, "actual.txt"), "PRIVATE FILE CONTENT MUST NOT BE DISCOVERED BY AN ERROR");
+    const missing = join(existing, "fixture", "artifacts", "actual.txt");
+    const failure = await createWorkspaceReadTool(directory).execute("repeated", { path: missing }).catch(error => error);
+    expect(failure).toMatchObject({ code: "ENOENT", path: missing });
+    expect(failure.message).toContain(`Nearest existing parent directory: ${JSON.stringify(existing)}`);
+    expect(failure.message).toContain("Read this directory to discover exact names");
+    expect(failure.message).not.toContain("PRIVATE FILE CONTENT");
+    expect(vi.mocked(stat).mock.calls.map(([path]) => path)).toEqual([join(existing, "fixture", "artifacts"), join(existing, "fixture"), existing]);
+    expect(await readFile(join(existing, "actual.txt"), "utf8")).toBe("PRIVATE FILE CONTENT MUST NOT BE DISCOVERED BY AN ERROR");
+  });
+
+  it("uses Pi's resolved missing path for relative, absolute, tilde and file URL requests", async () => {
+    const directory = await workspace();
+    const missing = join(directory, "missing space", "absent.txt");
+    for (const path of ["missing space/absent.txt", missing, pathToFileURL(missing).href, `~/${relative(homedir(), missing).replaceAll("\\", "/")}`]) {
+      const failure = await createWorkspaceReadTool(directory).execute("missing-path", { path }).catch(error => error);
+      expect(failure).toMatchObject({ code: "ENOENT", path: missing });
+      expect(failure.message).toContain(`Nearest existing parent directory: ${JSON.stringify(directory)}`);
+    }
+  });
+
+  it("keeps concurrently failing reads tied to their own requested ancestors", async () => {
+    const directory = await workspace();
+    const parents = [join(directory, "left"), join(directory, "right")];
+    await Promise.all(parents.map(path => mkdir(path)));
+    const tool = createWorkspaceReadTool(directory);
+    const failures = await Promise.all(parents.map(path => tool.execute("concurrent", { path: join(path, "missing", "file.txt") }).catch(error => error)));
+    for (let index = 0; index < failures.length; index++) {
+      expect(failures[index].message).toContain(`Nearest existing parent directory: ${JSON.stringify(parents[index])}`);
+      expect(failures[index].message).not.toContain(parents[1 - index]);
+    }
+  });
+
+  it("preserves the original missing-file failure when an ancestor cannot be inspected", async () => {
+    const directory = await workspace();
+    const missing = join(directory, "unreadable-parent", "missing.txt");
+    const original = await createReadTool(directory).execute("original", { path: missing }).catch(error => error);
+    vi.mocked(stat).mockRejectedValueOnce(Object.assign(new Error("diagnostic parent permission denied"), { code: "EACCES" }));
+    const failure = await createWorkspaceReadTool(directory).execute("missing", { path: missing }).catch(error => error);
+    expect(failure).toMatchObject({ code: original.code, errno: original.errno, syscall: original.syscall, path: original.path });
+    expect(failure.message.startsWith(original.message)).toBe(true);
+    expect(failure.message).not.toContain("diagnostic parent permission denied");
+    expect(failure.message).not.toContain("Nearest existing parent directory");
+    expect(vi.mocked(stat).mock.calls.map(([path]) => path)).toEqual([join(directory, "unreadable-parent")]);
+  });
+
+  it("honors cancellation while inspecting ancestors and makes no further probes", async () => {
+    const directory = await workspace();
+    const controller = new AbortController();
+    const filesystem = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(stat).mockImplementationOnce(async () => {
+      controller.abort();
+      return filesystem.stat(directory);
+    });
+    await expect(createWorkspaceReadTool(directory).execute("cancel-ancestor", { path: "missing/absent.txt" }, controller.signal)).rejects.toThrow("Operation aborted");
+    expect(vi.mocked(stat)).toHaveBeenCalledTimes(1);
   });
 
   it("does not silently correct Markdown-escaped or guessed file names", async () => {

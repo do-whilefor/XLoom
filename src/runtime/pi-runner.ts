@@ -2,7 +2,8 @@ import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentMessage, type AgentOptions } from "@earendil-works/pi-agent-core";
-import { createWriteTool, createEditTool } from "@earendil-works/pi-coding-agent";
+import { createWriteTool } from "@earendil-works/pi-coding-agent";
+import { createWorkspaceEditTool } from "./edit.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
 import { buildRunPrompt } from "./prompts.js";
@@ -30,7 +31,7 @@ export function parseFinalJson(text: string): Record<string, unknown> {
 }
 
 export function executeTools(workspace: string) {
-  return [createWorkspaceReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createCheckedPowerShellTool(workspace)];
+  return [createWorkspaceReadTool(workspace), createWriteTool(workspace), createWorkspaceEditTool(workspace), createCheckedPowerShellTool(workspace)];
 }
 
 export function contentText(value: unknown): string {

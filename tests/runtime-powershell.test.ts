@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { PowerShellOperations } from "@earendil-works/pi-coding-agent";
@@ -69,6 +69,8 @@ $items | ConvertTo-Json -Compress`;
     const text = onData.mock.calls.map(([data]) => data.toString()).join("");
     expect(text).toContain("Line 1, column 24");
     expect(text).toContain("Backslash does not escape quotes");
+    expect(text).toContain("Check matching parentheses");
+    expect(text).toContain("named temporary variables");
     expect(text).toContain("No command text was repaired or replayed automatically");
   });
 
@@ -119,6 +121,7 @@ $items | ConvertTo-Json -Compress`;
     expect(tool.description).toContain("Backslash does not escape PowerShell quotes");
     expect(tool.description).toContain("do not assume python3 exists on Windows");
     expect(tool.description).toContain("pipe loops via & { ... }");
+    expect(tool.description).toContain("only supplied command text, not -File or dot-sourced scripts");
     for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) expect(prompt).not.toContain(powerShellPrompt);
   });
 
@@ -132,6 +135,27 @@ $items | ConvertTo-Json -Compress`;
 });
 
 describe.runIf(process.platform === "win32")("PowerShell syntax regressions on Windows", () => {
+  it("preserves a nested script's parser failure after executing its valid launcher exactly once", async () => {
+    const directory = await workspace();
+    await writeFile(join(directory, "invalid-child.ps1"), `Add-Content -LiteralPath 'child-executed.txt' -Value 'must not run'
+$values.Add((1 + 2)`, "utf8");
+    const tool = createCheckedPowerShellTool(directory);
+    const command = `Add-Content -LiteralPath 'launcher-count.txt' -Value 'once'
+$childShell = (Get-Process -Id $PID).Path
+& $childShell -NoProfile -File './invalid-child.ps1'`;
+
+    const failure = await tool.execute("nested-parser-error", { command }).catch(error => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toContain("invalid-child.ps1");
+    expect(failure.message).toMatch(/ParserError|MissingEndParenthesisInMethodCall/);
+    expect(failure.message).toContain("Command exited with code 1");
+    expect(failure.message).not.toContain("command was not executed (syntax preflight)");
+    expect(failure.message).not.toContain("No command text was repaired or replayed automatically");
+    expect((await readFile(join(directory, "launcher-count.txt"), "utf8")).trim().split(/\r?\n/)).toEqual(["once"]);
+    await expect(readFile(join(directory, "child-executed.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("captures loop output through a script block without running a redirection as a command", async () => {
     const directory = await workspace();
     const tool = createCheckedPowerShellTool(directory);

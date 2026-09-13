@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
+import { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { PiRunner, RuntimeRunError, executeTools, parseFinalJson } from "../src/runtime/index.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
 import { ChatSession, type ChatRequest } from "../src/runtime/chat.js";
 import type { BoardSnapshot, Decision, ModelConfig, RunRequest, RuntimeEvent } from "../src/types.js";
 import { validateDecisionReferences } from "../src/loop/references.js";
+import { stagePath, stageWriter } from "../src/runtime/stage.js";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -31,6 +33,58 @@ async function request(mode: RunRequest["mode"] = "decide"): Promise<RunRequest>
   return { id: `test-${directory}`, mode, snapshot, workspace: directory, runDir: join(directory, "run"), signal: new AbortController().signal, onEvent() {},
     step: mode === "execute" ? { id: "s1", goalId: "g1", from: [], description: "read fixture", successSignal: "read", evidencePlan: "save", priority: 1, status: "claimed", attempts: 1, runId: null, leaseUntil: null } : undefined };
 }
+
+describe("checkpoint write validation boundaries", () => {
+  it("preserves BOM and correctly escaped string bytes when submitting valid JSON", async () => {
+    const input = await request("execute");
+    input.onCheckpoint = vi.fn(async () => input.snapshot);
+    const execution = { summary: "Literal newline:\nAn apostrophe ' and double quote \" remain data.", result: "no_progress" };
+    const source = `\uFEFF${JSON.stringify({ id: "valid", execution })}`;
+    const usage = { input: 17, output: 5, cost: 0 };
+    const writer = stageWriter(createWriteTool(input.workspace), input, usage);
+    await writer.tool.execute("valid", { path: "run/artifacts/checkpoint.json", content: source });
+    expect(await readFile(stagePath(input), "utf8")).toBe(source);
+    expect(input.onCheckpoint).toHaveBeenCalledExactlyOnceWith("valid", execution, usage);
+  });
+
+  it("leaves non-checkpoint writes as arbitrary file content", async () => {
+    const input = await request("execute");
+    input.onCheckpoint = vi.fn(async () => input.snapshot);
+    const writer = stageWriter(createWriteTool(input.workspace), input, { input: 0, output: 0, cost: 0 });
+    const source = '{"unfinished":"ordinary file\n';
+    await writer.tool.execute("ordinary", { path: "ordinary.json", content: source });
+    expect(await readFile(join(input.workspace, "ordinary.json"), "utf8")).toBe(source);
+    expect(input.onCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it.each(["request", "tool"])("does not write or commit after %s cancellation", async kind => {
+    const input = await request("execute");
+    input.onCheckpoint = vi.fn(async () => input.snapshot);
+    const controller = new AbortController();
+    controller.abort();
+    if (kind === "request") input.signal = controller.signal;
+    const writer = stageWriter(createWriteTool(input.workspace), input, { input: 0, output: 0, cost: 0 });
+    await expect(writer.tool.execute("cancelled", { path: stagePath(input), content: "{}" }, kind === "tool" ? controller.signal : undefined)).rejects.toThrow(/abort/i);
+    expect(input.onCheckpoint).not.toHaveBeenCalled();
+    await expect(readFile(stagePath(input))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses to submit a file changed during the write", async () => {
+    const input = await request("execute");
+    input.onCheckpoint = vi.fn(async () => input.snapshot);
+    const native = createWriteTool(input.workspace);
+    const execute = native.execute;
+    native.execute = async (...args) => {
+      const result = await execute(...args);
+      await writeFile(stagePath(input), "changed externally");
+      return result;
+    };
+    const writer = stageWriter(native, input, { input: 0, output: 0, cost: 0 });
+    await expect(writer.tool.execute("changed", { path: stagePath(input), content: JSON.stringify({ id: "valid", execution: { summary: "fixture", result: "no_progress" } }) })).rejects.toThrow("changed after write");
+    expect(input.onCheckpoint).not.toHaveBeenCalled();
+    expect(await readFile(stagePath(input), "utf8")).toBe("changed externally");
+  });
+});
 
 function message(content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
   return { role: "assistant", content, api: model.api, provider: model.provider, model: model.id, stopReason, timestamp: 0,

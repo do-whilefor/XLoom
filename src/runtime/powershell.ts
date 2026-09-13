@@ -7,7 +7,7 @@ export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Back
 
 const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;
-const syntaxHelp = "\nFix the reported PowerShell source before retrying. Backslash does not escape quotes in PowerShell. Use single-quoted literals: '\"' for a double quote and 'it''s' for an apostrophe. Do not add Markdown escapes such as \\_ or \\: to raw commands. For complex data, write a JSON/text file and read it with Get-Content -LiteralPath. No command text was repaired or replayed automatically.\n";
+const syntaxHelp = "\nFix the reported PowerShell source before retrying. Check matching parentheses; split deeply nested method arguments into named temporary variables. Backslash does not escape quotes in PowerShell. Use single-quoted literals: '\"' for a double quote and 'it''s' for an apostrophe. Do not add Markdown escapes such as \\_ or \\: to raw commands. For complex data, write a JSON/text file and read it with Get-Content -LiteralPath. No command text was repaired or replayed automatically.\n";
 
 function parserScript(path: string): string {
   return `$ErrorActionPreference = 'Stop'
@@ -29,7 +29,8 @@ try {
 }`;
 }
 
-/** Parse with Pi's PowerShell backend, then execute the unchanged source once. */
+/** Parse only the supplied command, then run it unchanged once. Invoked scripts
+ * have their own parsing/runtime failures after the outer command has started. */
 export function createCheckedPowerShellOperations(operations: PowerShellOperations = createLocalPowerShellOperations()): PowerShellOperations {
   return {
     async exec(command, cwd, options) {
@@ -69,6 +70,6 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
 
 export function createCheckedPowerShellTool(workspace: string) {
   const tool = createPowerShellTool(workspace, { operations: createCheckedPowerShellOperations() });
-  tool.description += " Commands are syntax-checked without execution first; invalid syntax returns original source line/column diagnostics and quoting guidance. Valid commands are executed unchanged once. " + powerShellPrompt;
+  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. A valid command runs unchanged once. " + powerShellPrompt;
   return tool;
 }
