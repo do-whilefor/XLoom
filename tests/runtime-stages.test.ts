@@ -119,6 +119,112 @@ function seedFixtureGoals(test: ReturnType<typeof setup>): void {
 }
 
 describe("durable Execute checkpoints through the real Pi tool loop", () => {
+  it("continues metacog after a thinking-only length stop using its completed read, then executes the new plan", async () => {
+    let factId = "";
+    let recoveredPlans = 0;
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") {
+        if (input.blackboard.completedSteps === 1 && context.systemPrompt?.includes("Fresh metacognitive review")) {
+          factId = input.blackboard.facts[0]!.id;
+          if (run.contexts.length === 1) return message([{ type: "toolCall", id: "read-before-length", name: "read",
+            arguments: { path: join(input.workspace, input.blackboard.evidence[0]!.path) } }], "toolUse");
+          if (run.contexts.length === 2) {
+            expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "read-before-length", isError: false });
+            return message([{ type: "thinking", thinking: "Synthetic interrupted reasoning fixture; final plan not yet emitted" }], "length");
+          }
+          expect(run.contexts).toHaveLength(3);
+          expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
+          expect(context.messages.at(-1)?.role).toBe("user");
+          expect(context.messages.filter(entry => entry.role === "toolResult" && entry.toolCallId === "read-before-length")).toHaveLength(1);
+          recoveredPlans++;
+          return json({ summary: "Continue from the completed synthetic comparison", steps: [{ goalId: "G0", from: [factId],
+            description: "Inspect the remaining synthetic state", successSignal: "Remaining label observed", evidencePlan: "Use the archived fixture", priority: 1 }] });
+        }
+        return planning(input);
+      }
+      if (input.blackboard.completedSteps) {
+        expect(input.assignedStep).toMatchObject({ from: [factId], description: "Inspect the remaining synthetic state" });
+        return json({ summary: "Remaining synthetic condition still unverified", result: "no_progress" });
+      }
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      return write("fixture-checkpoint", input.checkpointFile!, checkpoint(input, "before-review-length", true));
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 2 });
+    expect(board.steps[1]).toMatchObject({ from: [factId], attempts: 1, status: "no_progress" });
+    expect(recoveredPlans).toBe(1);
+    expect(test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : [])).toEqual([
+      "fixture-write", "fixture-checkpoint", "read-before-length",
+    ]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("length"))).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
+  it("continues Execute after a committed checkpoint and length stop without repeating tools, records or usage", async () => {
+    let evidenceId = "";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      if (run.contexts.length === 1) return write("fixture-write", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) return write("fixture-checkpoint", input.checkpointFile!, checkpoint(input, "before-execute-length"));
+      if (run.contexts.length === 3) {
+        const accepted = JSON.parse(toolText(context));
+        expect(accepted).toMatchObject({ checkpoint: "before-execute-length", committed: true });
+        evidenceId = accepted.evidence[0].id;
+        return message([{ type: "thinking", thinking: "Synthetic interrupted reasoning fixture after accepted checkpoint" }], "length");
+      }
+      expect(run.contexts).toHaveLength(4);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.messages.at(-1)?.role).toBe("user");
+      expect(context.messages.filter(entry => entry.role === "toolResult" && entry.toolCallId === "fixture-checkpoint")).toHaveLength(1);
+      return json({ summary: "Checkpoint retained; submit only the additional synthetic observation", result: "done", facts: [
+        { ref: "additional-fact", description: "Synthetic fixture retains both the control and changed-object labels", evidenceRefs: [evidenceId] },
+      ] });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 1 });
+    expect(board.steps[0]).toMatchObject({ status: "done", attempts: 1 });
+    expect(board.evidence).toHaveLength(1);
+    expect(board.facts).toHaveLength(2);
+    expect(board.facts[1]!.evidenceIds).toEqual([evidenceId]);
+    expect(readFileSync(join(test.root, board.evidence[0]!.path), "utf8")).toBe(artifactBody);
+    expect(test.events.flatMap(event => event.runtime?.type === "tool_start" ? [event.runtime.toolCallId] : [])).toEqual(["fixture-write", "fixture-checkpoint"]);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("length"))).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution")).toHaveLength(1);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
+  it("joins a length-truncated JSON plan with a tool-free suffix before committing and executing it", async () => {
+    const prefix = '{"summary":"Assign a synthetic comparison","steps":[{"goalId":"G0","from":[],"description":"Inspect';
+    const suffix = ' the split synthetic condition","successSignal":"Compare labels","evidencePlan":"Save fixture","priority":1}]}';
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        expect(input.assignedStep!.description).toBe("Inspect the split synthetic condition");
+        return json({ summary: "Split plan executed; comparison remains unverified", result: "no_progress" });
+      }
+      if (!input.blackboard.steps.length) {
+        if (run.contexts.length === 1) return message([{ type: "text", text: prefix }], "length");
+        expect(run.contexts).toHaveLength(2);
+        expect(context.tools).toEqual([]);
+        return message([{ type: "text", text: suffix }]);
+      }
+      return planning(input);
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board).toMatchObject({ status: "paused", completedSteps: 1 });
+    expect(board.steps[0]).toMatchObject({ description: "Inspect the split synthetic condition", attempts: 1, status: "no_progress" });
+    expect(test.seen[0]!.contexts).toHaveLength(2);
+    expect(test.events.filter(event => event.runtime?.type === "notice" && event.runtime.text.includes("length"))).toHaveLength(1);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start")).toHaveLength(0);
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    assertExactUsage(test);
+  });
+
   it.each(["decide", "metacog"] as const)("accepts an identical existing Goal in %s and executes its new Steps without a repair request", async mode => {
     let planned = false;
     let planningRequests = 0;
