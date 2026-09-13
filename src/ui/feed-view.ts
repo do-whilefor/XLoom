@@ -116,9 +116,8 @@ export class FeedView implements Component {
   render(width: number): string[] {
     this.thoughtLinks.clear();
     if (width <= 0) return [""];
-    const margin = width >= 8 ? "  " : "";
     const prefixWidth = width >= 4 ? 2 : 0;
-    const available = Math.max(1, width - margin.length - prefixWidth);
+    const available = Math.max(1, width - prefixWidth);
     const rows: string[] = [];
     const line = (text: string, thoughtUrl?: string): void => {
       const rendered = truncateToWidth(text, width, width > 3 ? "…" : "");
@@ -126,7 +125,7 @@ export class FeedView implements Component {
       rows.push(thoughtUrl && visibleWidth(rendered) ? hyperlink(rendered, thoughtUrl) : rendered);
     };
     const detail = (values: (string | undefined)[], thoughtUrl?: string): void => {
-      for (const text of boundedDetails(values, available)) line(margin + " ".repeat(prefixWidth) + muted(text), thoughtUrl);
+      for (const text of boundedDetails(values, available)) line(" ".repeat(prefixWidth) + muted(text), thoughtUrl);
     };
     const toolState = (entry: FeedEntry): "running" | "done" | "error" => entry.error ? "error" : entry.state ?? "running";
     const tool = (entry: FeedEntry, expanded: boolean, thoughtUrl?: string): void => {
@@ -136,12 +135,12 @@ export class FeedView implements Component {
       if (state === "error" && !expanded) {
         const summary = entry.label === "PowerShell" && /ParserError/i.test(entry.output ?? "") ? "PowerShell 语法错误（展开查看详情）"
           : `${label}: ${summarizeToolFailure(plainText(entry.output || "工具执行失败；展开查看输入与详情。"))}`;
-        line(margin + chalk.red(`✕ ${summary}`), thoughtUrl);
+        line(chalk.red(`✕ ${summary}`), thoughtUrl);
         return;
       }
       const icon = state === "error" ? "✕" : state === "done" ? "✓" : "●";
       const elapsed = Number.isFinite(entry.startedAt) && entry.durationKnown !== false ? ` · ${this.duration(entry)}` : "";
-      line(margin + color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""), thoughtUrl);
+      line(color(`${icon} ${label}${elapsed}`) + (entry.text ? ` ${muted(compact(entry.text, 240))}` : ""), thoughtUrl);
       if (expanded) detail([...(state === "error" ? [summarizeToolFailure(plainText(entry.output || "工具执行失败。"))] : []), entry.details ?? entry.text, entry.output], thoughtUrl);
     };
     const group = (activity: ActivityGroup): void => {
@@ -158,13 +157,13 @@ export class FeedView implements Component {
       const title = summary.failed ? `${summary.failed} failed${successParts ? ` · ${successParts}` : ""}` : normalTitle;
       const heading = `${expanded ? "▾" : "▸"} ${title}`;
       const thoughtUrl = this.thoughtLink(activity.anchor);
-      line(margin + (summary.failed ? chalk.red : muted)(heading), thoughtUrl);
+      line((summary.failed ? chalk.red : muted)(heading), thoughtUrl);
       if (expanded) {
         for (const entry of activity.entries) {
           if (entry.kind === "thinking") {
             if (emptyThought(entry)) continue;
             const thought = boundedDetails([entry.text], available);
-            for (const [index, text] of thought.entries()) line(margin + muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text), thoughtUrl);
+            for (const [index, text] of thought.entries()) line(muted((prefixWidth ? index === 0 ? "∴ " : "  " : "") + text), thoughtUrl);
           } else if (entry.kind === "tool") tool(entry, true, thoughtUrl);
           else detail([entry.text, entry.details, entry.output], thoughtUrl);
         }
@@ -189,25 +188,25 @@ export class FeedView implements Component {
         const active = status === "running" && !Number.isFinite(entry.endedAt);
         const tokens = Number.isFinite(entry.tokens) && entry.tokens! >= 0 ? ` · ${Math.floor(entry.tokens!).toLocaleString("en-US")} tokens` : "";
         const text = (active ? `✻ Working… ${this.duration(entry)}` : `✻ Worked for ${this.duration(entry)} · ${status}${this.endedClock(entry)}`) + tokens;
-        line(margin + (status === "error" ? chalk.red : muted)(text));
+        line((status === "error" ? chalk.red : muted)(text));
       } else if (kind === "activity") {
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
-        line(margin + coral("● ") + muted(`${label}${entry.text ? ` · ${compact(entry.text, 240)}` : ""}`));
+        line(coral("● ") + muted(`${label}${entry.text ? ` · ${compact(entry.text, 240)}` : ""}`));
         if (this.detailsVisible) detail([entry.details, entry.output]);
       } else if (kind === "tool") {
         tool(entry, this.detailsVisible);
       } else if (kind === "notice") {
         const summary = compact(entry.text, 500);
-        line(margin + (entry.error ? chalk.red : muted)(summary));
-        const fullTextNeeded = plainText(entry.text) !== summary || visibleWidth(summary) > width - margin.length;
+        line((entry.error ? chalk.red : muted)(summary));
+        const fullTextNeeded = plainText(entry.text) !== summary || visibleWidth(summary) > width;
         if (this.detailsVisible) detail([fullTextNeeded ? entry.text : undefined, entry.details, entry.output]);
       } else {
         const user = /^You(?:\b|\s)/.test(label);
         const messagePrefixWidth = user ? prefixWidth : 0;
         const prefix = messagePrefixWidth ? (entry.error ? chalk.red : coral)("❯ ") : "";
         if (rows.length && plainText(rows.at(-1) ?? "").trim()) rows.push("");
-        const body = this.body(entry, Math.max(1, width - margin.length - messagePrefixWidth), user);
-        for (const [index, text] of (body.length ? body : [""]).entries()) line(margin + (index === 0 ? prefix : " ".repeat(messagePrefixWidth)) + (entry.error ? chalk.red(text) : text));
+        const body = this.body(entry, Math.max(1, width - messagePrefixWidth), user);
+        for (const [index, text] of (body.length ? body : [""]).entries()) line((index === 0 ? prefix : " ".repeat(messagePrefixWidth)) + (entry.error ? chalk.red(text) : text));
         if (this.detailsVisible) detail([entry.details, entry.output]);
       }
     }

@@ -15,6 +15,29 @@ function setup(entries: FeedEntry[] = [], now?: () => number) {
 }
 
 describe("compact Claude-like feed presentation", () => {
+  it.each([20, 90])("aligns prompts, replies, notices and thought headings to the left edge at %i columns", width => {
+    const { screen } = setup([
+      { kind: "message", label: "You", text: "你是什么模型？" },
+      { kind: "notice", label: "xloom", text: "模型请求暂时失败。" },
+      { kind: "thinking", label: "Assistant", text: "fixture thought", startedAt: 0, endedAt: 1000 },
+      { kind: "message", label: "Assistant", text: "我是测试模型。\n\n第二行。" },
+    ]);
+    const rows = screen(width).split("\n").map(row => row.trimEnd());
+    for (const row of ["❯ 你是什么模型？", "模型请求暂时失败。", "▸ Thought for 1s", "我是测试模型。", "第二行。"]) {
+      expect(rows).toContain(row);
+    }
+  });
+
+  it("uses the full reply width while preserving indentation from the message itself", () => {
+    const { screen } = setup([
+      { kind: "message", label: "Assistant", text: "abcdefghij".repeat(4) },
+      { kind: "message", label: "Assistant", text: "  if (ready) {\n    work();\n  }" },
+    ]);
+    expect(screen(20).split("\n")).toEqual([
+      "abcdefghijabcdefghij", "abcdefghijabcdefghij", "", "  if (ready) {", "    work();", "  }",
+    ]);
+  });
+
   it("shows user prompts and Markdown replies without separate role headings", () => {
     const { screen } = setup([
       { kind: "message", label: "You", text: "请读取 **原始标记**" },
@@ -233,11 +256,20 @@ describe("feed rendering safety and narrow terminals", () => {
     expect(render).not.toHaveBeenCalled();
   });
 
-  it.each([28, 40, 52])("avoids narrow CJK table cells after column redistribution at width %i", width => {
+  it.each([28, 40, 50])("avoids narrow CJK table cells after column redistribution at width %i", width => {
     const render = vi.spyOn(Markdown.prototype, "render");
     const { view } = setup([{ kind: "message", label: "Assistant", text: `| ${"long_word_".repeat(8)} | 中 | 文 | 字 |\n| --- | --- | --- | --- |\n| ${"another_word_".repeat(8)} | 甲 | 乙 | 丙 |` }]);
     for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     expect(render).not.toHaveBeenCalled();
+  });
+
+  it("renders a CJK table when the full 52-column width fits its cells", () => {
+    const render = vi.spyOn(Markdown.prototype, "render");
+    const { view } = setup([{ kind: "message", label: "Assistant", text: `| ${"long_word_".repeat(8)} | 中 | 文 | 字 |\n| --- | --- | --- | --- |\n| ${"another_word_".repeat(8)} | 甲 | 乙 | 丙 |` }]);
+    const rows = view.render(52);
+    expect(render).toHaveBeenCalledWith(52);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(52);
+    for (const cell of ["中", "文", "字", "甲", "乙", "丙"]) expect(rows.map(plainText).join("\n")).toContain(cell);
   });
 });
 

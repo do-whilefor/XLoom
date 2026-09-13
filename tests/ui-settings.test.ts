@@ -92,17 +92,18 @@ function launchAuthDialogs() {
 }
 
 describe("ordinary chat and dual-agent task UI", () => {
-  it("leaves one blank screen row between the header and the first user message", async () => {
+  it("leaves two blank screen rows before the flush-left first user message", async () => {
     const app = launch();
     app.submit("你是什么模型？");
     await app.settled();
     app.terminal.output = "";
     app.tui.renderNow(true);
     const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
-      .map(match => [Number(match[1]), plainText(match[2]!).trim()]));
+      .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
     expect(rows.get(3)).toContain(process.cwd());
     expect(rows.get(4)).toBe("");
-    expect(rows.get(5)).toBe("❯ 你是什么模型？");
+    expect(rows.get(5)).toBe("");
+    expect(rows.get(6)).toBe("❯ 你是什么模型？");
   });
 
   it("renders live tokens in a narrow footer and replaces pending tokens with committed usage once", async () => {
@@ -259,16 +260,16 @@ describe("Claude-style response timeline", () => {
     emit(app, { type: "runtime", runtime: { type: "thinking", mode: "chat", blockId: "click", text: "CLICK_THOUGHT" } });
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "click", text: "" } });
     screen(app);
-    // Empty chat: three header rows and a blank separator precede thought row 5.
-    app.terminal.input("\x1b[<0;5;5M");
-    app.terminal.input("\x1b[<0;5;5m");
+    // Three header rows and two blank rows precede the flush-left thought row 6.
+    app.terminal.input("\x1b[<0;1;6M");
+    app.terminal.input("\x1b[<0;1;6m");
     expect(screen(app)).toContain("CLICK_THOUGHT");
     expect(app.clipboard.writeText).not.toHaveBeenCalled();
     expect(app.controller.chat).not.toHaveBeenCalled();
     // Moving while held is selection, not a toggle.
-    app.terminal.input("\x1b[<0;5;5M");
-    app.terminal.input("\x1b[<32;10;5M");
-    app.terminal.input("\x1b[<0;10;5m");
+    app.terminal.input("\x1b[<0;3;6M");
+    app.terminal.input("\x1b[<32;8;6M");
+    app.terminal.input("\x1b[<0;8;6m");
     await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
     expect(screen(app)).toContain("CLICK_THOUGHT");
   });
@@ -296,9 +297,9 @@ describe("Claude-style response timeline", () => {
       app.terminal.input(`\x1b[<0;6;${row}m`);
     };
     const row = renderedRow("TOOL_RESULT");
-    app.terminal.input(`\x1b[<0;5;${row}M`);
-    app.terminal.input(`\x1b[<32;14;${row}M`);
-    app.terminal.input(`\x1b[<0;14;${row}m`);
+    app.terminal.input(`\x1b[<0;3;${row}M`);
+    app.terminal.input(`\x1b[<32;12;${row}M`);
+    app.terminal.input(`\x1b[<0;12;${row}m`);
     await vi.waitFor(() => expect(app.clipboard.writeText).toHaveBeenCalled());
     expect(app.clipboard.writeText.mock.calls[0]?.[0]).toContain("TOOL_RESUL");
     expect(app.clipboard.writeText.mock.calls[0]?.[0]).not.toContain("xloom-thinking:");
@@ -354,10 +355,10 @@ describe("Claude-style response timeline", () => {
     emit(app, { type: "runtime", runtime: { type: "thinking_end", mode: "chat", blockId: "scroll", text: "" } });
     screen(app);
     expect(app.tui.viewportTop).toBeGreaterThan(0);
-    // Header + blank separator + 40 notices + blank group separator + thought header.
-    const row = 46 - app.tui.viewportTop;
-    app.terminal.input(`\x1b[<0;5;${row}M`);
-    app.terminal.input(`\x1b[<0;5;${row}m`);
+    // Header + two blank rows + 40 notices + blank group separator + thought header.
+    const row = 47 - app.tui.viewportTop;
+    app.terminal.input(`\x1b[<0;1;${row}M`);
+    app.terminal.input(`\x1b[<0;1;${row}m`);
     expect(screen(app)).toContain("SCROLLED_THOUGHT");
     expect(app.controller.chat).not.toHaveBeenCalled();
   });

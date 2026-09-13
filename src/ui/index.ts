@@ -161,7 +161,7 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   const editor = new Editor(tui, {
     borderColor: coral,
     selectList: { selectedPrefix: coral, selectedText: coral, description: muted, scrollInfo: muted, noMatch: muted },
-  }, { paddingX: 1 });
+  }, { paddingX: 0 });
   editor.setAutocompleteProvider(createCommandAutocomplete());
   editor.setAutocompleteMaxVisible(6);
   const previousBindings = getKeybindings();
@@ -226,10 +226,10 @@ export async function runTui(controller: UiController, terminal: Terminal, optio
   };
   const scroll = new ScrollView(feedView, { follow: "end", primary: true, scrollbar: "auto", scrollbarStyle: muted });
   tui.setLayoutRoot(new VStack([
-    { component: new HeaderView(() => controller.getSessionInfo?.() ?? { model: `${snapshot.config.models.decide.provider}/${snapshot.config.models.decide.model}`, contextWindow: snapshot.config.models.decide.contextWindow }, options.workspace ?? process.cwd()), basis: 4, shrink: 1, minSize: 0 },
+    { component: new HeaderView(() => controller.getSessionInfo?.() ?? { model: `${snapshot.config.models.decide.provider}/${snapshot.config.models.decide.model}`, contextWindow: snapshot.config.models.decide.contextWindow }, options.workspace ?? process.cwd()), basis: 5, shrink: 1, minSize: 0 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
     { component: input, basis: "auto", shrink: 1, minSize: 1 },
-    { component: new StatusView(width => ` ${statusLine(snapshot, controller.getSessionInfo?.(), feed.uncommittedTokens, Math.max(0, width - 1))}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
+    { component: new StatusView(width => `${statusLine(snapshot, controller.getSessionInfo?.(), feed.uncommittedTokens, width)}${tui.isFollowingOutput ? "" : " · 历史视图"}`), basis: 1, shrink: 0 },
   ]));
   tui.setFocus(input);
 

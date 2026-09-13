@@ -44,13 +44,14 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板文本"), writeText: vi.fn(async () => true) }, columns = 90, rows = 24) {
+function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板文本"), writeText: vi.fn(async () => true) }, columns = 90, rows = 24, chat = false) {
   const board = snapshot();
   const listeners = new Set<(event: LoopEvent) => void>();
   const controller = {
     snapshot: vi.fn(() => board),
     subscribe: vi.fn((listener: (event: LoopEvent) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; }),
     start: vi.fn(async () => {}), pause: vi.fn(), stop: vi.fn(), hint: vi.fn(), requestMetacog: vi.fn(),
+    ...(chat ? { getSessionInfo: () => ({ mode: "chat" as const, busy: false, model: "test/test", status: board.status, usage: board.usage }) } : {}),
   } satisfies UiController;
   const terminal = new MemoryTerminal(columns, rows);
   let controls!: { editor: Editor; tui: TuiAltScreen };
@@ -75,7 +76,7 @@ describe("TUI layout and input history", () => {
     app.tui.renderNow(true);
     const screen = plainText(app.terminal.output);
     expect(screen).toContain("Xloom v");
-    expect(screen).toContain("⠙⢷⣄ ⣠⡾⠋");
+    expect(screen).toContain("▝█▄ ▄█▘");
     expect(screen).toContain("test/test");
     expect(screen).toContain(process.cwd());
     expect(screen).toContain("idle");
@@ -102,17 +103,21 @@ describe("TUI layout and input history", () => {
     expect(app.editor.getExpandedText()).toBe("short draft");
   });
 
-  it("drops the header separator before its information rows when only eight rows fit", () => {
-    const app = launch(undefined, 90, 8);
+  it.each([[8, 5], [9, 5], [10, 6], [24, 6]])("keeps two header spacers when they fit and flush-left text at %i rows", (height, firstTranscriptRow) => {
+    const app = launch(undefined, 90, height, true);
     app.emit({ type: "notice", message: "FIRST_TRANSCRIPT_LINE" });
     app.editor.setText("short draft");
     app.terminal.output = "";
     app.tui.renderNow(true);
     const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
-      .map(match => [Number(match[1]), plainText(match[2]!).trim()]));
+      .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
     expect(rows.get(3)).toContain(process.cwd());
-    expect(rows.get(4)).toContain("FIRST_TRANSCRIPT_LINE");
-    expect(plainText(app.terminal.output)).toContain("short draft");
+    for (let row = 4; row < firstTranscriptRow; row++) expect(rows.get(row)).toBe("");
+    expect(rows.get(firstTranscriptRow)).toBe("FIRST_TRANSCRIPT_LINE");
+    expect([...rows.values()].some(row => row.startsWith("short draft"))).toBe(true);
+    expect(rows.get(height)).toContain("idle");
+    expect(rows.get(height)).not.toMatch(/^\s/);
+    expect(app.editor.getPaddingX()).toBe(0);
   });
 
   it("uses Up/Down for previous/next submissions and restores a multiline unsent draft", () => {
@@ -406,9 +411,9 @@ describe("TUI clipboard", () => {
     const writeText = vi.fn(async () => true);
     const app = launch({ readText: vi.fn(async () => ""), writeText });
     app.tui.renderNow(true);
-    app.terminal.input("\x1b[<0;12;1M");
-    app.terminal.input("\x1b[<32;17;1M");
-    app.terminal.input("\x1b[<0;17;1m");
+    app.terminal.input("\x1b[<0;11;1M");
+    app.terminal.input("\x1b[<32;16;1M");
+    app.terminal.input("\x1b[<0;16;1m");
     await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
     expect(writeText.mock.calls[0]?.[0].trim()).toBe("Xloom");
     const count = writeText.mock.calls.length;
