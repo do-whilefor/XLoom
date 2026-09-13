@@ -12,14 +12,14 @@ const workspace = "D:\\工作区\\Xloom";
 const info = { model: "fixture/deepseek-flash", modelName: "deepseek-flash", contextWindow: 1_048_576, authLabel: "API Key", workspace };
 
 describe("pixel X session header", () => {
-  it("centers information on rows 2–4 beside a five-row solid X with two blank rows below", () => {
+  it("centers information on rows 2–4 beside the solid descending X with two blank rows below", () => {
     const header = new HeaderView(() => info, "ignored");
     expect(header.render(90).map(plainText)).toEqual([
-      "         ▄▘",
-      `  ▀██  ▄█▘    Xloom v${XLOOM_VERSION}`,
-      "     ▟██▘     deepseek-flash[1M] · API Key",
-      "  ▗▟█▛▐█▄     D:\\工作区\\Xloom",
-      "▄▟██▘      ",
+      "▝██▙   ▟██▘",
+      `  ▀██▄▀▀▀     Xloom v${XLOOM_VERSION}`,
+      "   ▝▜█▙▖      deepseek-flash[1M] · API Key",
+      "  ▄▄▄▀██▄     D:\\工作区\\Xloom",
+      "▗██▛   ▜██▖",
       "",
       "",
     ]);

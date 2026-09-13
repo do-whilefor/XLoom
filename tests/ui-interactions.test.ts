@@ -76,7 +76,7 @@ describe("TUI layout and input history", () => {
     app.tui.renderNow(true);
     const screen = plainText(app.terminal.output);
     expect(screen).toContain("Xloom v");
-    expect(screen).toContain("▄▟██▘");
+    expect(screen).toContain("▝██▙   ▟██▘");
     expect(screen).toContain("test/test");
     expect(screen).toContain(process.cwd());
     expect(screen).toContain("idle");

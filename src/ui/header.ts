@@ -4,13 +4,13 @@ import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { compact, type SessionInfo } from "./model.js";
 
 export const XLOOM_VERSION: string = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
-// A filled rising blade with two shorter, separated arms, in solid pixel cells.
+// Solid descending ribbon and two opposing arms, with even pixel steps and flat tips.
 const PIXEL_X = [
-  "         ▄▘",
-  "  ▀██  ▄█▘ ",
-  "     ▟██▘  ",
-  "  ▗▟█▛▐█▄  ",
-  "▄▟██▘      ",
+  "▝██▙   ▟██▘",
+  "  ▀██▄▀▀▀  ",
+  "   ▝▜█▙▖   ",
+  "  ▄▄▄▀██▄  ",
+  "▗██▛   ▜██▖",
 ];
 const coral = chalk.hex("#D98B73");
 
