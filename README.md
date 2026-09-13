@@ -119,7 +119,7 @@ xloom/
 └── LICENSE
 ```
 
-运行数据默认写入用户目录 `~/.xloom/`（Windows 使用系统用户目录，例如 `C:\Users\Acer\.xloom`）。可用绝对路径环境变量 `XLOOM_HOME` 指定另一数据目录。工作区仍是启动目录，或 `--workspace` 指定的目录；默认不再向工作区创建内部 `.xloom`、配置或黑板投影。普通聊天仍仅保存在内存，退出、重置后不恢复。
+运行数据默认写入用户目录 `~/.xloom/`（Windows 使用系统用户目录，例如 `C:\Users\Acer\.xloom`）。可用绝对路径环境变量 `XLOOM_HOME` 指定另一数据目录。工作区仍是启动目录，或 `--workspace` 指定的目录；默认不再向工作区创建内部 `.xloom`、配置或黑板投影。普通聊天独立持久化，同一模型端点下可在重启后继续；`/history` 查看保存内容，`/new` 新建聊天并保留旧文件。使用 `/tasks`、`/open 任务ID` 管理历史研究任务，`/paths` 查看数据位置。详见 [会话与任务](docs/sessions.md)。
 
 `~/.xloom` 内的布局：
 

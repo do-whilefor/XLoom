@@ -23,6 +23,7 @@ export interface UiController {
   listTasks?(): TaskInfo[];
   openTask?(id: string): void;
   storagePaths?(): object;
+  chatHistory?(): { id?: string; file?: string; pendingToolCalls: string[]; messages: { role: string; text: string }[] } | undefined;
   getSessionInfo?(): SessionInfo;
   getModels?(): Promise<{ provider: string; model: string; name: string }[]>;
   getProviders?(): Promise<{ id: string; name: string; authTypes: string[] }[]>;
@@ -33,7 +34,7 @@ export interface UiController {
 }
 
 export const HELP = [
-  "普通输入：和模型聊天，可使用 read / write / edit / powershell；/new 清空聊天",
+  "普通输入：和模型聊天，可使用 read / write / edit / powershell；/new 新建聊天；/history 保存内容",
   "/run 目标  新建双 Agent 任务（不读取聊天历史）",
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
   "/tasks  历史任务    /open 任务ID  选择任务    /paths  数据位置",
@@ -341,9 +342,15 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else actions.print("xloom", "当前演示不支持新建真实任务。请使用 run 启动真实 TUI。");
       break;
     case "/new":
-      if (controller.resetChat) { controller.resetChat(); actions.print("xloom", "已清空普通聊天；任务黑板保留。"); }
+      if (controller.resetChat) { controller.resetChat(); actions.print("xloom", "已新建普通聊天；旧聊天文件与任务黑板保留。"); }
       else actions.print("xloom", "当前演示没有普通聊天会话。");
       break;
+    case "/history": {
+      const history = controller.chatHistory?.();
+      actions.print("Chat", history ? [history.file ?? "当前内存聊天", history.pendingToolCalls.length ? "存在结果不确定的工具；不能自动续接，可用 /new 开始新聊天。" : "保存的上下文可能含压缩摘要；完整内容见上方文件。",
+        ...history.messages.map(message => `${message.role}: ${message.text}`)].join("\n\n") : "当前没有保存的聊天。");
+      break;
+    }
     case "/model":
       if (argument && !["all", "chat", "decide", "execute"].includes(argument)) actions.print("xloom", "用法：/model [all|chat|decide|execute]");
       else if (actions.settings) actions.settings("model", argument);

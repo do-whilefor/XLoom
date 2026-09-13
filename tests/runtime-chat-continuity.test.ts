@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
 import { AssistantMessageEventStream, type AssistantMessage, type Context, type Model, type Usage } from "@earendil-works/pi-ai";
 import { ChatSession, type ChatRequest } from "../src/runtime/chat.js";
 import { RuntimeRunError } from "../src/runtime/pi-runner.js";
@@ -42,6 +42,93 @@ async function request() {
   return { input, events, directory };
 }
 const isSummary = (context: Context) => context.systemPrompt?.startsWith("Summarize the older conversation as private working memory.") ?? false;
+
+describe("durable private chat", () => {
+  it("restores completed tool results after restart without replay, strips private thinking and credentials, and retains cumulative usage", async () => {
+    const { input, directory } = await request();
+    const storageDirectory = join(directory, "chats");
+    let calls = 0;
+    const first = new ChatSession({ storageDirectory, resolveModel: async () => ({ model: { ...model, contextWindow: 100000 }, secrets: ["fixture-private-key"], streamFn: stream(() => ++calls === 1 ? assistant([
+      { type: "thinking", thinking: "private chain of thought fixture" },
+      { type: "toolCall", id: "saved-write", name: "write", arguments: { path: "saved.txt", content: "observed local result" } },
+    ], "toolUse") : assistant([{ type: "text", text: "Saved fixture-private-key" }])) }) });
+    await first.send(input);
+    const file = first.history().file!;
+    const text = await readFile(file, "utf8");
+    expect(text).not.toContain("fixture-private-key"); expect(text).not.toContain("private chain of thought fixture");
+    expect(first.history().pendingToolCalls).toEqual([]);
+    const previousUsage = first.getUsage();
+    first.close();
+    const second = new ChatSession({ storageDirectory, resolveModel: async () => ({ model: { ...model, contextWindow: 100000 }, streamFn: stream(context => {
+      expect(context.messages.some(message => message.role === "toolResult" && message.toolCallId === "saved-write")).toBe(true);
+      expect(JSON.stringify(context.messages)).toContain(input.text);
+      return assistant([{ type: "text", text: "Continued from the saved observation" }]);
+    }) }) });
+    await second.send({ ...input, text: "Continue the discussion" });
+    expect(second.history().file).toBe(file);
+    expect(second.getUsage().input).toBe(previousUsage.input + 3);
+    expect(await readFile(join(directory, "saved.txt"), "utf8")).toBe("observed local result");
+    expect(calls).toBe(2);
+  });
+
+  it.each(["reset", "endpoint"])("starts a separate chat after %s and retains the old archive", async change => {
+    const { input, directory } = await request(); const storageDirectory = join(directory, "chats");
+    let endpoint = model.baseUrl;
+    let calls = 0;
+    const create = () => new ChatSession({ storageDirectory, resolveModel: async () => ({ model: { ...model, baseUrl: endpoint }, streamFn: stream(context => {
+      if (++calls > 1) expect(JSON.stringify(context.messages)).not.toContain("OLD_PRIVATE_CHAT");
+      return assistant([{ type: "text", text: "Fixture response" }]);
+    }) }) });
+    const first = create(); await first.send({ ...input, text: "OLD_PRIVATE_CHAT" }); const old = first.history().file!;
+    if (change === "reset") first.reset(); else endpoint = "https://different.invalid/v1";
+    first.close();
+    const second = create(); await second.send({ ...input, text: "New conversation" });
+    expect(second.history().file).not.toBe(old);
+    expect(await readFile(old, "utf8")).toContain("OLD_PRIVATE_CHAT");
+  });
+
+  it.each(["pending", "corrupt", "identity"])("refuses %s recovery before a model request and preserves the file", async problem => {
+    const { input, directory } = await request(); const storageDirectory = join(directory, "chats"); let calls = 0;
+    const create = () => new ChatSession({ storageDirectory, resolveModel: async () => ({ model, streamFn: stream(() => { calls++; return assistant([{ type: "text", text: "Fixture" }]); }) }) });
+    const first = create(); await first.send(input); const file = first.history().file!; first.close();
+    const data = JSON.parse(await readFile(file, "utf8"));
+    if (problem === "pending") data.pendingToolCalls = ["uncertain-side-effect"];
+    if (problem === "identity") data.identity.workspace = join(directory, "different-workspace");
+    const poisoned = problem === "corrupt" ? "not JSON" : JSON.stringify(data); await writeFile(file, poisoned);
+    await expect(create().send({ ...input, text: "Continue" })).rejects.toThrow(/Checkpoint|checkpoint/);
+    expect(calls).toBe(1); expect(await readFile(file, "utf8")).toBe(poisoned);
+  });
+
+  it("durably records the entire pending tool batch before execution", async () => {
+    const { input, directory } = await request(); let calls = 0, checked = false;
+    const chat = new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model, streamFn: stream(() => ++calls === 1 ? assistant([
+      { type: "toolCall", id: "a", name: "write", arguments: { path: "a.txt", content: "a" } },
+      { type: "toolCall", id: "b", name: "write", arguments: { path: "b.txt", content: "b" } },
+    ], "toolUse") : assistant([{ type: "text", text: "Done" }])) }), createAgent: options => new Agent({ ...options, beforeToolCall: async (context, signal) => {
+      if (!checked) {
+        expect(chat.history().pendingToolCalls).toEqual(["a", "b"]);
+        await expect(readFile(join(directory, "a.txt"))).rejects.toMatchObject({ code: "ENOENT" }); checked = true;
+      }
+      return options.beforeToolCall?.(context, signal);
+    } }) });
+    await chat.send(input); expect(checked).toBe(true); expect(chat.history().pendingToolCalls).toEqual([]);
+  });
+
+  it("blocks a tool when its pending checkpoint cannot be written", async () => {
+    const { input, directory } = await request(); let calls = 0;
+    const chat = new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model, streamFn: (_model, context) => {
+      const events = new AssistantMessageEventStream(); calls++;
+      void (async () => {
+        const file = chat.history().file!; await unlink(file); await mkdir(file);
+        const message = assistant([{ type: "toolCall", id: "must-not-run", name: "write", arguments: { path: "forbidden.txt", content: "side effect" } }], "toolUse");
+        events.push({ type: "done", reason: "toolUse", message }); events.end();
+      })();
+      return events;
+    } }) });
+    await expect(chat.send(input)).rejects.toThrow();
+    expect(calls).toBe(1); await expect(readFile(join(directory, "forbidden.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
 
 describe("chat context maintenance integration", () => {
   it("compacts a continuing tool loop, meters each summary once and retains private history for the next send", async () => {

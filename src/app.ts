@@ -15,7 +15,7 @@ import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, Pro
 
 export interface AppOptions {
   runner?: AgentRunner;
-  chat?: { send(request: ChatRequest): Promise<Usage>; reset(): void };
+  chat?: { send(request: ChatRequest): Promise<Usage>; reset(): void; close?(): void; getUsage?(): Usage; history?(): ReturnType<ChatSession["history"]> };
   settings?: Pick<SettingsService, "listModels" | "listProviders" | "saveApiKey" | "login" | "logout"> & Partial<Pick<SettingsService, "describeModel">>;
 }
 
@@ -48,7 +48,7 @@ export class AppController {
     ensureProject(this.workspace);
     this.config = projectConfigSchema.parse(config);
     this.runner = options.runner ?? new PiRunner();
-    this.chatSession = options.chat ?? new ChatSession();
+    this.chatSession = options.chat ?? new ChatSession({ storageDirectory: path.join(projectDirectory(this.workspace), "chats") });
     this.settings = options.settings ?? new SettingsService();
     this.lock = new WorkspaceLock(this.workspace);
     try {
@@ -129,6 +129,7 @@ export class AppController {
     return task;
   }
   private addChatUsage(value: unknown): void {
+    if (this.chatSession.getUsage) { this.chatUsage = this.chatSession.getUsage(); return; }
     const result = usageSchema.safeParse(value);
     if (result.success) { this.chatUsage.input += result.data.input; this.chatUsage.output += result.data.output; this.chatUsage.cost += result.data.cost; }
   }
@@ -147,6 +148,7 @@ export class AppController {
     });
   }
   resetChat(): void { this.idle(); this.chatSession.reset(); this.chatUsage = { input: 0, output: 0, cost: 0 }; this.chatStatus = "idle"; this.mode = "chat"; this.refreshDisplayInfo(); this.emit({ type: "session" }); }
+  chatHistory() { return this.chatSession.history?.(); }
 
   listTasks() { return listTasks(this.workspace); }
   storagePaths() {
@@ -212,7 +214,7 @@ export class AppController {
     this.closing = Promise.resolve().then(async () => {
       try { this.stop(); await this.waitForIdle(); }
       finally {
-        try { this.chatSession.reset(); this.detachLoop?.(); this.store?.close(); }
+        try { if (this.chatSession.close) this.chatSession.close(); else this.chatSession.reset(); this.detachLoop?.(); this.store?.close(); }
         finally { this.lock.close(); }
       }
     });
@@ -238,6 +240,7 @@ export class AppController {
     }
     this.config = config;
     this.chatSession.reset();
+    this.chatUsage = { input: 0, output: 0, cost: 0 };
     this.refreshDisplayInfo(true);
     this.emit({ type: "session" });
   }

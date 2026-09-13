@@ -199,7 +199,7 @@ const messageSchema = z.discriminatedUnion("role", [
 const identitySchema = z.object({ role: z.enum(["decide", "execute", "metacog", "chat"]), provider: z.string().min(1),
   model: z.string().min(1), api: z.string().min(1), baseUrl: z.string(), workspace: z.string().min(1),
   taskId: z.string().min(1), stepId: z.string().nullable() }).strict();
-const checkpointSchema = z.object({ version: z.literal(1), identity: identitySchema, messages: z.array(messageSchema),
+export const checkpointSchema = z.object({ version: z.literal(1), identity: identitySchema, messages: z.array(messageSchema),
   pendingToolCalls: z.array(z.string().min(1)), usage: z.object({ input: nonnegative, output: nonnegative, cost: nonnegative }).strict(),
   savedAt: z.string().datetime() }).strict();
 
