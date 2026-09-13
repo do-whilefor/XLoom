@@ -1,6 +1,7 @@
 import { evidencePath } from "../paths.js";
 import { dirname, join } from "node:path";
 import type { Attempt, BoardSnapshot, Evidence, Fact, Finding, Goal, Hint, Mode, RunRequest, Step } from "../types.js";
+import { projectFindingContext, type FindingContext } from "./finding-context.js";
 
 export type ContextStep = Omit<Step, "runId" | "leaseUntil"> & {
   /** A failed run may have left files here; this is not committed or verified Evidence. */
@@ -42,6 +43,8 @@ export interface BlackboardContext {
   hints: Hint[];
   /** Causal provenance and conditions, without the old executable plans. */
   stepOrigins: StepOrigin[];
+  /** Derived evidence navigation; never changes Finding support or review status. */
+  findingContext?: FindingContext;
   projection: {
     mode: Mode;
     omitted: Record<Collection, number>;
@@ -326,7 +329,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
     };
   });
 
-  return {
+  const context: BlackboardContext = {
     revision: board.revision,
     project: { title: board.config.title, goal: board.config.goal, scope: board.config.scope, context: board.config.context },
     status: board.status, reason: board.reason, outcome: board.outcome,
@@ -362,4 +365,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
       notice,
     },
   };
+  const findingContext = projectFindingContext({ ...board, steps: [...steps.values()] }, context, dirname(dirname(request.runDir)), request.workspace);
+  if (findingContext) context.findingContext = findingContext;
+  return context;
 }

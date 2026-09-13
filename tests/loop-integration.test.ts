@@ -24,7 +24,7 @@ const model: Model<"openai-completions"> = {
 };
 
 interface PromptData {
-  blackboard: Pick<BlackboardContext, "goals" | "facts" | "findings" | "evidence" | "steps" | "completedSteps" | "projection">;
+  blackboard: Pick<BlackboardContext, "goals" | "facts" | "findings" | "evidence" | "steps" | "completedSteps" | "projection" | "findingContext">;
   assignedStep?: ContextStep;
   workspace: string;
   artifacts: string;
@@ -113,6 +113,67 @@ function proposal(input: PromptData): Decision {
 }
 
 describe("real Pi inner loop with the two-Agent outer loop", () => {
+  it("reads an unlinked candidate through existing tools without changing Finding support or SQLite records", async () => {
+    const inspect = "Inspect one related synthetic artifact";
+    let candidateId = "";
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") {
+        if (!input.blackboard.completedSteps) return json(plan());
+        if (input.blackboard.completedSteps === 1) return json({ summary: "Inspect the related candidate before deciding support", steps: [
+          { goalId: "G0", from: [input.blackboard.facts[0]!.id], description: inspect, successSignal: "Candidate read", evidencePlan: "Inspect saved fixture only", priority: 1 },
+        ] });
+        return json({ summary: "Related material inspected; no new evidence or conclusion submitted" });
+      }
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      if (input.assignedStep?.description === inspect) {
+        expect(input.blackboard.findings.map(finding => finding.key)).toEqual(["focus"]);
+        const focus = input.blackboard.findings[0]!;
+        const data = input.blackboard.findingContext!;
+        const related = data.items.find(item => item.findingId === focus.id)!.related.find(item => item.kind === "shared_finding")!;
+        candidateId = related.candidateEvidenceIds[0]!;
+        expect(focus.evidenceIds).not.toContain(candidateId);
+        const source = data.evidence.find(item => item.id === candidateId)!;
+        if (run.contexts.length === 1) return message([
+          { type: "toolCall", id: "read-candidate", name: "read", arguments: { path: source.path } },
+        ], "toolUse");
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+        expect(JSON.stringify(context.messages.at(-1))).toContain("synthetic=2");
+        return json({ summary: "Read existing candidate; support remains unassessed", result: "no_progress" });
+      }
+      if (run.contexts.length === 1) return message([0, 1, 2, 3].map(i => ({
+        type: "toolCall", id: `write-view-${i}`, name: "write", arguments: { path: join(input.artifacts, `${i}.txt`), content: `${syntheticArtifact}synthetic=${i}` },
+      })), "toolUse");
+      return json({ summary: "Synthetic source material saved", result: "done",
+        evidence: [0, 1, 2, 3].map(i => ({ ref: `e${i}`, path: join(input.artifacts, `${i}.txt`), description: "Synthetic local fixture" })),
+        facts: [0, 1, 2, 3].map(i => ({ ref: `f${i}`, description: `Synthetic observation ${i}`, evidenceRefs: [`e${i}`] })),
+        findings: [{ key: "focus", factRefs: ["f0", "f1"], evidenceRefs: ["e0", "e1"] },
+          { key: "peer", factRefs: ["f1", "f2"], evidenceRefs: ["e1", "e2"] }, { key: "other", factRefs: ["f3"], evidenceRefs: ["e3"] }]
+          .map(finding => ({ ...finding, title: "Synthetic hypothesis", target: finding.key, status: "lead", next: "Inspect source" })),
+      });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", completedSteps: 2, outcome: null });
+    expect(board.facts).toHaveLength(4);
+    expect(board.evidence).toHaveLength(4);
+    expect(board.findings.find(finding => finding.key === "focus")!.evidenceIds).not.toContain(candidateId);
+    expect(board.findings.every(finding => finding.status === "lead" && !finding.pocEvidenceId)).toBe(true);
+    expect(board).not.toHaveProperty("findingContext");
+    expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start").map(event => event.runtime!.toolName))
+      .toEqual(["write", "write", "write", "write", "read"]);
+    expect(readFileSync(test.store.projectionPath, "utf8")).toContain('"kind":"finding"');
+    expect(readFileSync(test.store.projectionPath, "utf8")).toContain(candidateId);
+    const before = test.store.events();
+    test.store.close();
+    const reopened = new BlackboardStore(test.root, board.config);
+    try {
+      expect(reopened.snapshot().findings).toEqual(board.findings);
+      expect(reopened.snapshot()).not.toHaveProperty("findingContext");
+      expect(reopened.events()).toEqual(before);
+    } finally { reopened.close(); }
+  });
+
   it("carries built-in methods from planning through execution and fresh review with existing tools", async () => {
     const test = setup((run, context, input) => {
       if (run.channel === "offline-execute") {

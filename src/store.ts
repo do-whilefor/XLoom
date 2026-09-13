@@ -7,6 +7,7 @@ import { taskDirectory } from "./workspace.js";
 import { decisionSchema, executionSchema, projectConfigSchema, usageSchema } from "./schema.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
+import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
@@ -502,5 +503,7 @@ export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspac
   const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.methodIds?.length ? ` (methods: ${item.methodIds.join(", ")})` : ""}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
   for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
   rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
+  if (board.findings.length) rows.push("## Evidence navigation index", "", "Registered references only; not proof of support or current applicability.", "", "```jsonl",
+    ...evidenceNavigationRecords(board).map(record => JSON.stringify(record)), "```", "");
   return rows.join("\n");
 }
