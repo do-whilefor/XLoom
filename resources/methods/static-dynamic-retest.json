@@ -1,0 +1,4 @@
+{
+  "execute": "Locate each static claim in its artifact and version. Match method, host, port, route and media type to the observed operation; seek evidence of the executing route and consumer. Compare actor, object, session, request template, deployment and configuration. Keep historical observations under their original conditions. For a change, identify dependent claims, rebuild the legitimate baseline and retest the original boundary plus affected normal behavior. Limit extra checks to supported dependency changes.",
+  "review": "Require implementation/deployment linkage before attributing runtime behavior. A controlled counterexample, incompatible version or alternate route refutes only the proposed connection or fix. Source strings, changed errors and unexplained 404s leave reachability unknown. Preserve old observations; reopen only claims affected by new version, route, configuration or current evidence."
+}

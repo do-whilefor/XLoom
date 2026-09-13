@@ -7,7 +7,7 @@ export type ContextStep = Omit<Step, "runId" | "leaseUntil"> & {
   recovery?: { artifacts: string; evidenceStatus: "unverified" };
 };
 export type ContextEvidence = Omit<Evidence, "runId">;
-export type StepOrigin = Pick<Step, "id" | "description" | "status" | "from" | "combination">;
+export type StepOrigin = Pick<Step, "id" | "description" | "status" | "from" | "combination" | "methodIds">;
 export interface FactIndexEntry {
   id: string;
   summary: string;
@@ -159,6 +159,7 @@ export function projectStep(step: Step, runsDir?: string): ContextStep {
     id: step.id, goalId: step.goalId, from: [...step.from], description: step.description,
     successSignal: step.successSignal, evidencePlan: step.evidencePlan, priority: step.priority,
     status: step.status, attempts: step.attempts,
+    ...(step.methodIds === undefined ? {} : { methodIds: [...step.methodIds] }),
     ...(step.combination === undefined ? {} : { combination: projectCombination(step.combination) }),
     ...(step.result === undefined ? {} : { result: step.result }),
     ...(recovery === undefined ? {} : { recovery }),
@@ -307,6 +308,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
   for (const origin of steps.values()) {
     if (originIds.has(origin.id) && !selected.steps.has(origin.id)) {
       stepOrigins.push({ id: origin.id, description: origin.description, status: origin.status, from: [...origin.from],
+        ...(origin.methodIds === undefined ? {} : { methodIds: [...origin.methodIds] }),
         ...(origin.combination === undefined ? {} : { combination: projectCombination(origin.combination) }) });
     }
   }

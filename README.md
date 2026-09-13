@@ -147,6 +147,14 @@ projects/<工作区哈希>/
 
 使用新版本后请将旧项目数据当作备份；旧版程序对它的后续修改不会自动同步。备份时退出相应 Xloom 进程后复制用户数据目录。
 
+## 内置方法库
+
+研究流程内置 Webounty 的 13 张精简方法卡。Decide 从一句话目录选择可选
+`Step.methodIds`（每步最多 3 张），Execute 按需接收测试和判断要点，Decide /
+元认知读取相关复核要点。方法与任务证据分开保存；原有系统提示词、Agent 和工具
+集合保持不变，普通聊天不加载方法库，无需 Skills 或 hook。资源随安装包发布，
+不依赖本地 `webounty/`。选择、上下文预算和来源说明见 [内置方法库](docs/methods.md)。
+
 ## 模型与配置
 
 模型目录、供应商适配和认证直接使用依赖 Pi 的 `ModelRuntime`，不维护独立的模型白名单。`models.chat`、`models.decide`、`models.execute` 可配置不同模型；元认知始终复用 decide。
@@ -201,3 +209,5 @@ projects/<工作区哈希>/
 ## License
 
 本项目采用 [MIT License](LICENSE)。设计参考 Cairn / Cairn_Y 的黑板协作与 FGS，以及 Jase 的边界建模与影响闭环方法，均为独立实现。Pi 及第三方依赖保留各自原有许可。
+
+内置方法卡基于 Webounty 方法库压缩改写，来源归属和 MIT 许可见 [方法库声明](resources/methods/NOTICE.md)。

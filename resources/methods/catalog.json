@@ -1,0 +1,15 @@
+{
+  "baseline-authz": "Identity, ownership or sharing differences; valid business controls.",
+  "flow-chain": "Accepted request, background stages and final delivery are separate events.",
+  "static-dynamic-retest": "Source/runtime disagreement or a changed request, policy or deployment.",
+  "observer-validity": "Enumeration, timing or size differences with questionable controls.",
+  "controller-reach": "Ambiguous filter, routing, validation or handler response.",
+  "capability-consumer": "Recognized or issued credential with an unproven final consumer.",
+  "protocol-binding": "Challenge, principal, origin or credential-to-consumer binding.",
+  "patch-differential": "Fix claims, feature toggles or rollout differences across deployments.",
+  "authorization-context": "Effective token scope, operation policy or authorization-matrix outlier.",
+  "evidence-linkage": "Static claims, runtime effects or fingerprints lacking causal linkage.",
+  "asset-attribution": "Discovery candidates, DNS/CT, ownership, deployment or CVE applicability.",
+  "impact-assessment": "Observed capability, affected object, actual result and chain prerequisites.",
+  "hypothesis-lifecycle": "Conditional negative results, reopening or correcting a prior conclusion."
+}

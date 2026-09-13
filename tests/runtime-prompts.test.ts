@@ -72,6 +72,7 @@ describe("compact built-in prompts", () => {
         expect(context.systemPrompt).not.toMatch(/model-turn limit|maxTurnsPerRun|final allowed model|JSON object/);
         expect(context.systemPrompt).not.toContain(powerShellPrompt);
         expect(context.systemPrompt).not.toMatch(/Decide|Execute|blackboard|checkpointFile|yieldToDecide/);
+        expect(JSON.stringify(context)).not.toMatch(/methodIds|methods.catalog|baseline-authz/);
         expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
         const definitions = JSON.stringify(context.tools?.map(({ name, description, parameters }) => ({ name, description, parameters })));
         expect(definitions.length).toBeLessThanOrEqual(3_300);

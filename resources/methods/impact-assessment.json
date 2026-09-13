@@ -1,0 +1,4 @@
+{
+  "execute": "Describe observed capability, affected object, actual result, scope and prerequisites with current evidence. Distinguish observations, inferred impact and missing conditions; retain controls and counterexamples. HTTP success, anomalies or credential presence alone do not establish final impact. For a proposed chain, verify the prior output satisfies the next input, identity, object and environment. Preserve useful intermediate capabilities with their gaps. Gather reproducible result evidence for Decide's review; this method does not add a scoring calculator.",
+  "review": "Verify impact from the result and reproducible PoC, not method selection or a score. Keep individual severity and chain value separate; missing links stay candidates. Correct only claims contradicted by new evidence, preserving observations. Reopen when missing prerequisites become available. Use Xloom's existing review/rating contract; no automatic score or status upgrade."
+}

@@ -9,6 +9,7 @@ import { defaultConfig } from "../src/config.js";
 import { LoopController } from "../src/controller.js";
 import type { BlackboardContext, ContextStep } from "../src/loop/context.js";
 import { PiRunner } from "../src/runtime/pi-runner.js";
+import { loadMethod, methodCatalog, type MethodContext } from "../src/methods.js";
 import type { ModelResolver } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Decision, Execution, LoopEvent } from "../src/types.js";
@@ -27,6 +28,7 @@ interface PromptData {
   assignedStep?: ContextStep;
   workspace: string;
   artifacts: string;
+  methods?: MethodContext;
 }
 interface SeenRun { channel: string; contexts: Context[] }
 const opened: { root: string; store: BlackboardStore; controller: LoopController }[] = [];
@@ -111,6 +113,69 @@ function proposal(input: PromptData): Decision {
 }
 
 describe("real Pi inner loop with the two-Agent outer loop", () => {
+  it("carries built-in methods from planning through execution and fresh review with existing tools", async () => {
+    const test = setup((run, context, input) => {
+      if (run.channel === "offline-execute") {
+        expect(input.assignedStep?.methodIds).toEqual(["baseline-authz"]);
+        expect(input.methods?.catalog).toBeUndefined();
+        expect(Object.keys(input.methods!.cards)).toEqual(["baseline-authz"]);
+        expect(input.methods!.cards["baseline-authz"]).toContain(loadMethod("baseline-authz").execute);
+        const artifact = join(input.artifacts, "method-fixture.txt");
+        if (run.contexts.length === 1) return message([
+          { type: "toolCall", id: "method-write", name: "write", arguments: { path: artifact, content: syntheticArtifact } },
+        ], "toolUse");
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "write", isError: false });
+        return json({ summary: "Saved synthetic controls", result: "done",
+          evidence: [{ ref: "e", path: artifact, description: "Synthetic integration fixture only" }],
+          facts: [{ ref: "f", description: "Synthetic fixture was written", evidenceRefs: ["e"] }],
+          findings: [{ key: "method-fixture", title: "Synthetic fixture hypothesis", target: "local fixture only",
+            status: "lead", factRefs: ["f"], evidenceRefs: ["e"], next: "Review synthetic controls" }] });
+      }
+      expect(input.methods?.catalog).toEqual(methodCatalog());
+      if (!input.blackboard.completedSteps) {
+        expect(input.methods?.cards).toEqual({});
+        if (run.contexts.length === 1) return message([
+          { type: "toolCall", id: "method-read", name: "read", arguments: { path: join(input.methods!.directory!, "baseline-authz.json") } },
+        ], "toolUse");
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+        expect(JSON.stringify(context.messages.at(-1))).toContain(loadMethod("baseline-authz").execute);
+        const planned = plan();
+        planned.steps![0]!.methodIds = ["baseline-authz"];
+        return json(planned);
+      }
+      expect(input.methods?.cards).toEqual({ "baseline-authz": loadMethod("baseline-authz").review });
+      if (run.contexts.length === 1) return message([
+        { type: "toolCall", id: "method-evidence-read", name: "read", arguments: { path: input.blackboard.evidence[0]!.path } },
+      ], "toolUse");
+      expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      expect(JSON.stringify(context.messages.at(-1))).toContain("identity=B: expected denied");
+      return json({ ...proposal(input), ...(input.blackboard.projection.mode === "metacog" ? {
+        reviews: [{ findingId: input.blackboard.findings[0]!.id, status: "closed" as const, rating: "unrated" as const,
+          reason: "Synthetic labels match; reopen if fixture expectations change. No live target was tested." }],
+      } : {}) });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "completed", outcome: "NOT_REPRODUCED", completedSteps: 1 });
+    expect(board.steps[0]!.methodIds).toEqual(["baseline-authz"]);
+    expect(board.facts).toHaveLength(1);
+    expect(board.evidence).toHaveLength(1);
+    expect(board.findings).toHaveLength(1);
+    expect(board.findings[0]).toMatchObject({ key: "method-fixture", status: "closed", rating: "unrated" });
+    expect(test.store.runs().map(run => run.mode)).toEqual(["decide", "execute", "decide", "metacog"]);
+    for (const run of test.seen) {
+      expect(run.contexts[0]?.messages).toHaveLength(1);
+      expect(run.contexts[0]?.tools?.map(tool => tool.name)).toEqual(
+        run.channel === "offline-execute" ? ["read", "write", "edit", "powershell"] : ["read"]);
+    }
+    for (const run of test.store.runs()) {
+      const saved = JSON.parse(readFileSync(join(test.store.dataDir, "runs", run.id, "input.json"), "utf8"));
+      const savedMethods = JSON.parse(saved.userPrompt.split("\n").at(-1)!).methods;
+      expect(savedMethods).toBeDefined();
+      if (run.mode === "execute") expect(savedMethods.cards["baseline-authz"]).toContain(loadMethod("baseline-authz").execute);
+    }
+  });
+
   it.each([false, true])("commits real tool evidence and completes after review, with premature NEED_INPUT and directory read: %s", async prematureInput => {
     const test = setup((run, context, input) => {
       if (run.channel === "offline-execute") {

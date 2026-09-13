@@ -45,6 +45,8 @@ export interface Step {
   id: string; goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string;
   priority: number; status: StepStatus; attempts: number; runId: string | null; leaseUntil: number | null; result?: string;
   combination?: Combination;
+  /** Optional built-in guidance IDs; not observations or completion evidence. */
+  methodIds?: string[];
 }
 export interface Evidence { id: string; path: string; pathBase?: "task"; sha256: string; bytes: number; description: string; runId: string; stepId: string; excerpt?: string }
 export interface Impact { capability: string; object: string; result: string; scope: string; prerequisites: string }
@@ -68,7 +70,7 @@ export interface BoardSnapshot {
   usage: Usage; completedSteps: number; noProgressCount: number; lastMetaStep: number; lastMetaRevision: number; elapsedMs?: number;
   attempts?: Attempt[];
 }
-export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination }
+export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[] }
 export interface Decision {
   summary: string;
   steps?: StepProposal[];

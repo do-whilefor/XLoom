@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { stepMethodIdsSchema } from "./methods.js";
 
 const text = (max = 8_000) => z.string().trim().min(1).max(max).refine((value) => !value.includes("\0"), "Must not contain NUL characters");
 const id = text(256);
@@ -93,6 +94,7 @@ export const decisionSchema = z.object({
     evidencePlan: text(),
     priority,
     combination: combinationSchema.optional(),
+    methodIds: stepMethodIdsSchema.optional(),
   }).strict()).max(32).optional(),
   goals: z.array(z.object({ id, description: text(), parentId: id }).strict()).max(32).optional(),
   updateSteps: z.array(z.object({
