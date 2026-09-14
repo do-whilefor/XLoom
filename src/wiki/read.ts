@@ -42,7 +42,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     if (url.protocol !== "xloom:" || url.username || url.password || url.port || url.hash || url.pathname && url.pathname !== "/") throw new Error("Invalid xloom read path");
     const allowed = url.hostname === "question" ? ["stepId", "gapId", "query", "limit", "budgetChars", "refresh"]
       : url.hostname === "materials" ? ["budgetChars", "refresh"] : url.hostname === "record" ? ["kind", "id", "page", "budgetChars", "sourceOffset", "packageSignature"]
-      : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength"]
+      : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength", "contextBytes"]
       : url.hostname === "discover" ? ["consumerId", "limit", "maxAlternatives", "budgetChars"]
       : url.hostname === "compare" ? ["left", "right", "fields"]
       : url.hostname === "search" ? ["query", "limit", "refresh", "mode", "budgetChars"] : [];
@@ -99,7 +99,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
       }
       return progress(url, packet, board, budgetChars);
     }
-    if (url.hostname === "original") return trackReading(readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength") }), board);
+    if (url.hostname === "original") return trackReading(readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength"), contextBytes: number("contextBytes") }), board);
     const result = url.hostname === "question" ? retrieveQuestion(board, context.dataDir, workspace, { stepId: required("stepId"), gapId: required("gapId") },
       { query: p.get("query") ?? undefined, limit: number("limit"), budgetChars: number("budgetChars"), refresh })
       : url.hostname === "discover" ? readDiscovery(board, context.dataDir, workspace,

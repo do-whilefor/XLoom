@@ -120,6 +120,15 @@ organization.json 增加 optional maintenance 导航：检索提示／问题缺�
 最多 8 KiB，返回 omittedBefore/omittedAfter；按原件路径继续阅读上下文时保留原件
 ID 和条件，不能把局部窗口当全文。正文是资料，不是新的系统指令。
 
+原文命中同时附带 `contextReadPath`，在精确命中范围的前后各展开最多 1,024 字节，
+用于检查片段附近的前提、身份／版本和否定条件。可在 original URI 中指定
+`contextBytes=0–2048`（每侧上限），总范围不得超过 8,192 字节；默认不展开。
+扩展边缘向内对齐 UTF-8 字符，保留完整命中；显式命中范围本身切断字符仍会报错。
+`focusLocator` 保留原命中范围，`locator`、范围哈希和 `reading` 覆盖均对应实际交付
+的扩展字节。CLI 对应 `read-original --context-bytes 1024`。每次仍校验完整原件，
+不增加持久正文副本。邻近窗口可能遗漏远处的条件，仍需查看省略范围与来源包；
+扩展会增加交付字节，不能据此宣称判断更准确。
+
 Wiki／精确记录／能力发现返回的证据元数据现在同时提供 `originalReadPath`，可直接
 精读已登记归档；`path` 仍是派生 Wiki 页面，`bodyIncluded=false` 表示本包没有原件
 正文。省略 `byteLength` 时，原件入口从 `byteOffset`（默认 0）读取最多 4,096 字节，
@@ -188,7 +197,7 @@ budgetChars 默认 16000、范围 1024–64000，按完整紧凑 JSON（含重�
 交付；装不下时返回 budget_exhausted，不先交付无来源的原件命中或候选结论。
 可缩小 query、limit、consumerId，或增加 budgetChars 后继续。
 预算失败包按剩余空间保留最多三个 deferredRefs 供 record／Wiki 文件导航；单个
-来源闭包超过最大预算时，从任务 wiki/index.md 找到页面与原件继续读，不能原样重查。
+来源闭包超过最大预算时，沿 record 的 nextReadPath 分批补读，不能原样重查。
 底层 Wiki 结果中的 budgetDeferredCount
 区分来源包预算不足；deferredCount 还包括超过命中条数的结果。完整交付选中的
 材料可以 complete=true，同时仍有 top-k 省略；这不是全库穷尽、来源真实性或答案正确的声明。
@@ -277,7 +286,8 @@ Decide 的 `rag` 在此模式下只给问题导航，避免再附上一份重复
 
 卡片的 `xloom://record?kind=...&id=...` 读取当前完整记录及明确来源闭包；Wiki 块
 还带 `page`。原件记录会连同引用它的事实、更正一起返回。记录读取默认预算 16,000，
-可增加到 64,000；放不下时整体延后，仍可按原件或 Wiki 文件入口分段阅读。
+可增加到 64,000；仍放不下时按完整记录分批交付，通过 `nextReadPath` 继续读取。
+单条完整记录超限时再使用原件或 Wiki 文件入口，不能把空包当作已读取。
 
 `blackboard.sqlite` 的 `material_receipts` 保存键和资料签名，并与成功的规划决定
 在同一事务提交。提示未装入、读取未完整交付、规划失败或取消都不推进相应记录。

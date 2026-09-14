@@ -13,7 +13,7 @@ const fingerprint = (s: Stats) => [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].j
 const inside = (root: string, file: string) => { const r = relative(root, file); return r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r); };
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 export interface OriginalLocator { evidenceId: string; sha256: string; byteOffset: number; byteLength: number }
-export type OriginalReadRequest = Omit<OriginalLocator, "byteLength"> & { byteLength?: number };
+export type OriginalReadRequest = Omit<OriginalLocator, "byteLength"> & { byteLength?: number; contextBytes?: number };
 export function originalReadPath(locator: OriginalReadRequest): string {
   return `xloom://original?${new URLSearchParams(Object.entries(locator).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))}`;
 }
@@ -80,7 +80,7 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
   const tokens = [...new Set(groups.flatMap(group => group.alternatives.flatMap(item => item.tokens)))];
   if (!tokens.length) throw new Error("Query has no searchable terms");
   return withIndexCache(dataDir, workspace, (db, index) => {
-    type Hit = { locator: OriginalLocator; readPath: string; snippet: string; score: number; matchedTerms: string[]; matches?: { groupId: string; expression: string; coverage: string }[] };
+    type Hit = { locator: OriginalLocator; readPath: string; contextReadPath: string; snippet: string; score: number; matchedTerms: string[]; matches?: { groupId: string; expression: string; coverage: string }[] };
     type Window = { offset: number; byteLength: number };
     const lanes: Hit[][] = groups.map(() => []), laneMatches = groups.map(() => 0);
     const issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
@@ -154,7 +154,7 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
             counts[groupIndex] = counts[groupIndex]! + 1;
             const score = retainedTerms.reduce((sum, term) => sum + 1 + Math.min(term.length, 24) / 24, 0)
               + (queryGroups ? 100 * retainedTerms.length / best.tokens.length : 0);
-            candidates[groupIndex]!.push({ locator, readPath: originalReadPath(locator), snippet, matchedTerms: retainedTerms, score,
+            candidates[groupIndex]!.push({ locator, readPath: originalReadPath(locator), contextReadPath: originalReadPath({ ...locator, contextBytes: 1024 }), snippet, matchedTerms: retainedTerms, score,
               ...(queryGroups ? { matches: [{ groupId: group.id, expression: best.expression, coverage: retainedTerms.length === best.tokens.length ? "full_expression" : "partial_expression" }] } : {}) });
             candidates[groupIndex]!.sort(order); if (candidates[groupIndex]!.length > limit) candidates[groupIndex]!.length = limit;
           });
@@ -185,7 +185,7 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
     const valid = interleaveCandidates(lanes.map(lane => lane.filter(hit => !unavailable.has(hit.locator.evidenceId)).map(hit => merged.get(hitKey(hit))!)), hitKey).slice(0, limit);
     return { generator: wikiGenerator, type: "original_search", evidence: false, boardRevision: board.revision, query,
       coverage: "All registered task evidence bodies, indexed in overlapping UTF-8 windows. Unchanged file fingerprints reuse term postings; candidate originals are fully hash/size/UTF-8 verified before delivery. No private transcripts or other tasks.",
-      notice: "Lexical source windows are navigation, not independent evidence or an answer. Read originals and inspect conditions/corrections. Warm no-match is not a fresh integrity audit and does not establish absence; use refresh=true to rebuild from bytes.",
+      notice: "Lexical source windows are navigation, not independent evidence or an answer. Use contextReadPath for nearby qualifications and source packages for corrections; distant conditions may still be omitted. Warm no-match is not a fresh integrity audit and does not establish absence; use refresh=true to rebuild from bytes.",
       index,
       ...(queryGroups ? { queryGroups: groups.map((group, i) => ({ id: group.id, matchedWindows: laneMatches[i], deliveredWindows: valid.filter(hit => hit.matches?.some(match => match.groupId === group.id)).length,
         fullExpressionWindows: valid.filter(hit => hit.matches?.some(match => match.groupId === group.id && match.coverage === "full_expression")).length })),
@@ -221,29 +221,51 @@ export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: s
   const byteLength = request.byteLength ?? Math.min(4096, evidence.bytes - byteOffset);
   if (!Number.isSafeInteger(byteOffset) || byteOffset < 0 || !Number.isSafeInteger(byteLength) || byteLength < 1 || byteLength > 8192 || byteOffset + byteLength > evidence.bytes)
     throw new Error("Original locator must be within the registered file, with byteLength 1–8192");
+  const contextBytes = request.contextBytes ?? 0;
+  if (!Number.isSafeInteger(contextBytes) || contextBytes < 0 || contextBytes > 2048)
+    throw new Error("contextBytes must be an integer from 0 to 2048 per side");
+  const rangeStart = Math.max(0, byteOffset - contextBytes), rangeEnd = Math.min(evidence.bytes, byteOffset + byteLength + contextBytes);
+  if (rangeEnd - rangeStart > 8192) throw new Error("Original range with context exceeds 8192 bytes; reduce byteLength or contextBytes");
   const chunks: Buffer[] = [];
   scan(evidence, dataDir, workspace, () => {}, (chunk, offset) => {
-    const start = Math.max(byteOffset, offset), end = Math.min(byteOffset + byteLength, offset + chunk.length);
+    const start = Math.max(rangeStart, offset), end = Math.min(rangeEnd, offset + chunk.length);
     if (start < end) chunks.push(Buffer.from(chunk.subarray(start - offset, end - offset)));
   });
-  let selected = Buffer.concat(chunks);
+  const collected = Buffer.concat(chunks);
+  let focus = collected.subarray(byteOffset - rangeStart, byteOffset - rangeStart + byteLength);
   // Default pages end on a UTF-8 boundary; explicit search locators remain exact.
   if (request.byteLength === undefined && byteOffset + byteLength < evidence.bytes) {
     for (let removed = 0; removed < 4; removed++) {
-      try { new TextDecoder("utf-8", { fatal: true }).decode(selected); break; }
-      catch { if (removed === 3) break; selected = selected.subarray(0, -1); }
+      try { new TextDecoder("utf-8", { fatal: true }).decode(focus); break; }
+      catch { if (removed === 3) break; focus = focus.subarray(0, -1); }
     }
   }
-  let text: string;
-  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(selected); }
-  catch { throw new Error("Locator splits UTF-8 characters; use an exact returned search locator"); }
-  const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset, byteLength: selected.length };
-  const end = byteOffset + selected.length;
+  const decode = (bytes: Buffer) => {
+    try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+    catch { throw new Error("Locator splits UTF-8 characters; use an exact returned search locator"); }
+  };
+  // Expansion never makes an invalid explicit anchor look valid.
+  decode(focus);
+  const focusLocator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset, byteLength: focus.length };
+  let selected = focus, deliveredOffset = byteOffset;
+  if (contextBytes) {
+    let start = 0;
+    while ((collected[start]! & 0xc0) === 0x80) start++;
+    deliveredOffset = rangeStart + start;
+    selected = collected.subarray(start, Math.min(evidence.bytes, byteOffset + focus.length + contextBytes) - rangeStart);
+    for (let removed = 0; removed < 3; removed++) {
+      try { decode(selected); break; } catch { selected = selected.subarray(0, -1); }
+    }
+  }
+  const text = decode(selected);
+  const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: deliveredOffset, byteLength: selected.length };
+  const end = deliveredOffset + selected.length;
   return { generator: wikiGenerator, type: "original_read", evidence: false, boardRevision: board.revision, locator, rangeSha256: hash(selected),
+    ...(contextBytes ? { focusLocator, contextBytes } : {}),
     originalFile: evidencePath(evidence, dataDir, workspace), integrity: "verified", text,
-    omittedBefore: byteOffset, omittedAfter: evidence.bytes - end,
+    omittedBefore: deliveredOffset, omittedAfter: evidence.bytes - end,
     ...(end < evidence.bytes ? { nextReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: end }) } : {}),
-    ...(byteOffset ? { startReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: 0 }) } : {}),
+    ...(deliveredOffset ? { startReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: 0 }) } : {}),
     sourceContextReadPath: `xloom://record?${new URLSearchParams({ kind: "evidence", id: evidence.id })}`,
-    notice: "Verified archive bytes, not a Wiki page or a new observation. Follow nextReadPath/startReadPath for omitted context; preserve source conditions and corrections from the delivered source package. Delivery does not mean reviewed or true." };
+    notice: "Verified archive bytes, not a Wiki page or a new observation. Context expansion is bounded and may omit distant conditions. Follow nextReadPath/startReadPath for omitted context; preserve source conditions and corrections from the delivered source package. Delivery does not mean reviewed or true." };
 }

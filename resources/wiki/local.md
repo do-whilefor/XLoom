@@ -45,6 +45,11 @@ acknowledge navigation or review sources; a fresh role may reread unchanged mate
   reports more); use the exact readPath for full current records and conditions.
 - `xloom://record?kind=<kind>&id=<exact ID>` expands the full source/correction package;
   blocks also require `page=<page ID>`. budgetChars defaults to 16000, range 1024–64000.
+  Follow nextReadPath on overflow. At the maximum budget, source_page delivers whole
+  records across signed pages; keep all pages' conditions/corrections together.
+  Completion means this reader received the package, not that it reviewed it or still
+  retains every page after compaction. Re-read pages when needed. A changed package
+  rejects an old cursor; a single oversized record provides a fileReadPath fallback.
   Read unchanged sources too when needed: a fresh role has not retained their text.
   Only fully delivered record packages advance local navigation; successful planning
   commits announced signatures, while failed/cancelled planning keeps them pending.
@@ -57,13 +62,19 @@ acknowledge navigation or review sources; a fresh role may reread unchanged mate
   after full original SHA-256/size verification. Inspect omittedBefore/omittedAfter
   and sourceContext; use the originalFile path for wider context. Filesystem read
   offset/limit do not apply to xloom URIs. Matching text never resolves a gap.
+  Original hits also provide contextReadPath, expanding up to 1024 bytes per side
+  to inspect nearby qualifications. contextBytes accepts 0–2048 per side; the whole
+  range must fit 8192 bytes. UTF-8 expansion edges align inward; the explicit focus
+  must remain valid. focusLocator preserves the match, while locator/rangeSha256
+  and reading coverage describe actual delivered bytes. Distant conditions may
+  remain omitted; inspect nextReadPath/startReadPath and sourceContextReadPath.
 - `xloom://search?query=<URL-encoded terms>&limit=6` searches originals without a gap.
   Equivalent CLI actions: `question --step S-id --gap gap-id [--query ...]`,
   `search-originals --query ...`, and `read-original --evidence E-id --sha256 HASH
-  --byte-offset N --byte-length N`. All require the same --task / --workspace values.
+  --byte-offset N --byte-length N [--context-bytes 1024]`. All require the same --task / --workspace values.
   Missing/changed/non-UTF-8 sources are reported, not treated as negative evidence.
   Result limits bound delivery, not the streamed corpus. Do not retry unchanged
-  queries when retrievalProgress says stop_repeating_query; inspect originals,
+  queries when retrievalProgress says stop_repeating_query or stop_repeating_incomplete_query; follow continuation paths, inspect originals,
   narrow the missing input or obtain a new observation.
 - Search reuses unchanged metadata tokens and original window postings in task-local
   `cache/retrieval.sqlite`. Returned records come from the current board; delivered

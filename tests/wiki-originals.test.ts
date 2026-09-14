@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import type { BoardSnapshot } from "../src/types.js";
 import { gapReadPath } from "../src/knowledge/gaps.js";
-import { searchOriginals, readOriginal } from "../src/wiki/originals.js";
+import { searchOriginals, readOriginal, originalReadPath } from "../src/wiki/originals.js";
 import { retrieveQuestion } from "../src/wiki/questions.js";
 import { retrievalContext } from "../src/wiki/retrieval.js";
 import { runLocal } from "../src/wiki/local.js";
@@ -52,6 +52,83 @@ describe("gap-driven original search and located reading", () => {
       expect(readOriginal(board, root, root, result.hits[0]!.locator).text).toContain(body.includes("LOCAL_ONLY") ? "downloadGrant" : "下载授权");
       for (const hit of result.hits) expect(readOriginal(board, root, root, hit.locator).text).toBe(hit.snippet);
     }
+  });
+  it("expands a search hit to nearby prerequisites and counterconditions without changing the exact hit", () => {
+    const { board, root, body } = fixture("unrelated prefix\n".repeat(5000)
+      + "PRECONDITION: identity alice, version v1 only.\n" + ".".repeat(300)
+      + " downloadGrant=OBSERVED " + ".".repeat(1300) + "\nCOUNTERCONDITION: actual download was DENIED.\n"
+      + ".".repeat(3000) + "DISTANT: still requires a separate review.");
+    const before = structuredClone(board), hit = searchOriginals(board, root, root, "downloadGrant").hits[0]!;
+    expect(hit.snippet).not.toContain("PRECONDITION"); expect(hit.snippet).not.toContain("COUNTERCONDITION");
+    const url = new URL(hit.contextReadPath);
+    expect(url.searchParams.get("contextBytes")).toBe("1024");
+    const read = readOriginal(board, root, root, { ...hit.locator, contextBytes: 1024 });
+    expect(read.focusLocator).toEqual(hit.locator);
+    expect(read.text).toContain("PRECONDITION: identity alice, version v1 only.");
+    expect(read.text).toContain("COUNTERCONDITION: actual download was DENIED.");
+    expect(read.text).not.toContain("DISTANT");
+    const bytes = Buffer.from(body).subarray(read.locator.byteOffset, read.locator.byteOffset + read.locator.byteLength);
+    expect(read.text).toBe(bytes.toString("utf8"));
+    expect(read.rangeSha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(read.locator.byteLength).toBeLessThanOrEqual(8192);
+    expect(readOriginal(board, root, root, hit.locator).text).toBe(hit.snippet);
+    expect(board).toEqual(before);
+  });
+  it("aligns only expanded edges across Chinese/emoji and stream boundaries, preserving the focus", () => {
+    const prefix = "中🙂".repeat(9361), focus = "下载授权", suffix = "🙂边".repeat(1000);
+    const { board, root, body } = fixture(prefix + focus + suffix);
+    const locator = { evidenceId: "E-one", sha256: board.evidence[0]!.sha256, byteOffset: Buffer.byteLength(prefix), byteLength: Buffer.byteLength(focus) };
+    for (const contextBytes of [0, 1, 2, 3, 4, 7, 1024, 2048]) {
+      const read = readOriginal(board, root, root, { ...locator, contextBytes });
+      const start = read.locator.byteOffset, end = start + read.locator.byteLength;
+      expect(read.text).toContain(focus); expect(read.text).not.toContain("�");
+      expect(start).toBeLessThanOrEqual(locator.byteOffset); expect(start).toBeGreaterThanOrEqual(locator.byteOffset - contextBytes);
+      expect(end).toBeGreaterThanOrEqual(locator.byteOffset + locator.byteLength);
+      expect(end).toBeLessThanOrEqual(locator.byteOffset + locator.byteLength + contextBytes);
+      expect(Buffer.from(read.text)).toEqual(Buffer.from(body).subarray(start, end));
+      expect(read.omittedBefore).toBe(start); expect(read.omittedAfter).toBe(Buffer.byteLength(body) - end);
+      expect(new URL(read.nextReadPath!).searchParams.get("byteOffset")).toBe(String(end));
+    }
+    // Even with valid surrounding characters, a split explicit focus is rejected.
+    expect(() => readOriginal(board, root, root, { ...locator, byteOffset: locator.byteOffset + 1, contextBytes: 1024 })).toThrow("splits UTF-8");
+    expect(() => readOriginal(board, root, root, { ...locator, byteLength: 1, contextBytes: 1024 })).toThrow("splits UTF-8");
+    const defaultPage = readOriginal(board, root, root, { evidenceId: "E-one", sha256: locator.sha256, byteOffset: 0, contextBytes: 1024 });
+    expect(defaultPage.focusLocator!.byteLength).toBeLessThanOrEqual(4096);
+    expect(Buffer.from(defaultPage.text)).toEqual(Buffer.from(body).subarray(0, defaultPage.locator.byteLength));
+  });
+  it("bounds context at file edges and rejects invalid budgets, stale or foreign locators and tampering outside the range", () => {
+    const f = fixture("前🙂 downloadGrant 后🙂"), locator = searchOriginals(f.board, f.root, f.root, "downloadGrant").hits[0]!.locator;
+    const read = readOriginal(f.board, f.root, f.root, { ...locator, contextBytes: 2048 });
+    expect(read).toMatchObject({ text: f.body, omittedBefore: 0, omittedAfter: 0 });
+    expect(read.nextReadPath).toBeUndefined(); expect(read.startReadPath).toBeUndefined();
+    for (const extra of [{ contextBytes: -1 }, { contextBytes: 2049 }, { contextBytes: 1.5 }, { contextBytes: NaN },
+      { contextBytes: 1024, sha256: "stale" }, { contextBytes: 1024, evidenceId: "E-other-task" }])
+      expect(() => readOriginal(f.board, f.root, f.root, { ...locator, ...extra })).toThrow();
+    const long = fixture("x ".repeat(10000)), anchor = { evidenceId: "E-one", sha256: long.board.evidence[0]!.sha256, byteOffset: 100, byteLength: 8192, contextBytes: 1 };
+    expect(() => readOriginal(long.board, long.root, long.root, anchor)).toThrow("exceeds 8192");
+    writeFileSync(long.file, long.body.slice(0, -1) + "!");
+    expect(() => readOriginal(long.board, long.root, long.root, { ...anchor, byteLength: 100 })).toThrow("SHA-256/size mismatch");
+    const outside = join(long.root, "outside"); mkdirSync(outside); writeFileSync(join(outside, "other.txt"), long.body);
+    symlinkSync(outside, join(long.root, "evidence", "linked"), "junction"); long.board.evidence[0]!.path = "evidence/linked/other.txt";
+    expect(() => readOriginal(long.board, long.root, long.root, { ...anchor, byteLength: 100 })).toThrow("escaped its task archive");
+  });
+  it("tracks the bytes actually delivered by native context reads and leaves fresh readers independent", async () => {
+    const { board, root } = fixture("prefix ".repeat(50) + "downloadGrant" + " suffix".repeat(50));
+    const tool = createWorkspaceReadTool(root, undefined, { dataDir: root, snapshot: () => board });
+    const read = async (path: string) => JSON.parse((await tool.execute("read", { path })).content[0]!.text as string);
+    const hit = searchOriginals(board, root, root, "downloadGrant").hits[0]!;
+    const expanded = await read(hit.contextReadPath);
+    expect(expanded.reading).toMatchObject({ fullyDeliveredOriginals: 1, originalsWithUnreadBytes: 0 });
+    // Prefix is outside the search focus and must still count as delivered.
+    expect(hit.locator.byteOffset).toBeGreaterThan(0);
+    const prefix = originalReadPath({ ...hit.locator, byteOffset: 0, byteLength: 6 });
+    expect((await read(prefix)).reading.repeatedOriginalRange).toBe(true);
+    const fresh = createWorkspaceReadTool(root, undefined, { dataDir: root, snapshot: () => board });
+    const freshRead = JSON.parse((await fresh.execute("read", { path: prefix })).content[0]!.text as string);
+    expect(freshRead.reading).toMatchObject({ fullyDeliveredOriginals: 0, originalsWithUnreadBytes: 1 });
+    expect(freshRead.reading.repeatedOriginalRange).toBeUndefined();
+    await expect(tool.execute("read", { path: hit.contextReadPath + "&contextBytes=1" })).rejects.toThrow("duplicate");
+    await expect(tool.execute("read", { path: hit.readPath + "&contextBytes=2049" })).rejects.toThrow("contextBytes");
   });
   it.each(["tampered", "missing", "binary"])("reports %s originals as incomplete and withholds hits", kind => {
     const { board, root, file } = fixture();
@@ -104,6 +181,11 @@ describe("gap-driven original search and located reading", () => {
       expect(result.originals.hits).toHaveLength(1);
       const locator = result.originals.hits[0].locator;
       expect(runLocal(["read-original", ...common, "--evidence", locator.evidenceId, "--sha256", locator.sha256, "--byte-offset", String(locator.byteOffset), "--byte-length", String(locator.byteLength)]).output).toMatchObject({ integrity: "verified" });
+      const readArgs = ["read-original", ...common, "--evidence", locator.evidenceId, "--sha256", locator.sha256, "--byte-offset", String(locator.byteOffset), "--byte-length", String(locator.byteLength)];
+      expect(runLocal([...readArgs, "--context-bytes", "1024"]).output).toEqual(readOriginal(board, root, root, { ...locator, contextBytes: 1024 }));
+      expect(runLocal([...readArgs, "--context-bytes", "0"]).output).toEqual(readOriginal(board, root, root, locator));
+      for (const value of ["-1", "2049", "1.5"]) expect(() => runLocal([...readArgs, `--context-bytes=${value}`])).toThrow("contextBytes");
+      expect(() => runLocal(["search-originals", ...common, "--query", "downloadGrant", "--context-bytes", "1"])).toThrow("do not apply");
       expect(runLocal(["search-originals", ...common, "--query", "downloadGrant"]).output).toMatchObject({ inspectedCount: 1 });
       expect(runLocal(["search-originals", ...common, "--query", "downloadGrant", "--refresh"]).output).toMatchObject({ index: { updated: 1, reused: 0, indexedBytes: board.evidence[0]!.bytes } });
       expect(db.prepare("SELECT value FROM board WHERE id=1").get()!.value).toBe(saved);
