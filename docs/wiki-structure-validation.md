@@ -62,3 +62,6 @@ node --import tsx scripts/validate-wiki-structure.ts --live --output .xloom/chec
 通用问题记录、实验观察对比、跨轮紧凑交付和页面检查缓存尚未在本批移植。
 建议下一批先验证“原件精读 → 条件／更正理解 → 后续动作”的回放，再减少重复
 读取；目录和检索提示的存在不能代替这条验证路径。
+
+后续精读入口、同角色重复交付提示与真实 Chat／Run 回放见
+[原件精读与模式验证](reading-modes-validation.md)；上面的首次回放结果保留为历史记录。

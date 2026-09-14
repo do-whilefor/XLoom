@@ -16,8 +16,10 @@ export function retrieveQuestion(board: BoardSnapshot, dataDir: string, workspac
   const query = options.query ?? gapSearchQuery(question);
   const base = { generator: wikiGenerator, type: "question_context", evidence: false, boardRevision: board.revision, questionRef: ref,
     answerSupport: "not_assessed", queryOrigin: options.query === undefined ? "step_gap" : "explicit_query", query };
-  const incomplete = { ...base, complete: false, status: "budget_exhausted", readPath: gapReadPath(ref),
+  const overflow = { ...base, complete: false, status: "budget_exhausted", readPath: gapReadPath(ref),
     notice: "Full question/source material exceeds delivery budget; increase budgetChars or narrow the query. Omitted material is not absent; no gap was resolved." };
+  const incomplete = JSON.stringify(overflow).length <= budget ? overflow
+    : { type: "question_context", evidence: false, complete: false, status: "budget_exhausted" };
   const questionSize = JSON.stringify({ ...base, question }).length;
   if (questionSize > budget / 2) return incomplete;
   const originals = searchOriginals(board, dataDir, workspace, query, options.limit ?? 3, options.refresh);
@@ -28,7 +30,8 @@ export function retrieveQuestion(board: BoardSnapshot, dataDir: string, workspac
   const unique = [...new Map(anchors.map(item => [JSON.stringify(item), item])).values()];
   const sourceContext = retrieveWiki(board, dataDir, workspace, "", { anchors: unique, limit: Math.max(1, unique.length), budgetChars: Math.max(1, Math.floor((budget - questionSize) / 2)) });
   const result = { ...base, question, originals, sourceContext,
-    complete: originals.complete && !sourceContext.deferredCount && !sourceContext.missingAnchors.length,
+    complete: originals.complete && !sourceContext.deferredCount && !sourceContext.missingAnchors.length
+      && !sourceContext.records.some(record => "status" in record && record.status === "source_missing"),
     status: "inspect_material", next: "Read matched original locators and the full sourceContext (including conditions, corrections and counterevidence). Narrow query to each remaining input. Decide may create a bounded Step with revisits or defer; resolution still requires evidence-backed Facts." };
   return JSON.stringify(result).length <= budget ? result : incomplete;
 }

@@ -6,6 +6,7 @@ import { planningMaterials } from "./materials.js";
 import { retrieveWiki } from "./retrieval.js";
 import { refKey, retrievalDocuments, type RetrievalRef } from "./catalog.js";
 import { readDiscovery, searchTask } from "./query.js";
+import { createReadingTracker } from "./reading.js";
 
 export interface TaskReadContext {
   dataDir: string; snapshot: () => BoardSnapshot; materialBaseline?: Record<string, string>;
@@ -15,6 +16,7 @@ export interface TaskReadContext {
  * network, alternate session, or implicit research-state mutation. */
 export function createTaskReader(workspace: string, context: TaskReadContext) {
   const seen = new Map<string, string>();
+  const trackReading = createReadingTracker();
   const baseline = { ...context.materialBaseline };
   const announce = (items: { key: string; signature: string }[]) => {
     for (const item of items) baseline[item.key] = item.signature;
@@ -56,9 +58,9 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
         announce(retrievalDocuments(board).documents.filter(doc => keys.has(refKey(doc.ref)))
           .map(doc => ({ key: refKey(doc.ref), signature: wikiDigest(doc) })));
       }
-      return packet;
+      return trackReading(packet, board, budgetChars);
     }
-    if (url.hostname === "original") return readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength") ?? 4096 });
+    if (url.hostname === "original") return trackReading(readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength") }), board);
     const result = url.hostname === "question" ? retrieveQuestion(board, context.dataDir, workspace, { stepId: required("stepId"), gapId: required("gapId") },
       { query: p.get("query") ?? undefined, limit: number("limit"), budgetChars: number("budgetChars"), refresh })
       : url.hostname === "discover" ? readDiscovery(board, context.dataDir, workspace,
@@ -71,7 +73,10 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     const key = `${url.hostname}?${[...p].filter(([key]) => key !== "refresh").sort(([a], [b]) => a.localeCompare(b)).map(pair => JSON.stringify(pair)).join("&")}`;
     const progress = !result.complete ? "resolve_incomplete_retrieval" : seen.get(key) === signature ? "stop_repeating_query" : "inspect_material";
     if (result.complete) seen.set(key, signature);
-    return { ...result, retrievalProgress: progress,
+    const budget = number("budgetChars") ?? (url.hostname === "search" && !p.has("mode") ? Infinity : 16000);
+    const hinted = { ...result, retrievalProgress: progress,
       progressNotice: progress === "stop_repeating_query" ? "Same query and current material already delivered in this run. Read its originals, narrow the missing input or obtain a new observation; repeating the query is not progress." : undefined };
+    if (JSON.stringify(hinted).length > budget) delete hinted.progressNotice;
+    return trackReading(JSON.stringify(hinted).length <= budget ? hinted : result, board, budget);
   };
 }

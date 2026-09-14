@@ -139,6 +139,25 @@ describe("Pi runtime isolation", () => {
     await expect(runner.run(input)).rejects.toThrow(/Final response protocol validation failed after one repair.*Conflicting/);
     expect(calls).toBe(2); await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("repairs first-observation conditions without inventing causal Fact IDs", async () => {
+    const input = await request(); let calls = 0;
+    input.snapshot.goals = [{ id: "G0", description: "Fixture", parentId: null, status: "active", factIds: [] }];
+    const conditions = { requires: [], missing: ["Unverified local input"], scope: "local fixture", stateVersion: "v1", expectedCapability: "Observe bytes", counterEvidence: [] };
+    const step = { goalId: "G0", from: [], description: "Read the fixture", successSignal: "Read back bytes", evidencePlan: "Archive source bytes", priority: 1 };
+    const invalid = { summary: "First observation", steps: [{ ...step, combination: conditions }] };
+    const repaired = { summary: "First observation", steps: [{ ...step, description: `${step.description}. Unverified conditions: ${JSON.stringify(conditions)}` }] };
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (++calls === 1) return message([{ type: "text", text: JSON.stringify(invalid) }]);
+      expect(context.tools).toEqual([]);
+      expect(JSON.stringify(context.messages.at(-1))).toContain("omit combination and retain every unverified condition");
+      expect(JSON.stringify(context.messages.at(-1))).toContain("Never invent a Fact ID");
+      expect(JSON.stringify(context.messages)).toContain("Unverified local input");
+      return message([{ type: "text", text: JSON.stringify(repaired) }]);
+    }) }) });
+    expect((await runner.run(input)).output).toEqual(repaired);
+    expect(calls).toBe(2); expect(input.snapshot.facts).toEqual([]);
+  });
   it("creates fresh independent Agents with exact tool capabilities and uses Decide for metacog", async () => {
     const seen: Context[] = [];
     const options: AgentOptions[] = [];

@@ -204,6 +204,7 @@ describe("compact built-in prompts", () => {
       "NEED_INPUT: open lead/hit with missing external input in next; excludes pending work/unwritten files",
       "NOT_REPRODUCED: all hypotheses closed after key-variable coverage and blind-spot review",
       "Blackboard omissions are not negative evidence; user context is unverified",
+      "No required Fact IDs: omit combination, retain conditions in description",
       "Check factIndex evidence and supersedes for older capabilities", "abandon/replace stale projection.stepReviews plans",
       "Check identity/state compatibility; preserve partial capabilities; failed conditions do not disprove other combinations",
     ]) expect(userPrompt).toContain(rule);
@@ -236,9 +237,10 @@ describe("compact built-in prompts", () => {
     expect(protocol.split("Checkpoints:")).toHaveLength(2);
     for (const rule of [
       "write complete JSON to checkpointFile", "never edit checkpointFile", 'id:"unique-batch-id"', "execution:{same contract},yieldToDecide:false",
-      "Only controller acceptance commits evidence; reuse returned IDs/keys",
-      "Submit new, uncommitted records only",
-      "Set yieldToDecide:true on the last tool call for fresh planning, not Goal completion",
+      "Evidence: only ref/path/description", "Rejected writes create no file; rewrite",
+      "Controller acceptance commits; reuse returned IDs/keys",
+      "Submit uncommitted records only",
+      "Last call yieldToDecide:true requests planning, not Goal completion",
     ]) expect(protocol).toContain(rule);
   });
 });

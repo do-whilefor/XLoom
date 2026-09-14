@@ -4,8 +4,16 @@ Optional research output, not another task or evidence channel. Use only when an
 explanation connecting recorded material is worth retaining. Existing records
 already have automatic pages; do not rewrite them as notes after every Step.
 
-Read `wiki.indexFile` with existing read to find current pages, sources and review
-warnings. Keep original observations in artifacts and commit them as usual.
+Use a delivered native source package for current pages, conditions and review
+warnings. Open `wiki.indexFile` only to discover missing pages or author history;
+do not reopen the same complete package through index/page/record just to confirm
+it exists. Wiki files are derived explanations, never archive originals.
+Follow each evidence record's `originalReadPath` to inspect verified archive bytes;
+`nextReadPath` continues long originals and `startReadPath` returns to earlier
+omitted context. Search snippets and metadata are not full original reading.
+The same-role `reading` hints identify repeated records and remaining original
+bytes; they neither hide content nor acknowledge review. Fresh roles still need
+their own source reading. Keep original observations in artifacts and commit them as usual.
 Never submit a Wiki page as original evidence or use its text to bypass a review.
 
 Add optional `wikiPages` to the existing Execute final JSON or checkpoint's
@@ -98,6 +106,11 @@ Title/directory/retrieval-metadata changes do not acknowledge source changes and
 do not change a block's factual dependency signature.
 
 ## Metadata-only updates
+
+Metadata-only maintenance needs no new Evidence/Fact. Cite existing IDs in summary;
+do not register reading/audit logs, copied originals or Wiki before/after reports as
+new observations merely to prove maintenance. With no new observation, return
+`result: "no_progress"` and `wikiPages`; controller acceptance records the revision.
 
 To rename/move an existing page or change its hints without reevaluating its
 judgments, omit `blocks`. For existing block titles/hints use `blockMetadata`:

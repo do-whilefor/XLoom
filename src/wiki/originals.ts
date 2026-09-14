@@ -12,8 +12,9 @@ const fingerprint = (s: Stats) => [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].j
 const inside = (root: string, file: string) => { const r = relative(root, file); return r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r); };
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 export interface OriginalLocator { evidenceId: string; sha256: string; byteOffset: number; byteLength: number }
-export function originalReadPath(locator: OriginalLocator): string {
-  return `xloom://original?${new URLSearchParams(Object.entries(locator).map(([key, value]) => [key, String(value)]))}`;
+export type OriginalReadRequest = Omit<OriginalLocator, "byteLength"> & { byteLength?: number };
+export function originalReadPath(locator: OriginalReadRequest): string {
+  return `xloom://original?${new URLSearchParams(Object.entries(locator).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))}`;
 }
 
 function archivePath(evidence: Evidence, dataDir: string, workspace: string): string {
@@ -150,11 +151,12 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
   });
 }
 
-export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: string, locator: OriginalLocator) {
-  const evidence = board.evidence.find(item => item.id === locator.evidenceId);
+export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: string, request: OriginalReadRequest) {
+  const evidence = board.evidence.find(item => item.id === request.evidenceId);
   if (!evidence) throw new Error("Unknown evidence ID in this task");
-  if (locator.sha256 !== evidence.sha256) throw new Error("Stale evidence locator; search the current original again");
-  const { byteOffset, byteLength } = locator;
+  if (request.sha256 !== evidence.sha256) throw new Error("Stale evidence locator; search the current original again");
+  const { byteOffset } = request;
+  const byteLength = request.byteLength ?? Math.min(4096, evidence.bytes - byteOffset);
   if (!Number.isSafeInteger(byteOffset) || byteOffset < 0 || !Number.isSafeInteger(byteLength) || byteLength < 1 || byteLength > 8192 || byteOffset + byteLength > evidence.bytes)
     throw new Error("Original locator must be within the registered file, with byteLength 1–8192");
   const chunks: Buffer[] = [];
@@ -162,12 +164,24 @@ export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: s
     const start = Math.max(byteOffset, offset), end = Math.min(byteOffset + byteLength, offset + chunk.length);
     if (start < end) chunks.push(Buffer.from(chunk.subarray(start - offset, end - offset)));
   });
-  const selected = Buffer.concat(chunks);
+  let selected = Buffer.concat(chunks);
+  // Default pages end on a UTF-8 boundary; explicit search locators remain exact.
+  if (request.byteLength === undefined && byteOffset + byteLength < evidence.bytes) {
+    for (let removed = 0; removed < 4; removed++) {
+      try { new TextDecoder("utf-8", { fatal: true }).decode(selected); break; }
+      catch { if (removed === 3) break; selected = selected.subarray(0, -1); }
+    }
+  }
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(selected); }
   catch { throw new Error("Locator splits UTF-8 characters; use an exact returned search locator"); }
+  const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset, byteLength: selected.length };
+  const end = byteOffset + selected.length;
   return { generator: wikiGenerator, type: "original_read", evidence: false, boardRevision: board.revision, locator, rangeSha256: hash(selected),
     originalFile: evidencePath(evidence, dataDir, workspace), integrity: "verified", text,
-    omittedBefore: byteOffset, omittedAfter: evidence.bytes - byteOffset - byteLength,
-    notice: "Exact original range, not the whole document or a new observation. Inspect omitted context and explicit source conditions before drawing a conclusion." };
+    omittedBefore: byteOffset, omittedAfter: evidence.bytes - end,
+    ...(end < evidence.bytes ? { nextReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: end }) } : {}),
+    ...(byteOffset ? { startReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: 0 }) } : {}),
+    sourceContextReadPath: `xloom://record?${new URLSearchParams({ kind: "evidence", id: evidence.id })}`,
+    notice: "Verified archive bytes, not a Wiki page or a new observation. Follow nextReadPath/startReadPath for omitted context; preserve source conditions and corrections from the delivered source package. Delivery does not mean reviewed or true." };
 }

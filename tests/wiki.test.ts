@@ -214,8 +214,12 @@ describe("task Wiki and explicit provenance", () => {
     expect(projectContext(request)).not.toHaveProperty("wikiPages");
     const prompt = buildRunPrompt(request); const data = JSON.parse(prompt.userPrompt.split("\n").at(-1)!);
     expect(data.wiki.indexFile).toBe(join(store.dataDir, "wiki", "index.md"));
+    expect(data.wiki.notice).toContain("Native source packages include current source-change warnings");
+    expect(data.wiki.notice).toContain("a complete package needs no index reread");
+    expect(data.wiki.submission).toContain("Metadata-only maintenance needs no new Evidence/Fact");
     expect(existsSync(data.wiki.authoringGuide)).toBe(true);
     expect(readFileSync(data.wiki.authoringGuide, "utf8")).toContain("wikiPages");
+    expect(readFileSync(data.wiki.authoringGuide, "utf8")).toContain("Metadata-only maintenance needs no new Evidence/Fact");
     expect(JSON.stringify(data.wiki).length).toBeLessThan(1000);
     request.wikiProjectionError = "Synthetic projection failure";
     expect(JSON.parse(buildRunPrompt(request).userPrompt.split("\n").at(-1)!).wiki.status).toBe("unavailable");

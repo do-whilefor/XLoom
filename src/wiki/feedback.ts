@@ -16,7 +16,8 @@ export function materialFeedback(delivery: MaterialDelivery): string {
 export function retrievalFeedback(value: object): string {
   const result = value as { type?: string; questionRef?: { stepId: string; gapId: string }; originals?: object; wiki?: object; items?: unknown[]; searchTruncated?: boolean;
     hits?: unknown[]; index?: IndexStats; issues?: unknown[]; deferredWindows?: number; deferredCount?: number;
-    complete?: boolean; retrievalProgress?: string; locator?: { evidenceId: string; byteOffset: number; byteLength: number }; integrity?: string };
+    complete?: boolean; retrievalProgress?: string; locator?: { evidenceId: string; byteOffset: number; byteLength: number }; integrity?: string;
+    reading?: { newRecords: number; repeatedRecords: number; originalsWithUnreadBytes: number; fullyDeliveredOriginals: number; repeatedOriginalRange?: boolean } };
   if (result.type === "planning_materials") return materialFeedback(value as MaterialDelivery);
   const lines: string[] = [];
   if (result.type === "task_search") {
@@ -45,5 +46,11 @@ export function retrievalFeedback(value: object): string {
   } else if (result.type === "retrieval") lines.push(`来源包：读取 ${result.hits?.length ?? 0} 项，${result.deferredCount ?? 0} 项待展开。`);
   if (result.complete === false) lines.push("资料交付尚不完整：请处理缺失原件或扩大读取预算。");
   if (result.retrievalProgress === "stop_repeating_query") lines.push("本轮相同查询没有带来新资料：请读取原文、缩小缺口或取得新观察。");
+  if (result.reading) {
+    const r = result.reading;
+    if (r.repeatedRecords) lines.push(`本轮已交付过其中 ${r.repeatedRecords} 项资料；可直接检查原件，避免换入口重复读取。`);
+    if (r.originalsWithUnreadBytes) lines.push(`${r.originalsWithUnreadBytes} 份相关原件仍有未精读字节；详情提供下一原件入口。`);
+    if (r.repeatedOriginalRange) lines.push("本轮已读取过此原件范围；已重新校验完整文件，正文仍按原样返回。");
+  }
   return lines.join("\n\n");
 }

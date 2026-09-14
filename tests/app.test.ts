@@ -38,6 +38,28 @@ function setup(options: AppOptions = {}, describeModel?: NonNullable<AppOptions[
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
 describe("saved task navigation", () => {
+  it.each(["paused", "error"])("retains an idle task's %s diagnosis through app close and reopen", async status => {
+    const test = setup();
+    if (status === "error") test.runner.run.mockRejectedValue(new Error("Synthetic original checksum failure"));
+    await test.app.runGoal("Preserve the final run diagnosis");
+    const before = test.app.snapshot(); expect(before.status).toBe(status);
+    await test.app.close();
+    expect(readSavedBoard(test.root)).toEqual(before);
+    const reopened = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(reopened);
+    expect(reopened.snapshot()).toEqual(before);
+  });
+
+  it("still cancels and saves an active Run when closing", async () => {
+    const test = setup(), started = Promise.withResolvers<void>();
+    test.runner.run.mockImplementation(request => new Promise((_resolve, reject) => {
+      started.resolve(); request.signal.addEventListener("abort", () => reject(new Error("Synthetic stopped request")), { once: true });
+    }));
+    const running = test.app.runGoal("Interrupt active fixture"); await started.promise;
+    await test.app.close(); await running;
+    expect(readSavedBoard(test.root).status).toBe("stopped");
+    expect(existsSync(workspaceLockPath(test.root))).toBe(false);
+  });
+
   it("lists without mutation and opens a historical task without running a model, retaining the selection on restart", async () => {
     const test = setup();
     await test.app.runGoal("First synthetic research");

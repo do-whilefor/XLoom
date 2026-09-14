@@ -49,4 +49,13 @@ describe("conservative model decision format compatibility", () => {
     expect(decisionRepairGuidance("steps.0: Unrecognized key(s) in object: 'id'")).toContain("Preserve all prerequisite and counterevidence values");
     expect(decisionRepairGuidance("Unknown Fact")).toBe("");
   });
+
+  it("rejects an empty combination without dropping its unverified conditions", () => {
+    const input = { summary: "First observation", steps: [{ ...step, from: [], combination: { ...combination, requires: [], counterEvidence: [] } }] };
+    expect(normalizeDecisionInput(input, board)).toEqual({ value: input, changes: [] });
+    expect(decisionSchema.safeParse(input).success).toBe(false);
+    const guidance = decisionRepairGuidance("steps.0.combination.requires: Array must contain at least 1 element(s)");
+    expect(guidance).toContain("omit combination and retain every unverified condition");
+    expect(guidance).toContain("Never invent a Fact ID or discard conditions");
+  });
 });

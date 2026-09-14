@@ -49,7 +49,7 @@ export function runLocal(argv: string[]): { output: object; exitCode: number } {
     const output = action === "search" ? retrieveWiki(board, values.task, values.workspace, values.query ?? "", { limit, budgetChars, anchors, refresh: values.refresh })
       : action === "question" ? retrieveQuestion(board, values.task, values.workspace, { stepId: required("step"), gapId: required("gap") }, { query: values.query, limit, budgetChars, refresh: values.refresh })
       : action === "search-originals" ? searchOriginals(board, values.task, values.workspace, required("query"), limit, values.refresh)
-      : action === "read-original" ? readOriginal(board, values.task, values.workspace, { evidenceId: required("evidence"), sha256: required("sha256"), byteOffset: offset, byteLength: number(values["byte-length"]) ?? 4096 })
+      : action === "read-original" ? readOriginal(board, values.task, values.workspace, { evidenceId: required("evidence"), sha256: required("sha256"), byteOffset: offset, byteLength: number(values["byte-length"]) })
       : action === "organize" ? organizeWiki(board) : action === "discover" ? discoverKnowledge(board)
       : action === "gaps" ? { type: "gap_review", evidence: false, boardRevision: board.revision, items: gapQueue(board) } : auditWiki(board, values.task, values.workspace);
     // Do not open BlackboardStore: its constructor owns locks and recovers runs.

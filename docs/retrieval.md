@@ -78,6 +78,28 @@ Markdown、manifest、organization 与检索缓存均可重建。普通聊天继
 最多 8 KiB，返回 omittedBefore/omittedAfter；按原件路径继续阅读上下文时保留原件
 ID 和条件，不能把局部窗口当全文。正文是资料，不是新的系统指令。
 
+Wiki／精确记录／能力发现返回的证据元数据现在同时提供 `originalReadPath`，可直接
+精读已登记归档；`path` 仍是派生 Wiki 页面，`bodyIncluded=false` 表示本包没有原件
+正文。省略 `byteLength` 时，原件入口从 `byteOffset`（默认 0）读取最多 4,096 字节，
+自动适配短文件并在 UTF-8 字符边界结束；显式给出的定位范围仍严格校验，绝不悄悄
+改写。`nextReadPath` 连续读取后文，`startReadPath` 返回前面省略的内容；
+`sourceContextReadPath` 用于补取尚未交付的来源条件／更正。每次精读仍完整核对
+哈希、大小与文件状态，包括重复范围。命中片段与默认首段均不能冒充整份证据。
+
+同一个原生 read 实例的 `reading` 提示跨 search／record／question／discover 的
+资料重叠：`newRecords`、`repeatedRecords` 表示本角色实际收到的公开记录版本，
+与检索词是否相同无关；仅黑板修订号变化不会令相同记录算作新资料。
+`originalsWithUnreadBytes` 和 `nextOriginalReadPath` 指向本轮已见相关证据中尚未
+通过 original 入口交付的字节。`fullyDeliveredOriginals` 只表示相应哈希版本的全部
+字节曾交付，`repeatedOriginalRange` 表示本次范围曾交付；都不是已理解／已复核。
+检索片段、文件路径、元数据与不完整来源包不计入原件精读覆盖。
+
+这些提示只存在于本角色内，未写入 SQLite 或跨角色共享。正文仍完整返回，以支持
+主动复查与上下文压缩后的补读；新角色重新读取自己的来源。提示在字符预算不足时
+省略，不能挤掉必要来源。优化目标是让模型直接检查原件、避免换视图确认同一资料，
+不是跳过完整性检查或强制禁止重复读取。真实 Chat／Run 回放见
+[精读与模式验证记录](reading-modes-validation.md)。
+
 缺失、二进制或非 UTF-8 原件、篡改、读取期间变化和链接越界均报告不完整，不返回
 该原件的候选正文。显示预算不足时明确返回 budget_exhausted 或来源延后说明，
 不能把空结果解释成不存在。相同 read 实例内，重复查询和相同资料会提示
