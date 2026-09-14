@@ -7,6 +7,7 @@ import { terms } from "./catalog.js";
 import { wikiGenerator } from "./format.js";
 import { cachedEntry, pruneEntries, putEntry, removeEntry, withIndexCache } from "./cache.js";
 import { wikiDigest } from "./model.js";
+import { compileQueryGroups, interleaveCandidates, type QueryGroup } from "./search-groups.js";
 
 const fingerprint = (s: Stats) => [s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs].join(":");
 const inside = (root: string, file: string) => { const r = relative(root, file); return r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r); };
@@ -73,14 +74,16 @@ export function readVerifiedArchive(evidence: Evidence, dataDir: string, workspa
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false) {
+export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false, queryGroups?: QueryGroup[]) {
   if (!query.trim() || query.length > 4000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("Use a nonempty query up to 4000 characters and limit 1–20.");
-  const tokens = [...new Set(terms(query))];
+  const groups = compileQueryGroups(query, queryGroups);
+  const tokens = [...new Set(groups.flatMap(group => group.alternatives.flatMap(item => item.tokens)))];
   if (!tokens.length) throw new Error("Query has no searchable terms");
   return withIndexCache(dataDir, workspace, (db, index) => {
-    type Hit = { locator: OriginalLocator; readPath: string; snippet: string; score: number; matchedTerms: string[] };
+    type Hit = { locator: OriginalLocator; readPath: string; snippet: string; score: number; matchedTerms: string[]; matches?: { groupId: string; expression: string; coverage: string }[] };
     type Window = { offset: number; byteLength: number };
-    const hits: Hit[] = [], issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
+    const lanes: Hit[][] = groups.map(() => []), laneMatches = groups.map(() => 0);
+    const issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
     const windows = new Map<string, Window[]>();
     index.removed = pruneEntries(db, "original", new Set(board.evidence.map(item => item.id)));
     for (const evidence of board.evidence) {
@@ -126,26 +129,41 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
     for (const evidence of board.evidence) {
       if (!windows.has(evidence.id) || !selected.has(evidence.id)) continue;
       const offsets = new Set([...selected.get(evidence.id)!].map(unit => windows.get(evidence.id)![unit]?.offset));
-      const candidates: Hit[] = []; let matches = 0;
+      const candidates: Hit[][] = groups.map(() => []), counts = groups.map(() => 0); let matches = 0;
       try {
         scan(evidence, dataDir, workspace, (text, offset) => {
           if (!offsets.has(offset)) return;
           const words = new Set(terms(text)), matchedTerms = tokens.filter(term => words.has(term));
           if (!matchedTerms.length) return;
           matches++;
-          const key = [...matchedTerms].sort((a, b) => b.length - a.length)[0]!;
-          const position = Math.max(0, text.toLowerCase().indexOf(key));
-          let start = Math.max(0, position - 160), end = Math.min(text.length, position + 1200);
-          if (start > 0 && /[\uDC00-\uDFFF]/.test(text[start]!)) start--;
-          if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
-          const snippet = text.slice(start, end);
-          const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: offset + Buffer.byteLength(text.slice(0, start)), byteLength: Buffer.byteLength(snippet) };
-          if (!locator.byteLength) return;
-          candidates.push({ locator, readPath: originalReadPath(locator), snippet, matchedTerms, score: matchedTerms.reduce((sum, term) => sum + 1 + Math.min(term.length, 24) / 24, 0) });
-          candidates.sort(order); if (candidates.length > limit) candidates.length = limit;
+          groups.forEach((group, groupIndex) => {
+            const alternatives = group.alternatives.map(item => ({ ...item, found: item.tokens.filter(term => words.has(term)) }))
+              .filter(item => item.found.length).sort((a, b) => Number(b.found.length === b.tokens.length) - Number(a.found.length === a.tokens.length)
+                || b.found.length / b.tokens.length - a.found.length / a.tokens.length || b.found.length - a.found.length);
+            const best = alternatives[0]; if (!best) return;
+            const key = [...best.found].sort((a, b) => b.length - a.length)[0]!;
+            const position = originalTermOffset(text, key);
+            let start = Math.max(0, position - 160), end = Math.min(text.length, position + 1200);
+            if (start > 0 && /[\uDC00-\uDFFF]/.test(text[start]!)) start--;
+            if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end]!)) end--;
+            const snippet = text.slice(start, end), snippetTerms = new Set(terms(snippet));
+            const retainedTerms = best.found.filter(term => snippetTerms.has(term));
+            if (!retainedTerms.length) return;
+            const locator = { evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: offset + Buffer.byteLength(text.slice(0, start)), byteLength: Buffer.byteLength(snippet) };
+            if (!locator.byteLength) return;
+            counts[groupIndex] = counts[groupIndex]! + 1;
+            const score = retainedTerms.reduce((sum, term) => sum + 1 + Math.min(term.length, 24) / 24, 0)
+              + (queryGroups ? 100 * retainedTerms.length / best.tokens.length : 0);
+            candidates[groupIndex]!.push({ locator, readPath: originalReadPath(locator), snippet, matchedTerms: retainedTerms, score,
+              ...(queryGroups ? { matches: [{ groupId: group.id, expression: best.expression, coverage: retainedTerms.length === best.tokens.length ? "full_expression" : "partial_expression" }] } : {}) });
+            candidates[groupIndex]!.sort(order); if (candidates[groupIndex]!.length > limit) candidates[groupIndex]!.length = limit;
+          });
         });
         index.verifiedOriginals++; matchedWindows += matches;
-        hits.push(...candidates); hits.sort(order); if (hits.length > limit) hits.length = limit;
+        candidates.forEach((items, i) => {
+          laneMatches[i] = laneMatches[i]! + counts[i]!;
+          lanes[i]!.push(...items); lanes[i]!.sort(order); if (lanes[i]!.length > limit) lanes[i]!.length = limit;
+        });
       } catch (error) { issues.push({ evidenceId: evidence.id, reason: (error as Error).message }); }
     }
     for (const item of inspected) {
@@ -153,14 +171,46 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
       catch { issues.push({ evidenceId: item.evidenceId, reason: "Evidence changed during search; retry" }); }
     }
     const unavailable = new Set(issues.map(item => item.evidenceId));
-    const valid = hits.filter(hit => !unavailable.has(hit.locator.evidenceId));
+    const hitKey = (hit: Hit) => JSON.stringify(hit.locator);
+    const merged = new Map<string, Hit>();
+    for (const lane of lanes) for (const hit of lane) {
+      const old = merged.get(hitKey(hit));
+      if (!old) merged.set(hitKey(hit), hit);
+      else if (queryGroups) {
+        old.score = Math.max(old.score, hit.score);
+        old.matches = [...new Map([...old.matches ?? [], ...hit.matches ?? []].map(match => [match.groupId, match])).values()];
+        old.matchedTerms = [...new Set([...old.matchedTerms, ...hit.matchedTerms])];
+      }
+    }
+    const valid = interleaveCandidates(lanes.map(lane => lane.filter(hit => !unavailable.has(hit.locator.evidenceId)).map(hit => merged.get(hitKey(hit))!)), hitKey).slice(0, limit);
     return { generator: wikiGenerator, type: "original_search", evidence: false, boardRevision: board.revision, query,
       coverage: "All registered task evidence bodies, indexed in overlapping UTF-8 windows. Unchanged file fingerprints reuse term postings; candidate originals are fully hash/size/UTF-8 verified before delivery. No private transcripts or other tasks.",
       notice: "Lexical source windows are navigation, not independent evidence or an answer. Read originals and inspect conditions/corrections. Warm no-match is not a fresh integrity audit and does not establish absence; use refresh=true to rebuild from bytes.",
       index,
+      ...(queryGroups ? { queryGroups: groups.map((group, i) => ({ id: group.id, matchedWindows: laneMatches[i], deliveredWindows: valid.filter(hit => hit.matches?.some(match => match.groupId === group.id)).length,
+        fullExpressionWindows: valid.filter(hit => hit.matches?.some(match => match.groupId === group.id && match.coverage === "full_expression")).length })),
+        groupingNotice: "Per-input lexical windows, not fulfilled prerequisites. A displayed expression may match partially; matchedTerms describe this snippet only." } : {}),
       complete: !issues.length, inspectedCount: inspected.length, registeredCount: board.evidence.length, matchedWindows,
       deferredWindows: Math.max(0, matchedWindows - valid.length), issues, hits: valid };
   });
+}
+
+/** Locate normalized identifier/CJK matches in original UTF-16 coordinates so
+ * full-width spelling and supplementary characters retain exact byte locators. */
+function originalTermOffset(text: string, term: string): number {
+  for (const match of text.matchAll(/[\p{L}\p{N}_]+(?:[-/.][\p{L}\p{N}_]+)*/gu)) {
+    if (!terms(match[0]).includes(term)) continue;
+    const direct = match[0].toLowerCase().indexOf(term);
+    if (direct >= 0) return match.index + direct;
+    let normalized = "", offset = 0; const positions: number[] = [];
+    for (const char of match[0]) {
+      const value = char.normalize("NFKC").toLowerCase(); normalized += value;
+      for (let i = 0; i < value.length; i++) positions.push(offset);
+      offset += char.length;
+    }
+    return match.index + (positions[Math.max(0, normalized.indexOf(term))] ?? 0);
+  }
+  return 0;
 }
 
 export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: string, request: OriginalReadRequest) {

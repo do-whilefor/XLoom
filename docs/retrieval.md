@@ -57,7 +57,36 @@ Execute 的原生 `wikiPages`（最终结果或 checkpoint）支持以下字段�
 Markdown、manifest、organization 与检索缓存均可重建。普通聊天继续与研究资料隔离。
 
 本批验证与真实配置模型回放见 [Wiki 结构验证记录](wiki-structure-validation.md)。
-通用问题记录、实验观察对比、跨轮紧凑交付和页面检查缓存仍是后续工作。
+观察对比已接入，见 [观察与复核](observation-comparison.md)。跨轮交接已有新增／变更
+导航；通用问题记录、删除／组合失效差量通知、页面检查持久缓存仍是后续工作。
+
+## 多前提查询与 Wiki 维护
+
+存在显式 needs 时，默认缺口查询为每个输入建立独立检索组：type、已声明 aliases
+和 description 分别作为备选表达，另保留 missing 的整体问题查询。各组取最好的
+表达匹配，不累加同一输入的多个别名分数；精确记录引用优先，其余候选按输入组
+交错合并并去重。各前提仍为 AND；表达候选只是检索入口，不改变能力组合条件。
+
+自动 Execute RAG、question 原件／Wiki 检索及新原件关联缺口共用分组。显式传入
+question 的 query 会覆盖自动分组，普通 wiki/originals/combined 搜索继续按用户
+给定查询执行。接口不根据自然语言猜测模式，不自动生成别名。question 现在也能
+召回仅在 Wiki 解释中存在的输入描述；普通 top-k 省略不再冒充缺失来源。
+来源包因预算延后时返回 source_package_deferred；预算尚可增加时提供保留原 query
+和 limit 的 nextReadPath。达到最大预算仍不完整时保留诊断，不能把再查同一请求
+当成补全来源。原生精读入口继续核验完整原件，普通文件读取不计作原生校验。
+
+命中 matches 标明 groupId、表达和 full_expression／partial_expression，Wiki
+还区分 alias、title、metadata、body 或 combined_fields。full_expression 仅表示
+该表达的全部词项被覆盖，不是语义等价、条件兼容或输入已满足。queryGroups 的
+计数只报告候选交付，不能代替原件阅读和复核。原件 matchedTerms 只列实际返回
+片段中的词项；全角标识与 UTF-8 原文定位仍返回准确的归档字节范围。
+
+organization.json 增加 optional maintenance 导航：检索提示／问题缺失、长度超过
+8,000 字符的判断、完全相同的正文，以及没有目录或必要解释连接的根页。每项附
+精确 readPath；这些是可选写作建议，不是错误、缺失证据或可自动合并的结论。
+目录独立可能合理，长判断不得为了缩短而丢失条件。元数据维护继续保留来源基线。
+作者说明提供问题、观察、别名之间的边界。评测及模型验证见
+[检索质量记录](retrieval-quality.md)。
 
 ## 围绕缺口检索原文
 

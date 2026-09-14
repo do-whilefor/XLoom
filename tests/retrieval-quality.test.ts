@@ -11,7 +11,7 @@ it("evaluates fixed topic partitions with independent relevance and source/locat
     expect(report.unchangedBoard).toBe(true);
     expect(report.rows).toHaveLength(20);
     for (const split of report.splits) {
-      expect(split.cases).toBe(10); expect(split.recallAt5).toBeGreaterThanOrEqual(0.5);
+      expect(split.cases).toBe(10); expect(split.recallAt5).toBe(1);
       expect(split.absentQueriesCorrect).toBe(true); expect(split.sourceAndConditionChecks).toBe(true); expect(split.locatorsValid).toBe(true);
     }
     expect(report.rows.filter(row => row.id.endsWith("-deep")).every(row => row.recalled === 1)).toBe(true);

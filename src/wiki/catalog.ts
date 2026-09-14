@@ -121,6 +121,27 @@ export function organizeWiki(board: BoardSnapshot, index = buildRetrievalIndex(b
     group.push(block.ref); duplicateGroups.set(signature, group);
   }
   const usedEvidence = new Set(index.documents.flatMap(doc => doc.sources.filter(ref => ref.kind === "evidence").map(ref => ref.id)));
+  const readPath = (ref: RetrievalRef) => `xloom://record?${new URLSearchParams({ kind: ref.kind, id: ref.id, ...(ref.pageId ? { page: ref.pageId } : {}) })}`;
+  const connectedPages = new Set((board.wikiPages ?? []).flatMap(page => [
+    ...(page.parentPageId ? [page.id, page.parentPageId] : []),
+    ...page.blocks.flatMap(block => (block.requiredBlockRefs ?? []).flatMap(ref => [page.id, ref.pageId])),
+  ]));
+  const maintenance: { code: string; ref: RetrievalRef; readPath: string; action: string; relatedReadPaths?: string[] }[] = [];
+  for (const block of blocks) {
+    const hints = [block.retrievalMetadata?.page, block.retrievalMetadata?.block];
+    const usefulHints = hints.some(hint => hint && (hint.summary?.trim() || hint.questions?.length || hint.keywords?.length || hint.aliases?.length));
+    const add = (code: string, action: string, relatedReadPaths?: string[]) => maintenance.push({ code, ref: block.ref, readPath: readPath(block.ref), action, ...(relatedReadPaths ? { relatedReadPaths } : {}) });
+    if (!usefulHints) add("missing_retrieval_hints", "Consider metadata-only summary/questions for the actual object, identity and version; keep qualifications in the original judgment. Hints are optional, not missing evidence.");
+    else if (!hints.some(hint => hint?.questions?.length)) add("missing_questions", "Consider an actual question this judgment helps investigate; a question must not be rewritten as an established answer.");
+    if (block.text.length > 8000) add("large_judgment", "Review readability of this long block. Split only independent judgments; retain qualifications and explicit requiredBlockRefs when explanations depend on each other.");
+    const duplicates = duplicateGroups.get(wikiDigest(block.text))!;
+    if (duplicates.length > 1) add("duplicate_judgment", "Read source and condition differences before deciding whether to consolidate; identical text alone does not justify merging.", duplicates.filter(ref => refKey(ref) !== refKey(block.ref)).map(readPath));
+  }
+  if ((board.wikiPages?.length ?? 0) > 1) for (const page of board.wikiPages ?? []) {
+    if (connectedPages.has(page.id) || !page.blocks.length) continue;
+    const ref = { kind: "block" as const, pageId: page.id, id: page.blocks[0]!.id };
+    maintenance.push({ code: "unlinked_page", ref, readPath: readPath(ref), action: "This root page has no explicit directory or required-block connections. It may intentionally stand alone; consider navigation only if there is a real relationship." });
+  }
   return { generator: wikiGenerator, type: "organization", evidence: false, boardRevision: board.revision,
     notice: "Derived navigation and review suggestions, not evidence or a verdict. Source equality does not verify original files. No records were merged, deleted or marked reviewed.",
     counts: { records: index.documents.length - blocks.length, pages: board.wikiPages?.length ?? 0, blocks: blocks.length },
@@ -129,6 +150,7 @@ export function organizeWiki(board: BoardSnapshot, index = buildRetrievalIndex(b
     supersededFacts: board.facts.filter(fact => board.facts.some(other => other.supersedes === fact.id)).map(fact => ({ id: fact.id,
       replacedBy: board.facts.filter(other => other.supersedes === fact.id).map(other => other.id) })),
     duplicateText: [...duplicateGroups.values()].filter(group => group.length > 1).map(refs => ({ refs, action: "Review source and condition differences; identical text does not establish identical applicability." })),
+    maintenance, maintenancePolicy: { optional: true, largeJudgmentChars: 8000, notice: "Author navigation only. No missing-evidence, semantic-duplication or review verdict; metadata-only edits preserve factual review bases." },
     unreferencedEvidenceIds: board.evidence.filter(item => !usedEvidence.has(item.id)).map(item => item.id),
     topics: board.wikiPages?.map(page => ({ id: page.id, title: page.title, path: `pages/${wikiFilename("note", page.id)}`,
       parentPageId: page.parentPageId ?? null, breadcrumb: wikiBreadcrumb(board, page.id), retrievalMetadata: wikiMetadata(page),

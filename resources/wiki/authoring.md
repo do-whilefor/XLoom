@@ -74,6 +74,23 @@ These fields help lexical retrieval; they are locating hints, not new claims,
 sources, resolved questions or proof. Keep all conditions in the complete block
 text. Use an empty summary or empty arrays to clear hints.
 
+Write hints from the recorded material: summary identifies the object, actor and
+version actually observed; questions keep useful future questions in question
+form; keywords retain interface/business names; aliases contain only understood
+equivalent names. Do not add speculative synonyms to make a search succeed.
+For example, "Does an export job ID allow bob to download alice's report?" is a
+question; "bob can download alice's report" is a claim and needs its own evidence.
+Conditions, negative results and remaining inputs stay together in block text.
+
+`rag.organizationFile` includes optional `maintenance` entries with exact read
+paths for missing retrieval hints/questions, long judgments, identical text and
+pages without explicit navigation links. Inspect only relevant entries. These
+are mechanical authoring suggestions, not errors or missing evidence. A standalone
+page may be intentional; identical text may apply to different conditions. Do not
+create work merely to clear every suggestion. If splitting independent judgments,
+preserve necessary explanations with requiredBlockRefs. Hint-only updates use
+blockMetadata and must keep source-review warnings intact.
+
 A page may set `parentPageId` to another page in this task, including one created
 in the same submission, or `null` to place it at the root. Missing parents and
 cycles are rejected. Ancestor titles form a searchable breadcrumb; ancestor

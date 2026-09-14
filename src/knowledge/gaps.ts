@@ -3,6 +3,7 @@ import type { BoardSnapshot, Decision, Execution, Step } from "../types.js";
 import { capabilityIssues } from "./model.js";
 import { compareConditions, conditionsSchema, portSchema, portsMatch } from "./schema.js";
 import { wikiBasis, wikiDigest, wikiRecord, type WikiSource } from "../wiki/model.js";
+import type { QueryGroup } from "../wiki/search-groups.js";
 
 const text = (max = 2048) => z.string().trim().min(1).max(max).refine(value => !value.includes("\0"), "Must not contain NUL");
 const sourceSchema = z.object({ kind: z.enum(["fact", "evidence", "capability", "chain"]), id: text(256) }).strict();
@@ -23,6 +24,11 @@ export function gapSearchQuery(gap: Pick<GapProposal, "missing" | "needs">): str
   // Keep the whole missing-input question if all aliases would overfill a query.
   // Full needs/conditions remain in the question package for focused follow-ups.
   return expanded.length <= 4000 ? expanded : gap.missing;
+}
+export function gapSearchGroups(gap: Pick<GapProposal, "missing" | "needs">): QueryGroup[] | undefined {
+  if (!gap.needs.length) return undefined;
+  return [...gap.needs.map((need, index) => ({ id: `need:${index}`, alternatives: [...new Set([need.type, ...need.aliases, need.description])] })),
+    { id: "question", alternatives: [gap.missing] }];
 }
 export interface Gap extends GapProposal {
   sources: { source: z.infer<typeof sourceSchema>; reason: string }[];

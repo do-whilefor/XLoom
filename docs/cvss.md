@@ -30,7 +30,7 @@ Decide 仍保持只读工具集，由 Controller 计算提交的评分。
 
 本轮接入状态：CVSS 计算器已直接复用；会话、Finding、Wiki/RAG、能力链和
 缺口流程使用 Xloom 原生模块。Webounty 原 Python 会话/发现脚本没有直接调用。
-未接入观察对照工具，也没有运行示例中的目标请求。本轮只为单个 Finding
+后续已接入[观察对照与复核](observation-comparison.md)；没有运行示例中的目标请求。本轮只为单个 Finding
 评分，不相加或平均能力链成员的分数。
 
 原代码的固定 FIRST 示例、舍入和非法输入用例已迁入 Vitest；另有事务、

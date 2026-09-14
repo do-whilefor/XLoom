@@ -1,5 +1,5 @@
 import type { BoardSnapshot } from "../types.js";
-import { gapQueue, gapReadPath, gapSearchQuery, type GapRef } from "../knowledge/gaps.js";
+import { gapQueue, gapReadPath, gapSearchQuery, gapSearchGroups, type GapRef } from "../knowledge/gaps.js";
 import { refKey, retrievalDocuments, retrievalSearchText, terms, type RetrievalRef } from "./catalog.js";
 import { wikiBasis, wikiDigest } from "./model.js";
 import { wikiGenerator } from "./format.js";
@@ -90,7 +90,7 @@ export function planningMaterials(board: BoardSnapshot, baseline: Record<string,
   for (const gap of gaps.slice(0, 3)) {
     const query = gapSearchQuery(gap);
     if (!terms(query).length) continue;
-    const result = searchOriginals(board, dataDir, workspace, query, 20);
+    const result = searchOriginals(board, dataDir, workspace, query, 20, false, gapSearchGroups(gap));
     matches.set(`${gap.stepId}/${gap.gapId}`, new Set(result.hits.map(hit => hit.locator.evidenceId)));
     result.issues.forEach(issue => unavailable.add(issue.evidenceId));
   }
