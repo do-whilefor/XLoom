@@ -8,6 +8,7 @@ import { refKey, retrievalDocuments, type RetrievalRef } from "./catalog.js";
 import { readDiscovery, searchTask } from "./query.js";
 import { createReadingTracker } from "./reading.js";
 import { compareEvidence } from "../observations/read.js";
+import { createSourcePager } from "./source-pages.js";
 
 export interface TaskReadContext {
   dataDir: string; snapshot: () => BoardSnapshot; materialBaseline?: Record<string, string>;
@@ -18,16 +19,29 @@ export interface TaskReadContext {
 export function createTaskReader(workspace: string, context: TaskReadContext) {
   const seen = new Map<string, string>();
   const trackReading = createReadingTracker();
+  const sourcePage = createSourcePager();
   const baseline = { ...context.materialBaseline };
   const announce = (items: { key: string; signature: string }[]) => {
     for (const item of items) baseline[item.key] = item.signature;
     context.onAnnounced?.(items);
   };
+  const progress = <T extends { complete?: boolean }>(url: URL, result: T, board: BoardSnapshot, budget: number) => {
+    // Track unsuccessful reads too: repeating an unchanged, undersized request
+    // cannot deliver new material. Cache counters are not material changes.
+    const signature = wikiDigest(JSON.parse(JSON.stringify(result, (key, value) => key === "index" && value?.storage ? undefined : value)));
+    const key = `${url.hostname}?${[...url.searchParams].filter(([key]) => key !== "refresh").sort(([a], [b]) => a.localeCompare(b)).map(pair => JSON.stringify(pair)).join("&")}`;
+    const repeated = seen.get(key) === signature;
+    seen.set(key, signature);
+    const retrievalProgress = !result.complete ? repeated ? "stop_repeating_incomplete_query" : "resolve_incomplete_retrieval"
+      : repeated ? "stop_repeating_query" : "inspect_material";
+    const hinted = { ...result, retrievalProgress };
+    return trackReading(JSON.stringify(hinted).length <= budget ? hinted : result, board, budget);
+  };
   return (path: string) => {
     const url = new URL(path), p = url.searchParams;
     if (url.protocol !== "xloom:" || url.username || url.password || url.port || url.hash || url.pathname && url.pathname !== "/") throw new Error("Invalid xloom read path");
     const allowed = url.hostname === "question" ? ["stepId", "gapId", "query", "limit", "budgetChars", "refresh"]
-      : url.hostname === "materials" ? ["budgetChars", "refresh"] : url.hostname === "record" ? ["kind", "id", "page", "budgetChars"]
+      : url.hostname === "materials" ? ["budgetChars", "refresh"] : url.hostname === "record" ? ["kind", "id", "page", "budgetChars", "sourceOffset", "packageSignature"]
       : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength"]
       : url.hostname === "discover" ? ["consumerId", "limit", "maxAlternatives", "budgetChars"]
       : url.hostname === "compare" ? ["left", "right", "fields"]
@@ -52,16 +66,38 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
       const budgetChars = number("budgetChars") ?? 16000;
       if (budgetChars < 1024 || budgetChars > 64000) throw new Error("Record budgetChars must be 1024–64000");
       const result = retrieveWiki(board, context.dataDir, workspace, "", { anchors, limit: anchors.length, budgetChars: Math.max(1, budgetChars - 1024) });
+      if (p.has("sourceOffset")) number("sourceOffset");
+      if (p.has("packageSignature") && (!p.has("sourceOffset") || !/^[a-f0-9]{64}$/.test(required("packageSignature")))) throw new Error("Invalid source package cursor");
+      if (p.has("sourceOffset") || result.budgetDeferredCount && budgetChars === 64000) {
+        const full = retrieveWiki(board, context.dataDir, workspace, "", { anchors, limit: anchors.length });
+        if (full.records.length) {
+          const page = sourcePage(full, ref, url, budgetChars);
+          // Announce only fully delivered source packages, never partial pages.
+          if (page.complete) {
+            const keys = new Set(anchors.map(refKey));
+            announce(retrievalDocuments(board).documents.filter(doc => keys.has(refKey(doc.ref))).map(doc => ({ key: refKey(doc.ref), signature: wikiDigest(doc) })));
+          }
+          return progress(url, page, board, budgetChars);
+        }
+      }
       const complete = !result.deferredCount && !result.missingAnchors.length && !result.records.some(record => "status" in record && record.status === "source_missing");
-      const packet = { ...result, complete, readPath: path, next: "Read original ranges and preserve source conditions/corrections. A delivered record is not a reviewed or resolved gap." };
-      if (JSON.stringify(packet).length > budgetChars) return { type: "retrieval", evidence: false, complete: false, status: "budget_exhausted",
-        hits: [], records: [], deferredCount: anchors.length, next: "Increase record budgetChars (up to 64000); no source package was delivered." };
+      const nextUrl = new URL(url); nextUrl.searchParams.set("budgetChars", "64000");
+      const status = result.missingAnchors.length || result.records.some(record => "status" in record && record.status === "source_missing")
+        ? "source_missing" : result.budgetDeferredCount ? "source_package_deferred" : "inspect_material";
+      const recovery = { requestedRef: ref, readPath: path, status,
+        ...(!complete && result.budgetDeferredCount && budgetChars < 64000 ? { nextReadPath: nextUrl.href } : {}),
+        next: complete ? "Read original ranges and preserve source conditions/corrections. A delivered record is not a reviewed or resolved gap."
+          : status === "source_missing" ? "Referenced sources are missing. Inspect missingAnchors/source_missing; increasing the budget cannot restore them."
+          : "Source package exceeds the current budget. Follow nextReadPath when provided; do not repeat the same undersized request or infer that evidence is missing. At the maximum budget inspect the referenced Wiki files and their dependencies; delivery is still incomplete." };
+      const packet = { ...result, complete, ...recovery };
+      if (JSON.stringify(packet).length > budgetChars) return progress(url, { type: "retrieval", evidence: false, complete: false,
+        ...recovery, status: "budget_exhausted", hits: [], records: [], deferredCount: anchors.length }, board, budgetChars);
       if (complete) {
         const keys = new Set(anchors.map(refKey));
         announce(retrievalDocuments(board).documents.filter(doc => keys.has(refKey(doc.ref)))
           .map(doc => ({ key: refKey(doc.ref), signature: wikiDigest(doc) })));
       }
-      return trackReading(packet, board, budgetChars);
+      return progress(url, packet, board, budgetChars);
     }
     if (url.hostname === "original") return trackReading(readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength") }), board);
     const result = url.hostname === "question" ? retrieveQuestion(board, context.dataDir, workspace, { stepId: required("stepId"), gapId: required("gapId") },
@@ -71,15 +107,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
       : p.has("mode") || p.has("budgetChars") ? searchTask(board, context.dataDir, workspace, required("query"),
         { mode: p.has("mode") ? required("mode") : "originals", limit: number("limit"), budgetChars: number("budgetChars"), refresh })
       : searchOriginals(board, context.dataDir, workspace, required("query"), number("limit"), refresh);
-    // Cache work counters change between cold/warm reads, not source material.
-    const signature = wikiDigest(JSON.parse(JSON.stringify(result, (key, value) => key === "index" && value?.storage ? undefined : value)));
-    const key = `${url.hostname}?${[...p].filter(([key]) => key !== "refresh").sort(([a], [b]) => a.localeCompare(b)).map(pair => JSON.stringify(pair)).join("&")}`;
-    const progress = !result.complete ? "resolve_incomplete_retrieval" : seen.get(key) === signature ? "stop_repeating_query" : "inspect_material";
-    if (result.complete) seen.set(key, signature);
     const budget = number("budgetChars") ?? (url.hostname === "search" && !p.has("mode") ? Infinity : 16000);
-    const hinted = { ...result, retrievalProgress: progress,
-      progressNotice: progress === "stop_repeating_query" ? "Same query and current material already delivered in this run. Read its originals, narrow the missing input or obtain a new observation; repeating the query is not progress." : undefined };
-    if (JSON.stringify(hinted).length > budget) delete hinted.progressNotice;
-    return trackReading(JSON.stringify(hinted).length <= budget ? hinted : result, board, budget);
+    return progress(url, result, board, budget);
   };
 }

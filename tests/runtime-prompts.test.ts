@@ -253,11 +253,11 @@ describe("compact built-in prompts", () => {
     expect(JSON.parse(withCheckpoint.userPrompt.split("\n").at(-1)!)).toMatchObject({ checkpointFile: stagePath(request) });
     expect(protocol.split("Checkpoints:")).toHaveLength(2);
     for (const rule of [
-      "write complete JSON to checkpointFile", "never edit checkpointFile", 'id:"unique-batch-id"', "execution:{same contract},yieldToDecide:false",
+      "write(path=checkpointFile,content=", "use object content", "never edit checkpointFile", 'id:"unique-batch-id"', "execution:{same contract},yieldToDecide:false",
       "Evidence: only ref/path/description", "Rejected writes create no file; rewrite",
-      "Controller acceptance commits; reuse returned IDs/keys",
+      "Acceptance commits; reuse returned IDs/keys",
       "Submit uncommitted records only",
-      "Last call yieldToDecide:true requests planning, not Goal completion",
+      "yieldToDecide:true requests planning, not Goal completion",
     ]) expect(protocol).toContain(rule);
   });
 });

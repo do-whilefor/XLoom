@@ -12,6 +12,7 @@ import { decisionRepairGuidance } from "../src/loop/decision-input.js";
 import { wikiIssues } from "../src/wiki/model.js";
 import { evidencePath } from "../src/paths.js";
 import { zero } from "./fixtures/native-retrieval.js";
+import { retrievalFeedback } from "../src/wiki/feedback.js";
 
 const opened: { root: string; fixture: ReturnType<typeof nativeFixture> }[] = [];
 afterEach(() => { for (const { root, fixture } of opened.splice(0)) {
@@ -26,6 +27,28 @@ function setup() {
 }
 
 describe("native explicit search and capability discovery", () => {
+  it("provides a working continuation for empty evidence packages and distinguishes budget exhaustion from missing sources", () => {
+    const { root, store } = setup(); const board = store.snapshot();
+    board.steps[0]!.evidencePlan = "A long recorded evidence plan with required comparisons. ".repeat(400);
+    const read = createTaskReader(root, { dataDir: store.dataDir, snapshot: () => board });
+    const ref = board.evidence[0]!;
+    const path = `xloom://record?kind=evidence&id=${ref.id}`;
+    const first = read(path) as ReturnType<typeof read> & { nextReadPath: string };
+    expect(first).toMatchObject({ hits: [], records: [], deferredCount: 3, complete: false, status: "source_package_deferred", retrievalProgress: "resolve_incomplete_retrieval" });
+    expect(retrievalFeedback(first)).toContain(ref.id);
+    expect(retrievalFeedback(first)).toContain("来源包超过本次预算");
+    expect(retrievalFeedback(first)).toContain(first.nextReadPath);
+    expect(read(path)).toMatchObject({ retrievalProgress: "stop_repeating_incomplete_query" });
+    const complete = read(first.nextReadPath);
+    expect(complete).toMatchObject({ complete: true });
+    expect(JSON.stringify(complete)).toContain(board.steps[0]!.evidencePlan);
+    expect(JSON.stringify(complete).length).toBeLessThanOrEqual(64000);
+    board.facts[0]!.evidenceIds.push("E-missing");
+    const missing = read(first.nextReadPath);
+    expect(missing).toMatchObject({ complete: false, status: "source_missing" });
+    expect(retrievalFeedback(missing)).toContain("扩大预算不能恢复来源");
+    expect(missing).not.toHaveProperty("nextReadPath");
+  });
   it("finds authored judgments absent from original text and exposes queries to read-only planning", async () => {
     const { store, root, read, context } = setup();
     expect(read("xloom://search?query=BridgeNote")).toMatchObject({ type: "original_search", hits: [] });
@@ -118,7 +141,7 @@ describe("native explicit search and capability discovery", () => {
     expect((createTaskReader(root, context)(path) as any).retrievalProgress).toBe("inspect_material");
     const large = "xloom://discover?consumerId=C-download&budgetChars=1024";
     expect(read(large).retrievalProgress).toBe("resolve_incomplete_retrieval");
-    expect(read(large).retrievalProgress).toBe("resolve_incomplete_retrieval");
+    expect(read(large).retrievalProgress).toBe("stop_repeating_incomplete_query");
     expect(read("xloom://discover?consumerId=C-download&budgetChars=64000").retrievalProgress).toBe("inspect_material");
     expect(read("xloom://discover?consumerId=C-download&budgetChars=64000").retrievalProgress).toBe("stop_repeating_query");
   });

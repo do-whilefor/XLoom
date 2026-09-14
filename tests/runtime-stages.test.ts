@@ -418,6 +418,47 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     assertExactUsage(test);
   });
 
+  it("recovers the logged premature evidence-array close through structured write content without replaying artifacts", async () => {
+    const summary = 'Observed "quoted" labels\npath C:\\fixture\\file.txt; brackets [ ] { } remain text';
+    const test = setup((run, context, input) => {
+      if (run.channel !== "offline-execute") return planning(input);
+      const submission = JSON.parse(checkpoint(input, "structured-batch"));
+      submission.execution.summary = summary;
+      const structured = (id: string, path: string, content: unknown) => message([{ type: "toolCall", id, name: "write", arguments: { path, content } }], "toolUse");
+      if (run.contexts.length === 1) return write("artifact-once", join(input.artifacts, "fixture.txt"), artifactBody);
+      if (run.contexts.length === 2) return structured("wrong-destination", join(input.artifacts, "object.json"), submission);
+      if (run.contexts.length === 3) {
+        expect(toolText(context)).toContain("only supported for checkpointFile");
+        expect(existsSync(join(input.artifacts, "object.json"))).toBe(false);
+        // The real failure closed evidence after each object: [{...}], {...}].
+        const item = JSON.stringify(submission.execution.evidence[0]);
+        return write("malformed-array", input.checkpointFile!, `{"id":"bad","execution":{"summary":"fixture","result":"done","evidence":[${item}],${item}]}}`);
+      }
+      if (run.contexts.length === 4) {
+        expect(toolText(context)).toContain("structured object");
+        expect(existsSync(input.checkpointFile!)).toBe(false);
+        expect(test.store.snapshot().facts).toEqual([]);
+        return structured("invalid-object", input.checkpointFile!, { id: "bad-shape", execution: { summary: "Missing result" } });
+      }
+      if (run.contexts.length === 5) {
+        expect(toolText(context)).toContain("Checkpoint content is invalid");
+        expect(existsSync(input.checkpointFile!)).toBe(false);
+        return structured("structured-submit", input.checkpointFile!, submission);
+      }
+      expect(JSON.parse(toolText(context))).toMatchObject({ checkpoint: "structured-batch", committed: true });
+      expect(JSON.parse(readFileSync(input.checkpointFile!, "utf8"))).toEqual(submission);
+      if (run.contexts.length === 6) return structured("idempotent-submit", input.checkpointFile!, submission);
+      return json({ summary: "Structured checkpoint retained", result: "done" });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board, board.reason).toMatchObject({ status: "paused", completedSteps: 1 });
+    expect(board.facts).toHaveLength(1); expect(board.evidence).toHaveLength(1);
+    expect(test.store.events().filter(event => event.kind === "execution_checkpoint")).toHaveLength(1);
+    expect(test.events.filter(event => event.runtime?.type === "tool_start" && event.runtime.toolCallId === "artifact-once")).toHaveLength(1);
+    assertExactUsage(test);
+  });
+
   it.each(["json", "schema"] as const)("rejects invalid checkpoint %s before writing and preserves the previous accepted proposal through a corrected retry", async invalidKind => {
     let acceptedSource = "";
     let acceptedRevision = 0;

@@ -5,7 +5,7 @@ export function materialFeedback(delivery: MaterialDelivery): string {
   const lines = [`${delivery.baseline === "initial" ? "首次资料交接" : "本轮资料交接"}：新增 ${delivery.added} 项，更新 ${delivery.changed} 项。`];
   const gaps = new Set(delivery.items.flatMap(item => item.relatedGaps.map(ref => `${ref.stepId}/${ref.gapId}`)));
   if (gaps.size) lines.push(`展示 ${gaps.size} 个关联问题入口：${[...gaps].slice(0, 3).join("、")}${gaps.size > 3 ? "等" : ""}。`);
-  if (delivery.deferredCount) lines.push(`还有 ${delivery.deferredCount} 项未装入本轮提示，可按资料入口继续读取。`);
+  if (delivery.deferredCount) lines.push(`还有 ${delivery.deferredCount} 项未装入本轮提示。补读入口：${delivery.readPath}`);
   if (delivery.originalLinking?.unavailableSources) lines.push(`关联检索中 ${delivery.originalLinking.unavailableSources} 份原件不可用，请从问题入口查看原因。`);
   if (delivery.originalLinking?.deferredGaps) lines.push(`另有 ${delivery.originalLinking.deferredGaps} 个问题尚未检索原文，可按问题入口继续检索。`);
   lines.push("已提示 ≠ 已复核；Decide 仍需读取来源并决定下一步。");
@@ -17,6 +17,8 @@ export function retrievalFeedback(value: object): string {
   const result = value as { type?: string; questionRef?: { stepId: string; gapId: string }; originals?: object; wiki?: object; items?: unknown[]; searchTruncated?: boolean;
     hits?: unknown[]; index?: IndexStats; issues?: unknown[]; deferredWindows?: number; deferredCount?: number;
     complete?: boolean; retrievalProgress?: string; locator?: { evidenceId: string; byteOffset: number; byteLength: number }; integrity?: string;
+    status?: string; nextReadPath?: string; requestedRef?: { kind: string; id: string }; budgetDeferredCount?: number;
+    sourceDelivery?: { totalRecords: number; deliveredRecords: number; pageRecords: number; remainingRecords: number };
     reading?: { newRecords: number; repeatedRecords: number; originalsWithUnreadBytes: number; fullyDeliveredOriginals: number; repeatedOriginalRange?: boolean } };
   if (result.type === "planning_materials") return materialFeedback(value as MaterialDelivery);
   const lines: string[] = [];
@@ -43,8 +45,20 @@ export function retrievalFeedback(value: object): string {
     const loc = result.locator!;
     lines.push(`读取原文 ${loc.evidenceId}：字节 ${loc.byteOffset}–${loc.byteOffset + loc.byteLength}（右端不含），共 ${loc.byteLength} 字节。`);
     if (result.integrity === "verified") lines.push("完整原件校验通过；当前仅展示指定范围。");
-  } else if (result.type === "retrieval") lines.push(`来源包：读取 ${result.hits?.length ?? 0} 项，${result.deferredCount ?? 0} 项待展开。`);
-  if (result.complete === false) lines.push("资料交付尚不完整：请处理缺失原件或扩大读取预算。");
+  } else if (result.type === "source_page" && result.sourceDelivery) {
+    const d = result.sourceDelivery;
+    lines.push(`来源分批交付（${result.requestedRef?.id}）：本次 ${d.pageRecords} 条，累计 ${d.deliveredRecords}/${d.totalRecords} 条；交付不等于复核。`);
+  } else if (result.type === "retrieval") lines.push(`来源包${result.requestedRef ? `（${result.requestedRef.id}）` : ""}：读取 ${result.hits?.length ?? 0} 项，${result.deferredCount ?? 0} 项待展开。`);
+  if (result.complete === false) {
+    lines.push(result.status === "source_missing" ? "资料交付尚不完整：引用来源缺失，扩大预算不能恢复来源。"
+      : result.status === "budget_exhausted" || result.status === "source_package_deferred" || result.budgetDeferredCount
+        ? "资料交付尚不完整：来源包超过本次预算，未交付不代表原件缺失。"
+        : result.status === "source_page_pending" ? "来源还有后续批次，请保留各批次的条件与反证并继续补读。"
+        : result.status === "record_exceeds_budget" ? "单条完整记录超过预算，请按详情中的补读或文件入口读取。"
+        : "资料交付尚不完整：请检查详情中的原因及补读入口。");
+    if (result.nextReadPath) lines.push(`下一读取入口：${result.nextReadPath}`);
+  }
+  if (result.retrievalProgress === "stop_repeating_incomplete_query") lines.push("相同请求仍未交付完整资料；请使用补读入口或处理缺失来源，勿原样重试。");
   if (result.retrievalProgress === "stop_repeating_query") lines.push("本轮相同查询没有带来新资料：请读取原文、缩小缺口或取得新观察。");
   if (result.reading) {
     const r = result.reading;

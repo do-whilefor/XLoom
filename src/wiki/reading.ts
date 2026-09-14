@@ -13,7 +13,7 @@ export function createReadingTracker() {
   const ranges = new Map<string, [number, number][]>();
   return <T extends object>(packet: T, board: BoardSnapshot, budget = Infinity) => {
     const value = object(packet);
-    if (value.complete === false) return packet;
+    if (value.complete === false && value.type !== "source_page") return packet;
     let newRecords = 0, repeatedRecords = 0, repeatedOriginalRange = false;
     const current = new Map<string, object>();
     for (const bundle of [value, object(value.wiki), object(value.sourceContext)]) for (const entry of list(bundle.records)) {
