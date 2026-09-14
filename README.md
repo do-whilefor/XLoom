@@ -1,6 +1,6 @@
 <h1 align="center">Xloom</h1>
 
-<p align="center">基于 Pi Agent 内核的 Windows 双 Agent 安全研究 Loop，当前为 0.1 MVP。</p>
+<p align="center">基于 Pi Agent 内核的 Windows 双 Agent 安全研究 Loop</p>
 
 <p align="center">
   <a href="#使用边界"><img src="https://img.shields.io/badge/Scope-Authorized%20Security%20Research-blue" alt="Scope: Authorized Security Research"></a>

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,7 +62,10 @@ describe("reused Webounty CVSS calculator", () => {
     expect(() => calculateCvss(value)).toThrow(); expect(cvssProposalSchema.safeParse({ ...assessment(), vector: value }).success).toBe(false);
   });
   it("ships the unchanged implementation, MIT notice, functional CLI and import without stdin side effects", () => {
-    expect(readFileSync(calculatorFile, "utf8").replace(/\r\n/g, "\n")).toBe(readFileSync("webounty/scripts/cvss31-calculator.js", "utf8").replace(/\r\n/g, "\n"));
+    const provenance = JSON.parse(readFileSync(join(calculatorFile, "..", "provenance.json"), "utf8"));
+    expect(provenance.normalization).toBe("CRLF to LF, UTF-8");
+    // Pin the verified original without requiring an untracked reference checkout.
+    expect(createHash("sha256").update(readFileSync(calculatorFile, "utf8").replace(/\r\n/g, "\n")).digest("hex")).toBe(provenance.sourceSha256);
     expect(readFileSync(join(calculatorFile, "..", "LICENSE"), "utf8")).toContain("Copyright (c) 2026 w1th0ut");
     expect(JSON.parse(execFileSync(process.execPath, [calculatorFile, "--json", vector], { encoding: "utf8" })).baseScore).toBe(7.5);
     expect(execFileSync(process.execPath, [calculatorFile, vector], { encoding: "utf8" })).toContain("Score:     7.5");

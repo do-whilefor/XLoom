@@ -28,6 +28,7 @@ class MemoryTerminal implements Terminal {
   setProgress(): void {}
 }
 const cleanup: (() => Promise<void>)[] = [];
+const fixtureWorkspace = "C:\\xloom-fixture";
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
 function launch(options: { now?: () => number; restoredReason?: string } = {}) {
@@ -62,7 +63,7 @@ function launch(options: { now?: () => number; restoredReason?: string } = {}) {
   const terminal = new MemoryTerminal();
   const clipboard = { readText: vi.fn(async () => "PRIVATE_CLIPBOARD_KEY"), writeText: vi.fn(async () => true) };
   let controls!: { editor: Editor; tui: TuiAltScreen };
-  const session = runTui(controller, terminal, { clipboard, now: options.now, onReady: value => { controls = value; } });
+  const session = runTui(controller, terminal, { clipboard, workspace: fixtureWorkspace, now: options.now, onReady: value => { controls = value; } });
   const submit = (text: string): void => { controls.editor.setText(text); terminal.input("\r"); };
   const close = async (): Promise<void> => {
     if (!terminal.stopped) {
@@ -101,7 +102,7 @@ describe("ordinary chat and dual-agent task UI", () => {
     app.tui.renderNow(true);
     const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
       .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
-    expect(rows.get(3)).toContain(process.cwd());
+    expect(rows.get(3)).toContain(fixtureWorkspace);
     expect(rows.get(4)).toBe("");
     expect(rows.get(5)).toBe("");
     expect(rows.get(6)).toBe("❯ 你是什么模型？");

@@ -4,6 +4,8 @@
 from `webounty/scripts/cvss31-calculator.js`, originally adapted from Web-Vulnhunt
 in Jase-SecKit. The `.cjs` extension permits the existing CommonJS module to be
 imported from Xloom's ESM runtime; its calculator implementation is unchanged.
+The original's normalized SHA-256 is recorded in [cvss/provenance.json](cvss/provenance.json),
+so distribution integrity checks do not require a separate Webounty checkout.
 
 Copyright (c) 2026 w1th0ut (U-Sec / 无界安全).
 The complete MIT notice is preserved in [cvss/LICENSE](cvss/LICENSE).

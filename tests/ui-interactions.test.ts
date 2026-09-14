@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Editor, Terminal, TuiAltScreen } from "@earendil-works/pi-tui";
+import { visibleWidth, type Editor, type Terminal, type TuiAltScreen } from "@earendil-works/pi-tui";
 import type { BoardSnapshot, LoopEvent } from "../src/types.js";
 import type { Clipboard } from "../src/ui/clipboard.js";
 import { runTui } from "../src/ui/index.js";
@@ -38,13 +38,14 @@ function snapshot(): BoardSnapshot {
 }
 
 const cleanup: (() => Promise<void>)[] = [];
+const fixtureWorkspace = "C:\\xloom-fixture";
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
-function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板文本"), writeText: vi.fn(async () => true) }, columns = 90, rows = 24, chat = false) {
+function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板文本"), writeText: vi.fn(async () => true) }, columns = 90, rows = 24, chat = false, workspace = fixtureWorkspace) {
   const board = snapshot();
   const listeners = new Set<(event: LoopEvent) => void>();
   const controller = {
@@ -55,7 +56,7 @@ function launch(clipboard: Clipboard = { readText: vi.fn(async () => "剪贴板�
   } satisfies UiController;
   const terminal = new MemoryTerminal(columns, rows);
   let controls!: { editor: Editor; tui: TuiAltScreen };
-  const session = runTui(controller, terminal, { clipboard, onReady: (value) => { controls = value; } });
+  const session = runTui(controller, terminal, { clipboard, workspace, onReady: (value) => { controls = value; } });
   const close = async (): Promise<void> => {
     if (!terminal.stopped) {
       controls.editor.disableSubmit = false;
@@ -78,7 +79,7 @@ describe("TUI layout and input history", () => {
     expect(screen).toContain("Xloom v");
     expect(screen).toContain("⠙⢿⣦⣀⣴⡿⠋");
     expect(screen).toContain("test/test");
-    expect(screen).toContain(process.cwd());
+    expect(screen).toContain(fixtureWorkspace);
     expect(screen).toContain("idle");
     expect(screen).toContain("180 tokens");
     expect(screen).toContain("step 1");
@@ -112,7 +113,7 @@ describe("TUI layout and input history", () => {
     const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
       .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
     expect(rows.get(1)).toMatch(/^ ⠙/);
-    expect(rows.get(3)).toContain(process.cwd());
+    expect(rows.get(3)).toContain(fixtureWorkspace);
     for (let row = 4; row < firstTranscriptRow; row++) expect(rows.get(row)).toBe("");
     expect(rows.get(firstTranscriptRow)).toBe("FIRST_TRANSCRIPT_LINE");
     expect([...rows.values()]).toContain(" short draft");
@@ -120,6 +121,22 @@ describe("TUI layout and input history", () => {
     expect(rows.get(height)).toContain("idle");
     expect(rows.get(height)).not.toMatch(/^\s/);
     expect(app.editor.getPaddingX()).toBe(1);
+  });
+
+  it("truncates a long checkout path without displacing the first transcript row", () => {
+    const workspace = "C:\\very-long-checkout\\" + "nested\\".repeat(20);
+    const app = launch(undefined, 90, 24, true, workspace);
+    app.emit({ type: "notice", message: "FIRST_TRANSCRIPT_LINE" });
+    app.terminal.output = "";
+    app.tui.renderNow(true);
+    const rows = new Map([...app.terminal.output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;\d+H|$)/g)]
+      .map(match => [Number(match[1]), plainText(match[2]!).trimEnd()]));
+    expect(rows.get(3)).toContain("C:\\very-long-checkout\\");
+    expect(rows.get(3)).toMatch(/…$/);
+    expect(visibleWidth(rows.get(3)!)).toBeLessThanOrEqual(app.terminal.columns);
+    expect(rows.get(4)).toBe("");
+    expect(rows.get(5)).toBe("");
+    expect(rows.get(6)).toBe("FIRST_TRANSCRIPT_LINE");
   });
 
   it("uses Up/Down for previous/next submissions and restores a multiline unsent draft", () => {
