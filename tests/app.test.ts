@@ -318,6 +318,17 @@ describe("chat / red-team application boundary", () => {
 });
 
 describe("application model settings", () => {
+  it("applies current Chrome settings when reopening an existing task", async () => {
+    const test = setup(); await test.app.runGoal("Existing Chrome task");
+    const taskId = currentTaskId(test.root)!;
+    await test.app.runGoal("Another task before reopening");
+    test.config.chrome = { enabled: false, channel: "beta" };
+    await test.app.close();
+    const reopened = new AppController(test.root, test.configPath, test.config, { runner: test.runner, chat: test.chat, settings: test.settings }); apps.push(reopened);
+    expect(reopened.snapshot().config.chrome).toEqual(test.config.chrome);
+    reopened.openTask(taskId);
+    expect(reopened.snapshot().config.chrome).toEqual(test.config.chrome);
+  });
   it("selects models per role, persists no keys, and applies to paused tasks", async () => {
     const test = setup(); await test.app.runGoal("fixture");
     await test.app.selectModel("fixture", "model-a", "all");

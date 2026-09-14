@@ -12,7 +12,7 @@ SettingsService 只复用 Pi ModelRuntime 的本地目录、持久 API Key 和 O
 
 `decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。运行时将 `metacog` 映射到 Decide 的模型，加载简短的复核指令。每个新 run 创建新的 Pi Agent；同一次 run 可维护私有上下文并在模型瞬断后续接一次。不同 run / 角色之间没有共享 `messages`，也不让一个 Agent 总结另一方聊天。
 
-Decide / 元认知仅挂载 `read`，负责读证据、制定计划、验证交接条件与审查。Execute 使用 `read / write / edit / powershell` 完成调查和状态变更，新增权威事实 / 证据由 Execute 提交。Decide 的私有阅读历史不作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，只有 Execute 收到自己的可写 artifacts 路径；计划文件名不代表文件存在。`runtime/read.ts` 通过 Pi 的已解析路径和原生文件/图片操作扩展目录列表，同名同参数，不增加工具或修改依赖源码。
+Decide / 元认知仅挂载 `read`，负责读证据、制定计划、验证交接条件与审查。Execute 使用 `read / write / edit / powershell / chrome` 完成调查和状态变更，新增权威事实 / 证据由 Execute 提交。Decide 的私有阅读历史不作为共享聊天通道。所有运行收到当前任务公开黑板文件路径，只有 Execute 收到自己的可写 artifacts 路径；计划文件名不代表文件存在。`runtime/read.ts` 通过 Pi 的已解析路径和原生文件/图片操作扩展目录列表，同名同参数，不增加工具或修改依赖源码。
 
 一次典型闭环：Decide 读取黑板并提交 Step → Controller 校验并 claim → Execute 调查，必要时阶段性提交证据 / 事实 / 条件尝试 → Controller 归档证据并事务提交 → Execute 继续或交回 fresh Decide。最终结果结算 Step；主动交回时 Step 保持“尚未完整验证”的 `blocked` 结果，fresh Decide 另提后续工作。达到触发条件时使用 fresh Decide 元认知；提议完成时再独立复核。
 
@@ -29,6 +29,7 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 | `types.ts` / `schema.ts` | 版本化配置、FGS、运行与结果契约 | 迁移器、更多有类型的证据/关系 |
 | `app.ts` / `workspace.ts` | 聊天/任务路由、任务指针、单工作区锁、非秘密模型设置 | 会话选择与任务管理，不共享历史 |
 | `runtime/chat.ts` | 独立普通聊天 Pi Agent、四工具、取消与用量 | 可选聊天持久化，不注入红队黑板 |
+| `runtime/chrome.ts` | Execute 专用的当前 Chrome 会话连接、能力发现、原件与图片归档 | 固定 MCP stdio 适配，无通用插件或浏览器启动回退 |
 | `runtime/settings.ts` | Pi 目录、持久凭据与 OAuth callbacks | 复用 Pi 新增的供应商登录能力 |
 | `loop/context.ts` | `ContextProjector`：事实索引、因果与修正闭包、组合条件、旧依赖复核 | 更细粒度的任务上下文策略 |
 | `loop/attempts.ts` | 条件试验去重、兼容旧输出的进展标记 | 改善假设标识稳定性，不以新文件冒充进展 |
@@ -150,13 +151,15 @@ Controller 在提交前检查 NEED_INPUT 的结构性前提（考虑本次 revie
 
 ## Pi 模型复用
 
+Execute 另挂载 `runtime/chrome.ts` 的单一 `chrome` 工具，以 list／describe／call 按需发现固定 Chrome MCP 包的能力；客户端和 stdio 进程懒加载。连接固定使用 autoConnect，复用当前登录态，拒绝隔离 context，不启动浏览器。每个 run 独占连接，退出／取消关闭 stdio，Chrome 保持运行。原始调用和图片写入 run artifacts，后续仍按既有 Evidence／Fact 提交流程验证；MCP isError 转为 Pi 工具错误，传输失败不重放。详见 [Chrome](chrome.md)。
+
 使用 Pi 公开 ModelRuntime，不复制供应商实现或限制自定义 API 为三种。读取 Pi 用户目录的 auth.json、models.json 及缓存目录，由 Pi 处理已有 OAuth 登录刷新、环境/API Key 认证、供应商特有 headers 和流式请求。`models` CLI 仅列本地内置/缓存/自定义目录；运行时按需发现动态目录，遵守 PI_OFFLINE。模型身份与凭据不进入共享黑板提示词；执行期间刷新产生的凭据也加入日志/流式文本过滤。
 
-本层不会加载 Pi CLI 聊天、扩展、Skills、MCP 或额外工具。仅靠 JavaScript 扩展注册的第三方 provider 不在自动加载范围。兼容性随固定 Pi 依赖版本而定，真实账户与模型契约仍需实测。OpenCode Go 官方端点另合并 `x-opencode-session`，复用 Pi 会话 ID 或同一 resolver 的稳定备用 ID；不修改其他提供方、其他主机或 Pi 内层。
+模型解析层不会加载 Pi CLI 聊天、扩展、Skills、用户 MCP 配置或任意工具。仅靠 JavaScript 扩展注册的第三方 provider 不在自动加载范围。兼容性随固定 Pi 依赖版本而定，真实账户与模型契约仍需实测。OpenCode Go 官方端点另合并 `x-opencode-session`，复用 Pi 会话 ID 或同一 resolver 的稳定备用 ID；不修改其他提供方、其他主机或 Pi 内层。
 
 ## 验证层次
 
-Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 失败保留 / 用量差额、条件变化与重复观察；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证阶段交接、旧依赖复核、取消、预算和恢复；Context / Policy 测试覆盖递归因果闭包、事实索引、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、Decide 只读 / Execute 四工具、上下文压缩、同次瞬断续接、协议修复、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
+Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 失败保留 / 用量差额、条件变化与重复观察；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证阶段交接、旧依赖复核、取消、预算和恢复；Context / Policy 测试覆盖递归因果闭包、事实索引、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、Decide 只读 / Execute 四工具及 Chrome、上下文压缩、同次瞬断续接、协议修复、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
 
 外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
 

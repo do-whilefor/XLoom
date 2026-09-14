@@ -11,6 +11,9 @@ import { ChatSession, type ChatRequest } from "../src/runtime/chat.js";
 import type { BoardSnapshot, Decision, ModelConfig, RunRequest, RuntimeEvent } from "../src/types.js";
 import { validateDecisionReferences } from "../src/loop/references.js";
 import { stagePath, stageWriter } from "../src/runtime/stage.js";
+import { createChromeSession } from "../src/runtime/chrome.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { fileURLToPath } from "node:url";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -169,11 +172,57 @@ describe("Pi runtime isolation", () => {
     for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
-    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read"], ["read", "write", "edit", "powershell"], ["read"]]);
+    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read"], ["read", "write", "edit", "powershell", "chrome"], ["read"]]);
     expect(options.map(entry => entry.initialState?.tools?.find(tool => tool.name === "read")?.description.includes("artifact://"))).toEqual([false, true, false]);
     expect(options.every((entry) => entry.toolExecution === "sequential" && entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(seen.every((context) => context.messages.length === 1 && context.messages[0].role === "user")).toBe(true);
     expect(seen.every((context) => !JSON.stringify(context).includes("only this run") && !JSON.stringify(context).includes("DO_NOT_EXPOSE_ENV_NAME"))).toBe(true);
+  });
+  it("lets Execute discover and call Chrome through the actual Pi tool loop and closes its stdio client", async () => {
+    const input = await request("execute"); input.snapshot.config.limits.maxTurnsPerRun = 5;
+    const events: RuntimeEvent[] = []; input.onEvent = event => events.push(event);
+    let calls = 0, pid: number;
+    const close = vi.fn();
+    const runner = new PiRunner({
+      createChrome: options => {
+        const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("./fixtures/chrome-server.mjs", import.meta.url))], stderr: "ignore" });
+        const session = createChromeSession(options, () => transport);
+        return { ...session, close: async () => { pid = transport.pid!; await session.close(); close(); } };
+      },
+      resolveModel: async () => ({ model, streamFn: stream(context => {
+        calls++;
+        const args = [{ action: "list" }, { action: "describe", tool: "echo" }, { action: "call", tool: "echo", args: { value: "existing cookie session" } }][calls - 1];
+        if (args) return message([{ type: "toolCall", id: `chrome-${calls}`, name: "chrome", arguments: args }], "toolUse");
+        expect(JSON.stringify(context.messages)).toContain("existing cookie session");
+        return message([{ type: "text", text: JSON.stringify({ summary: "Browser fixture verified", result: "done" }) }]);
+      }) }),
+    });
+    expect((await runner.run(input)).output).toMatchObject({ result: "done" });
+    expect(events.filter(event => event.type === "tool_end" && event.toolName === "chrome")).toHaveLength(3);
+    expect(events.some(event => event.isError)).toBe(false);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(() => process.kill(pid!, 0)).toThrow();
+  });
+  it.each(["success", "failure", "cancel"])("closes Execute's Chrome connection on run %s", async outcome => {
+    const input = await request("execute"), controller = new AbortController(); input.signal = controller.signal;
+    const close = vi.fn(async () => {});
+    const runner = new PiRunner({ createChrome: options => ({ ...createChromeSession(options), close }),
+      resolveModel: async () => ({ model, streamFn: stream(() => {
+        if (outcome === "cancel") controller.abort();
+        return outcome === "failure" ? { ...message([], "error"), errorMessage: "fixture fatal failure" }
+          : message([{ type: "text", text: '{"summary":"fixture","result":"no_progress"}' }]);
+      }) }) });
+    if (outcome === "success") await runner.run(input); else await expect(runner.run(input)).rejects.toThrow();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it("omits Chrome when the project disables it", async () => {
+    const input = await request("execute"); input.snapshot.config.chrome = { enabled: false };
+    const createChrome = vi.fn(createChromeSession);
+    const runner = new PiRunner({ createChrome, resolveModel: async () => ({ model, streamFn: stream(context => {
+      expect(context.tools?.map(tool => tool.name)).not.toContain("chrome");
+      return message([{ type: "text", text: '{"summary":"fixture","result":"no_progress"}' }]);
+    }) }) });
+    await runner.run(input); expect(createChrome).not.toHaveBeenCalled();
   });
 
   it("only projects blackboard fields and keeps evidence excerpts", async () => {
@@ -602,7 +651,7 @@ describe("Pi runtime isolation", () => {
     const output = { summary: "Continued fixture reasoning finished", ...(mode === "execute" ? { result: "no_progress" } : {}) };
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
       calls++;
-      expect(context.tools?.map(tool => tool.name)).toEqual(mode === "execute" ? ["read", "write", "edit", "powershell"] : ["read"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(mode === "execute" ? ["read", "write", "edit", "powershell", "chrome"] : ["read"]);
       if (calls > 1) expect(context.messages.at(-1)?.role).toBe("user");
       return message(calls <= 5 ? [{ type: "thinking", thinking: `Unfinished fixture consideration ${calls}` }]
         : [{ type: "text", text: JSON.stringify(output) }], calls <= 5 ? "length" : "stop");

@@ -31,7 +31,8 @@ TUI: plain text chats; /run GOAL starts a separate two-agent task
      /model /apikey /new /tasks /open TASK_ID /paths /start /pause /stop /hint /meta /board /help /exit
      Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
-Chat and Execute have read/write/edit/powershell; Decide and metacog have read only.
+Chat and Execute have read/write/edit/powershell; Execute also has chrome for the running browser.
+Decide and metacog have read only.
 Tools run with the current user's OS permissions.
 `;
 
@@ -126,7 +127,7 @@ async function main(): Promise<void> {
     const taskId = demo ? undefined : currentTaskId(workspace);
     const saved = taskId || existsSync(path.join(taskDirectory(workspace, taskId), "blackboard.sqlite")) ? readSavedBoard(workspace, taskId) : undefined;
     if (!saved && config.goal === CHAT_GOAL) throw new Error("No red-team goal yet. Open the TUI and use /run with your goal first.");
-    store = new BlackboardStore(workspace, saved ? { ...saved.config, models: config.models, limits: config.limits } : config, { taskId });
+    store = new BlackboardStore(workspace, saved ? { ...saved.config, models: config.models, limits: config.limits, chrome: config.chrome } : config, { taskId });
   } catch (error) { sessionLock.close(); throw error; }
   const controller = new LoopController(store, runner);
   try {

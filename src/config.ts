@@ -21,7 +21,7 @@ export function defaultConfig(goal: string, scope = goal): ProjectConfig {
   });
 }
 
-const globalSettingsSchema = projectConfigSchema.pick({ version: true, models: true, limits: true });
+const globalSettingsSchema = projectConfigSchema.pick({ version: true, models: true, limits: true, chrome: true });
 
 export function workspaceDefaults(goal: string, scope = goal): ProjectConfig {
   const file = path.join(xloomHome(), "settings.json");
@@ -35,8 +35,8 @@ export function ensureGlobalSettings(config: ProjectConfig): void {
   const file = path.join(xloomHome(), "settings.json");
   if (existsSync(file)) return;
   mkdirSync(path.dirname(file), { recursive: true });
-  const { version, models, limits } = config;
-  try { writeFileSync(file, `${JSON.stringify({ version, models, limits }, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
+  const { version, models, limits, chrome } = config;
+  try { writeFileSync(file, `${JSON.stringify({ version, models, limits, chrome }, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 }
 

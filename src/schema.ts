@@ -57,6 +57,7 @@ export const projectConfigSchema = z.object({
   goal: text(16_000),
   scope: text(16_000),
   context: z.string().max(64_000).default(""),
+  chrome: z.object({ enabled: z.boolean().optional(), channel: z.enum(["stable", "beta", "dev", "canary"]).optional() }).strict().optional(),
   models: z.object({ decide: modelConfigSchema, execute: modelConfigSchema, chat: modelConfigSchema.optional() }).strict(),
   limits: limitsSchema.default({}),
 }).strict();

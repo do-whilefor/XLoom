@@ -11,7 +11,7 @@
 
 Xloom 是一个本地运行、面向授权安全研究的双 Agent 研究 Loop。
 
-默认以普通聊天打开，模型可以使用四个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，仅有 `read`；Execute 使用 `read / write / edit / powershell` 深入调查当前步骤，并可先提交关键观察再继续或交回规划。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
+默认以普通聊天打开，模型可以使用四个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，仅有 `read`；Execute 使用 `read / write / edit / powershell / chrome` 深入调查当前步骤，并可先提交关键观察再继续或交回规划。`chrome` 按需复用用户已登录的 Chrome；[连接与验证说明](docs/chrome.md)。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
 
 它不做批量扫描，也不预设漏洞数量，而是模拟真实研究过程：
 
@@ -109,7 +109,7 @@ xloom/
 │   ├── store.ts                   # SQLite 权威状态、归档与可读投影
 │   ├── schema.ts / types.ts       # 版本化配置与结果契约
 │   ├── loop/                      # ContextProjector / LoopPolicy / 尝试去重
-│   ├── runtime/                   # Pi 运行适配、四工具、模型、续接、阶段提交
+│   ├── runtime/                   # Pi 运行适配、文件/Shell/Chrome 工具、模型、续接、阶段提交
 │   └── ui/                        # LoopEvent → TUI
 ├── docs/
 │   ├── architecture.md            # MVP 架构与扩展接口
@@ -178,7 +178,7 @@ projects/<工作区哈希>/
 
 引用、文件哈希与 JSON 校验只能保证结构和证据完整性，**不能独立证明请求确实发生或漏洞成立**。真实性、可复现性、实际影响和缺失条件的判断仍依赖模型对原始证据的审查及用户复核。
 
-本版没有完整浏览器、网络代理、扫描器插件、MCP、Skills、额外工具注册、第三 Agent、跨任务长程记忆或多任务并发。`demo` 与单元测试中的合成证据仅验证软件闭环，不能作为真实漏洞研究结果。
+本版通过固定 Chrome 适配层复用已有浏览器会话，没有网络代理、扫描器插件、通用 MCP／Skills 加载、任意工具注册、第三 Agent、跨任务长程记忆或多任务并发。`demo` 与单元测试中的合成证据仅验证软件闭环，不能作为真实漏洞研究结果。
 
 ## 使用边界
 

@@ -1,8 +1,8 @@
 # 任务内 RAG 与本地整理／审计
 
 Xloom 复用当前研究任务的 SQLite 和 Wiki，通过 `materials` 交接资料变化，
-通过 `rag` 提供问题入口和检索结果。执行角色仍使用 `read / write / edit / powershell`，Decide／元认知仍只有
-`read`；没有新增 Agent、模型调用、工具注册、hook、Python 依赖或外部向量服务。
+通过 `rag` 提供问题入口和检索结果。检索继续使用原有 `read / powershell`；Execute 另有独立的 [Chrome 工具](chrome.md)，Decide／元认知仍只有
+`read`。检索本身没有新增 Agent、模型调用、工具注册、hook、Python 依赖或外部向量服务。
 
 ## 检索范围与相关性
 

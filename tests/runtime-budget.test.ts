@@ -37,7 +37,7 @@ function write(path = "fixture.txt", content = fixture, id = "fixture-write"): A
 function fixtureTool(kind: Kind, path = "fixture.txt", content = fixture, id = "fixture-tool"): AssistantMessage {
   return kind === "decide" ? message([{ type: "toolCall", id, name: "read", arguments: { path: "source.txt" } }], "toolUse") : write(path, content, id);
 }
-const availableTools = (kind: Kind) => kind === "decide" ? ["read"] : ["read", "write", "edit", "powershell"];
+const availableTools = (kind: Kind) => kind === "decide" ? ["read"] : kind === "execute" ? ["read", "write", "edit", "powershell", "chrome"] : ["read", "write", "edit", "powershell"];
 const observedFixture = (kind: Kind, workspace: string, path = "fixture.txt") => join(workspace, kind === "decide" ? "source.txt" : path);
 function answer(kind: Kind): AssistantMessage {
   return message([{ type: "text", text: kind === "chat" ? "The local fixture is verified."

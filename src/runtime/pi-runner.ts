@@ -1,7 +1,7 @@
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { Agent, type AgentEvent, type AgentMessage, type AgentOptions } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentOptions, type AgentTool } from "@earendil-works/pi-agent-core";
 import { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceEditTool } from "./edit.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -22,6 +22,7 @@ import { validateFinalJson } from "./protocol.js";
 import { validateWikiReferences } from "../wiki/model.js";
 import { validateKnowledgeSubmission } from "../knowledge/model.js";
 import { validateCvssExecution } from "../scoring/cvss.js";
+import { createChromeSession, type ChromeSession } from "./chrome.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -161,7 +162,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
   };
 }
 
-export interface PiRunnerOptions { resolveModel?: ModelResolver; createAgent?: (options: AgentOptions) => Agent }
+export interface PiRunnerOptions { resolveModel?: ModelResolver; createAgent?: (options: AgentOptions) => Agent; createChrome?: typeof createChromeSession }
 
 /** Each invocation owns a fresh Pi Agent and transcript. Only the blackboard is input. */
 export class PiRunner implements AgentRunner {
@@ -175,6 +176,7 @@ export class PiRunner implements AgentRunner {
     let detachAbort: (() => void) | undefined;
     let finalMessage: AssistantMessage | undefined;
     let forward: ReturnType<typeof createRuntimeForwarder> | undefined;
+    let chrome: ChromeSession | undefined;
     try {
       request.signal.throwIfAborted();
       if (request.mode === "execute" && !request.step) throw new Error("Execute requires an assigned Step.");
@@ -200,8 +202,13 @@ export class PiRunner implements AgentRunner {
         request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
           materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
           onAnnounced: items => { if (request.materials) (request.materialReads ??= []).push(...items); } } : undefined);
-      const tools = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
+      const tools: AgentTool[] = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
         : tool.name === "edit" && stage ? createWorkspaceEditTool(request.workspace, join(request.runDir, "artifacts", "checkpoint.json")) : tool) : [readTool];
+      if (request.mode === "execute" && request.snapshot.config.chrome?.enabled !== false && budget.toolsAllowed) {
+        chrome = (this.options.createChrome ?? createChromeSession)({ workspace: request.workspace, artifactsDirectory: join(request.runDir, "artifacts"),
+          config: request.snapshot.config.chrome, signal: request.signal });
+        tools.push(chrome.tool);
+      }
       const checkpointFile = join(request.runDir, "continuation.json");
       const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
         baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };
@@ -423,9 +430,8 @@ export class PiRunner implements AgentRunner {
     } finally {
       detachAbort?.();
       if (request.signal.aborted) agent?.abort();
-      await agent?.waitForIdle();
-      forward?.finish();
-      unsubscribe?.();
+      try { await agent?.waitForIdle(); }
+      finally { forward?.finish(); unsubscribe?.(); await chrome?.close(); }
     }
   }
 }

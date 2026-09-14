@@ -107,6 +107,7 @@ describe("command-line entry points", () => {
     expect(result.stdout).toContain("local two-agent research loop");
     expect(result.stdout).toContain("read/write/edit/powershell");
     expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell");
+    expect(result.stdout).toContain("Execute also has chrome for the running browser");
     expect(result.stdout).toContain("Decide and metacog have read only");
     expect(result.stdout).toContain("--headless");
     expect(result.stdout).toContain("Ctrl+O");
@@ -213,6 +214,8 @@ describe("command-line entry points", () => {
     const config = defaultConfig("Missing-credential fixture");
     config.models.decide.apiKeyEnv = missingKeyVariable;
     config.models.execute.apiKeyEnv = missingKeyVariable;
+    new BlackboardStore(root, { ...config, chrome: { enabled: true } }).close();
+    config.chrome = { enabled: false, channel: "beta" };
     saveWorkspaceConfig(root, config);
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
@@ -221,6 +224,7 @@ describe("command-line entry points", () => {
     const saved = databaseState(root);
     expect(saved.board).toMatchObject({ status: "error", outcome: null, completedSteps: 0, usage: { input: 0, output: 0, cost: 0 } });
     expect(saved.board.facts).toEqual([]);
+    expect(saved.board.config.chrome).toEqual(config.chrome);
     expect(existsSync(path.join(projectDirectory(root), "controller.lock"))).toBe(false);
   });
 

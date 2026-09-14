@@ -55,7 +55,7 @@ export class AppController {
       const taskId = currentTaskId(this.workspace);
       if (taskId || existsSync(path.join(taskDirectory(this.workspace), "blackboard.sqlite"))) {
         const saved = readSavedBoard(this.workspace, taskId);
-        this.attach(new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits }, { taskId }));
+        this.attach(new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits, chrome: this.config.chrome }, { taskId }));
       }
     } catch (error) { this.lock.close(); throw error; }
     this.refreshDisplayInfo();
@@ -162,7 +162,7 @@ export class AppController {
     if (this.store?.dataDir !== task.directory) {
       const taskId = id === "@legacy" ? undefined : id;
       const saved = readSavedBoard(this.workspace, taskId ?? null);
-      const store = new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits }, { taskId });
+      const store = new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits, chrome: this.config.chrome }, { taskId });
       try { selectTask(this.workspace, taskId ?? null); } catch (error) { store.close(); throw error; }
       this.attach(store);
     }

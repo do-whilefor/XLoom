@@ -202,7 +202,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
     const test = setup((run, context, input) => {
       if (run.channel === "offline-execute") {
-        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
         if (run.contexts.length === 1) {
           const local = input.rag!.local!;
           return message([{ type: "toolCall", id: "local-organize", name: "powershell", arguments: {
@@ -248,7 +248,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     const files = ["response-25.txt", "response-26.txt"];
     const test = setup((run, context, input) => {
       if (run.channel !== "offline-execute") return planning(input);
-      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
       expect(context.tools?.find(tool => tool.name === "read")?.description).toContain("prefer artifact://");
       if (run.contexts.length === 1) return message(files.map((file, index) => ({ type: "toolCall" as const, id: `write-${index}`, name: "write",
         arguments: { path: join(input.artifacts, file), content: `${artifactBody}file=${file}` } })), "toolUse");
@@ -494,7 +494,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
       }
       expect(run.contexts).toHaveLength(3);
       expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "artifact-once", isError: false });
-      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
       expect(JSON.stringify(context.messages)).not.toContain(interruptedMarker);
       expect(JSON.stringify(context.messages)).not.toContain("Anthropic stream ended before message_stop");
       expect(context.messages.filter(entry => entry.role === "toolResult" && entry.toolCallId === "artifact-once")).toHaveLength(1);
@@ -575,7 +575,7 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
         return message([{ type: "thinking", thinking: "Synthetic interrupted reasoning fixture after accepted checkpoint" }], "length");
       }
       expect(run.contexts).toHaveLength(4);
-      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
       expect(context.messages.at(-1)?.role).toBe("user");
       expect(context.messages.filter(entry => entry.role === "toolResult" && entry.toolCallId === "fixture-checkpoint")).toHaveLength(1);
       return json({ summary: "Checkpoint retained; submit only the additional synthetic observation", result: "done", facts: [

@@ -17,6 +17,16 @@ afterEach(() => {
 });
 
 describe("project configuration", () => {
+  it("preserves explicit Chrome settings and keeps old configs valid", () => {
+    const config = defaultConfig("target"), file = configPath();
+    expect(config.chrome).toBeUndefined();
+    config.chrome = { enabled: false, channel: "beta" };
+    saveNewConfig(file, config);
+    expect(loadConfig(file).chrome).toEqual(config.chrome);
+    for (const chrome of [{ channel: "invalid" }, { enabled: "true" }, { command: "chrome" }, { args: ["--isolated"] }]) {
+      expect(projectConfigSchema.safeParse({ ...config, chrome }).success).toBe(false);
+    }
+  });
   it("ships an example config with no application time, turn, token or cost limits", () => {
     const config = projectConfigSchema.parse(JSON.parse(readFileSync(new URL("../xloom.example.json", import.meta.url), "utf8")));
     expect(config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null, maxTurnsPerRun: null, maxTokens: null, maxCost: null });

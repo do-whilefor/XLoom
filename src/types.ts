@@ -39,6 +39,7 @@ export interface ProjectConfig {
   goal: string;
   scope: string;
   context: string;
+  chrome?: { enabled?: boolean; channel?: "stable" | "beta" | "dev" | "canary" };
   models: { decide: ModelConfig; execute: ModelConfig; chat?: ModelConfig };
   limits: { maxNoProgress: number; maxMinutes: number | null; maxTokens: number | null; maxCost: number | null; maxTurnsPerRun: number | null; stepTimeoutSeconds: number | null; metacogEvery: number };
 }

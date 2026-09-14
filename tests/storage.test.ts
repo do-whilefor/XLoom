@@ -92,11 +92,13 @@ describe("user storage and workspace identity", () => {
     vi.stubEnv("XLOOM_HOME", fixture());
     const config = defaultConfig("private task in another workspace");
     config.models.decide.model = "fixture-global-model";
+    config.chrome = { enabled: false, channel: "beta" };
     ensureGlobalSettings(config);
     expect(workspaceDefaults(CHAT_GOAL)).toMatchObject({ goal: CHAT_GOAL, scope: CHAT_GOAL, context: "", models: config.models });
     expect(readFileSync(path.join(xloomHome(), "settings.json"), "utf8")).not.toContain(config.goal);
     ensureGlobalSettings(defaultConfig("another task"));
     expect(workspaceDefaults("new goal").models).toEqual(config.models);
+    expect(workspaceDefaults("new goal").chrome).toEqual(config.chrome);
   });
 
   it("rejects a mismatched registry instead of mixing task storage", () => {
