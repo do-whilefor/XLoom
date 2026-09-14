@@ -9,6 +9,7 @@ import { normalizeExecutionInput } from "./loop/execution-input.js";
 import { attemptKeys, legacyProgressMarkers } from "./loop/attempts.js";
 import { inspectGoalDeclarations } from "./loop/goals.js";
 import { findingReviewErrors } from "./loop/reviews.js";
+import { invalidateObservationReviews } from "./observations/changes.js";
 import { evidenceNavigationRecords } from "./loop/finding-context.js";
 import { applyWikiPages, type WikiPageProposal } from "./wiki/model.js";
 import { writeWiki } from "./wiki/projection.js";
@@ -307,6 +308,9 @@ export class BlackboardStore {
           for (const ref of finding.evidenceIds) this.verifyEvidence(board.evidence.find(item => item.id === ref)!);
         }
         finding.status = review.status; finding.rating = review.rating; finding.review = review.reason;
+        // A fresh explicit Finding review is the acknowledgement, never a read receipt.
+        for (const ref of finding.observationReview?.evidenceIds ?? []) this.verifyEvidence(board.evidence.find(item => item.id === ref)!);
+        delete finding.observationReview;
         if (review.status === "closed") finding.next = review.reason;
       }
       for (const review of decision.cvssReviews ?? []) {
@@ -377,6 +381,7 @@ export class BlackboardStore {
   }
 
   private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): { progress: boolean; wikiPages: WikiPageProposal[] } {
+      const previous = { ...board, facts: [...board.facts], evidence: [...board.evidence], attempts: board.attempts?.map(item => ({ ...item, evidenceIds: [...item.evidenceIds] })) };
       const before = legacyProgressMarkers(board);
       const evidenceMap = new Map<string, string>();
       const factMap = new Map<string, string>();
@@ -443,14 +448,16 @@ export class BlackboardStore {
         assert(evidenceIds.length > 0, "Attempts require original evidence references.");
         const keys = attemptKeys(proposal);
         const attempts = board.attempts ??= [];
-        const existing = attempts.find(item => item.outcomeKey === keys.outcomeKey);
+        const knownOutcome = attempts.some(item => item.outcomeKey === keys.outcomeKey);
+        const existing = attempts.find(item => item.outcomeKey === keys.outcomeKey && item.observation === proposal.observation);
         if (existing) existing.evidenceIds = union(existing.evidenceIds, evidenceIds);
         else {
           const { evidenceRefs: _localRefs, ...attempt } = proposal;
           attempts.push({ ...attempt, ...keys, id: id("A"), runId, stepId: step.id, evidenceIds });
-          if (proposal.outcome === "supports" || proposal.outcome === "refutes") attemptProgress = true;
+          if (!knownOutcome && (proposal.outcome === "supports" || proposal.outcome === "refutes")) attemptProgress = true;
         }
       }
+      invalidateObservationReviews(previous, board);
       for (const proposal of output.findings ?? []) if (proposal.cvss) {
         const finding = board.findings.find(item => item.key === normalize(proposal.key))!;
         finding.cvss = assessCvss(board, finding, proposal.cvss, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!), "proposed");
@@ -498,6 +505,7 @@ export class BlackboardStore {
       return;
     }
     assert(!board.steps.some(step => ["ready", "claimed"].includes(step.status)), "Pending steps must be completed or explicitly abandoned before conclusion.");
+    assert(!board.findings.some(finding => finding.observationReview), "Changed observations require a fresh Finding review before conclusion.");
     assert(board.completedSteps > 0, "Cannot conclude before execution.");
     const root = board.goals.find(goal => goal.id === "G0" && goal.parentId === null);
     assert(root?.status === "satisfied", "Final completion requires the root goal G0 to be satisfied, not just an individual finding.");
@@ -541,6 +549,7 @@ export class BlackboardStore {
 export function renderBlackboard(board: BoardSnapshot, dataDir: string, workspace: string): string {
   const rows = [marker, "# xloom blackboard", "", `Revision: ${board.revision} · ${board.status} · ${board.outcome ?? "unrated / in progress"}`, "", board.reason, "", "## Goals", "", ...board.goals.map(item => `- ${item.id} [${item.status}] ${item.description}`), "", "## Steps", "", ...board.steps.map(item => `- ${item.id} → ${item.goalId} [${item.status}] ${item.description}${item.methodIds?.length ? ` (methods: ${item.methodIds.join(", ")})` : ""}${item.result ? ` — ${item.result}` : ""}`), "", "## Facts", "", ...board.facts.map(item => `- ${item.id}: ${item.description} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Tested hypotheses", "", "```yaml", "tested:"];
   for (const finding of board.findings) rows.push(`  - target: ${JSON.stringify(finding.target)}`, `    finding_status: ${finding.status}`, `    rating: ${finding.rating}`, `    evidence: ${JSON.stringify(finding.evidenceIds)}`, `    next: ${JSON.stringify(finding.next)}`);
+  for (const finding of board.findings.filter(item => item.observationReview)) rows.push(`  - observation_finding: ${JSON.stringify(finding.id)}`, `    review_required: ${JSON.stringify(finding.observationReview)}`);
   for (const finding of board.findings.filter(item => item.cvss)) rows.push(`  - cvss_finding: ${JSON.stringify(finding.id)}`, `    assessment: ${JSON.stringify(finding.cvss)}`, `    review_issues: ${JSON.stringify(cvssIssues(board, finding))}`);
   rows.push("```", "", "## Conditional attempts", "", ...(board.attempts ?? []).map(item => `- ${item.id} [${item.outcome}] ${JSON.stringify(item.hypothesis)} · scope ${JSON.stringify(item.scope)} · identity ${JSON.stringify(item.identity)} · state ${JSON.stringify(item.stateVersion)} · baseline ${JSON.stringify(item.baseline)} · variable ${JSON.stringify(item.changedVariable)}: ${JSON.stringify(item.observation)} (evidence: ${item.evidenceIds.join(", ")})`), "", "## Evidence", "", ...board.evidence.map(item => `- ${item.id}: ${evidencePath(item, dataDir, workspace)} (${item.bytes} bytes, SHA-256 ${item.sha256}) — ${item.description}`), "", "## User hints", "", ...board.hints.map(item => `- ${item.id}: ${item.content}`), "");
   if (board.findings.length) rows.push("## Evidence navigation index", "", "Registered references only; not proof of support or current applicability.", "", "```jsonl",

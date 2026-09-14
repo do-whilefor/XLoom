@@ -2,7 +2,7 @@
 
 Xloom 在现有研究任务内生成 Wiki，不启动 Webounty 会话、Python 引擎、额外
 Agent、执行工具或 hook。现已包含阅读导航、有来源的作者解释、来源变化提示、
-任务内词法 RAG、原文检索、增量缓存、跨轮资料交接、本地整理／审计及原生能力/链路记录；CVSS 也已原生接入。观察比较器尚未接入。能力组合见 [原生能力与链路](knowledge.md)。
+任务内词法 RAG、原文检索、增量缓存、跨轮资料交接、本地整理／审计及原生能力/链路记录；CVSS 与[观察比较器](observation-comparison.md)也已原生接入。能力组合见 [原生能力与链路](knowledge.md)。
 
 ## 存储与阅读
 
@@ -107,3 +107,9 @@ checkpoint 的错误按既有工具结果返回。来源不合法或作者提交
 组织方式参考本地 Webounty 的 `references/wiki-layout.md` 与 `references/storage.md`：
 按完整判断保存条件和来源、稳定页面身份、保留旧解释并标记变化。本阶段使用 Xloom
 原有数据模型重新实现，没有复制其 state.json、独立会话生命周期或整套 Python 运行时。
+
+## 观察变化与知识准确性
+
+现有 Attempt/Evidence 比较已原生接入，详见[观察比较与复核](observation-comparison.md)。
+同条件相反观察、事实更正和 Finding 来源变化会随来源包展示。不同观察文字分别保留，
+重复 outcome 仍不计新进展。Wiki 重新保存不能消除底层冲突；检索与阅读不是复核回执。

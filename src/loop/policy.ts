@@ -2,6 +2,7 @@ import type { BoardSnapshot, OuterLoopTrigger, Step } from "../types.js";
 import { pendingStepReviews } from "./context.js";
 import { knowledgeChanges } from "../knowledge/model.js";
 import { gapQueue } from "../knowledge/gaps.js";
+import { observationReviewTrigger } from "../observations/changes.js";
 
 /** Scheduling only: the Decide Agent, never this policy, judges evidence and Goal completion. */
 export interface LoopPolicy {
@@ -49,6 +50,11 @@ export const defaultLoopPolicy: LoopPolicy = {
       kind: "fact_revision",
       reason: `Fact ${replacement.id} supersedes ${replacement.supersedes}. Compare their evidence and revisit dependent assumptions and Steps.`,
     };
+
+    // Legacy new Facts already receive the ordinary Decide boundary. Structured
+    // attempts and changed old sources require the fresh metacognitive boundary.
+    const observations = observationReviewTrigger(before, after);
+    if (observations) return observations;
 
     const priorGaps = new Map(gapQueue(before).map(item => [`${item.stepId}/${item.gapId}`, item.signature]));
     const changedGaps = gapQueue(after).filter(item => item.active && item.state === "review_required" && priorGaps.get(`${item.stepId}/${item.gapId}`) !== item.signature);

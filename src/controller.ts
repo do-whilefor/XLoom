@@ -7,6 +7,7 @@ import { pendingStepReviews, projectContext, type ContextProjector } from "./loo
 import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
 import { normalizeDecisionInput } from "./loop/decision-input.js";
 import { planningMaterials } from "./wiki/materials.js";
+import { observationReviewTrigger } from "./observations/changes.js";
 import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
 
 /** Code-level extension seams, not dynamically loaded plugins or Agent tools. */
@@ -200,8 +201,9 @@ export class LoopController {
       if (hintsChanged) { mode = "metacog"; trigger = { kind: "hint", reason: "A new Hint arrived; reassess the plan and Goal against the latest blackboard." }; continue; }
       if (needsCompletionReview) { mode = "metacog"; trigger = { kind: "completion", reason: "Independently check the whole Goal, evidence, pending work and blind spots before accepting completion." }; continue; }
       if (result?.yielded) {
-        mode = "decide";
-        trigger = { kind: "execution_result", reason: "Execute committed a partial checkpoint and returned control. Review new evidence and replan unfinished work; the Step success signal has not been fully verified." };
+        const review: OuterLoopTrigger | undefined = mode === "execute" ? observationReviewTrigger(snapshot, current) : undefined;
+        mode = review ? "metacog" : "decide";
+        trigger = review ?? { kind: "execution_result", reason: "Execute committed a partial checkpoint and returned control. Review new evidence and replan unfinished work; the Step success signal has not been fully verified." };
         continue;
       }
       if (mode === "execute") {

@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { BoardSnapshot, Execution } from "../types.js";
 import { knowledgeRecord } from "../knowledge/model.js";
 import { cvssIssues, projectCvss } from "../scoring/cvss.js";
+import { observationConflicts } from "../observations/changes.js";
+import { hypothesisKey } from "../loop/attempts.js";
 
 const text = (max: number) => z.string().trim().min(1).max(max).refine(value => !value.includes("\0"), "Must not contain NUL characters");
 export const wikiSourceSchema = z.object({ kind: z.enum(["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain"]), id: text(256) }).strict();
@@ -42,7 +44,7 @@ export type WikiBlock = WikiBlockProposal & { basis: WikiStamp[]; requiredBasis?
 export interface WikiRevision extends WikiMetadata { revision: number; boardRevision: number; title: string; parentPageId?: string | null; blocks: WikiBlock[] }
 export interface WikiPage extends WikiRevision { id: string; history: WikiRevision[] }
 export type WikiIssue = (WikiSource | { kind: "block"; id: string; pageId: string }) & {
-  reason: "source_missing" | "source_changed" | "required_block_missing" | "required_block_changed";
+  reason: "source_missing" | "source_changed" | "source_review_required" | "required_block_missing" | "required_block_changed";
   via?: WikiBlockRef;
 };
 /** Retrieval hints are never part of a source or required-block review stamp. */
@@ -53,16 +55,49 @@ export const wikiDigest = (value: unknown): string => createHash("sha256").updat
 const key = (ref: WikiSource) => JSON.stringify([ref.kind, ref.id]);
 const source = (kind: WikiSource["kind"], ids: string[]): WikiSource[] => ids.map(id => ({ kind, id }));
 
+type PublicRecord = { value: object; dependencies: WikiSource[] };
+function recordScope(board: BoardSnapshot) {
+  const index = <T extends { id: string }>(items: T[]) => new Map(items.map(item => [item.id, item]));
+  const replacedBy = new Map<string, string[]>(), attemptsByEvidence = new Map<string, string[]>(), attemptsByHypothesis = new Map<string, string[]>();
+  const counterSteps = new Map<string, BoardSnapshot["steps"]>();
+  const add = <T>(map: Map<string, T[]>, key: string, value: T) => { const items = map.get(key) ?? []; items.push(value); map.set(key, items); };
+  for (const fact of board.facts) if (fact.supersedes) add(replacedBy, fact.supersedes, fact.id);
+  for (const attempt of board.attempts ?? []) {
+    for (const id of new Set(attempt.evidenceIds)) add(attemptsByEvidence, id, attempt.id);
+    add(attemptsByHypothesis, hypothesisKey(attempt.hypothesis), attempt.id);
+  }
+  for (const step of board.steps) if (step.combination?.counterEvidence?.length)
+    for (const id of new Set([...step.from, ...step.combination.requires])) add(counterSteps, id, step);
+  return { goals: index(board.goals), steps: index(board.steps), facts: index(board.facts), findings: index(board.findings), evidence: index(board.evidence),
+    attempts: index(board.attempts ?? []), replacedBy, attemptsByEvidence, attemptsByHypothesis, counterSteps,
+    conflicts: observationConflicts(board), records: new Map<string, PublicRecord | undefined>() };
+}
+const readScopes = new WeakMap<BoardSnapshot, ReturnType<typeof recordScope>>();
+/** Synchronous operation-local cache. No revision/identity cache survives a read:
+ * callers may edit the same BoardSnapshot in place without changing revision. */
+export function withWikiReadScope<T>(board: BoardSnapshot, read: () => T): T {
+  if (readScopes.has(board)) return read();
+  readScopes.set(board, recordScope(board));
+  try { return read(); } finally { readScopes.delete(board); }
+}
+
 /** Explicit public records only. Runtime fields and conversation data are never
  * hashed into the author basis or copied into a Wiki page. */
-export function wikiRecord(board: BoardSnapshot, ref: WikiSource): { value: object; dependencies: WikiSource[] } | undefined {
+export function wikiRecord(board: BoardSnapshot, ref: WikiSource): PublicRecord | undefined {
+  return withWikiReadScope(board, () => {
+    const scope = readScopes.get(board)!, id = key(ref);
+    if (!scope.records.has(id)) scope.records.set(id, projectWikiRecord(board, ref, scope));
+    return scope.records.get(id);
+  });
+}
+function projectWikiRecord(board: BoardSnapshot, ref: WikiSource, scope: ReturnType<typeof recordScope>): PublicRecord | undefined {
   if (ref.kind === "capability" || ref.kind === "chain") return knowledgeRecord(board, ref);
   if (ref.kind === "goal") {
-    const r = board.goals.find(item => item.id === ref.id);
+    const r = scope.goals.get(ref.id);
     return r && { value: { id: r.id, description: r.description, status: r.status, parentId: r.parentId, factIds: r.factIds }, dependencies: source("fact", r.factIds) };
   }
   if (ref.kind === "step") {
-    const r = board.steps.find(item => item.id === ref.id);
+    const r = scope.steps.get(ref.id);
     if (!r) return;
     const combination = r.combination && { requires: r.combination.requires, missing: r.combination.missing, scope: r.combination.scope,
       stateVersion: r.combination.stateVersion, expectedCapability: r.combination.expectedCapability, counterEvidence: r.combination.counterEvidence };
@@ -71,40 +106,49 @@ export function wikiRecord(board: BoardSnapshot, ref: WikiSource): { value: obje
     dependencies: source("fact", [...r.from, ...(r.combination?.requires ?? []), ...(r.combination?.counterEvidence ?? [])]) };
   }
   if (ref.kind === "fact") {
-    const r = board.facts.find(item => item.id === ref.id);
+    const r = scope.facts.get(ref.id);
     if (!r) return;
-    const replacedBy = board.facts.filter(item => item.supersedes === r.id).map(item => item.id).sort();
-    const origin = board.steps.find(step => step.id === r.stepId);
+    const replacedBy = [...scope.replacedBy.get(r.id) ?? []].sort();
+    const origin = r.stepId ? scope.steps.get(r.stepId) : undefined;
     const combination = origin?.combination;
     const originConditions = origin && { from: origin.from, ...(combination ? { requires: combination.requires, missing: combination.missing,
       scope: combination.scope, stateVersion: combination.stateVersion, expectedCapability: combination.expectedCapability, counterEvidence: combination.counterEvidence } : {}) };
-    const counterContexts = board.steps.filter(step => (step.from.includes(r.id) || step.combination?.requires.includes(r.id)) && step.combination?.counterEvidence?.length)
+    const counterContexts = (scope.counterSteps.get(r.id) ?? [])
       .map(step => ({ stepId: step.id, scope: step.combination!.scope, stateVersion: step.combination!.stateVersion, counterEvidence: step.combination!.counterEvidence! }));
-    const attempts = (board.attempts ?? []).filter(item => item.evidenceIds.some(id => r.evidenceIds.includes(id))).map(item => item.id).sort();
-    return { value: { id: r.id, description: r.description, stepId: r.stepId, evidenceIds: r.evidenceIds, supersedes: r.supersedes, replacedBy, originConditions, counterContexts, attempts },
+    const attempts = [...new Set(r.evidenceIds.flatMap(id => scope.attemptsByEvidence.get(id) ?? []))].sort();
+    const conflicts = scope.conflicts;
+    const reviewIssues = [...(replacedBy.length ? ["source_replaced"] : []), ...(attempts.some(id => conflicts.has(id)) ? ["observation_conflict"] : [])];
+    return { value: { id: r.id, description: r.description, stepId: r.stepId, evidenceIds: r.evidenceIds, supersedes: r.supersedes, replacedBy, originConditions, counterContexts, attempts,
+      ...(reviewIssues.length ? { reviewIssues } : {}) },
       dependencies: [...source("evidence", r.evidenceIds), ...source("fact", [...replacedBy, ...(r.supersedes ? [r.supersedes] : []),
         ...(origin?.from ?? []), ...(combination?.requires ?? []), ...(combination?.counterEvidence ?? []), ...counterContexts.flatMap(item => item.counterEvidence)]), ...source("attempt", attempts)] };
   }
   if (ref.kind === "finding") {
-    const r = board.findings.find(item => item.id === ref.id);
+    const r = scope.findings.get(ref.id);
     if (!r) return;
-    const attempts = (board.attempts ?? []).filter(item => item.hypothesis.trim().toLowerCase() === r.key.trim().toLowerCase() || item.evidenceIds.some(id => r.evidenceIds.includes(id))).map(item => item.id).sort();
+    const attempts = [...new Set([...(scope.attemptsByHypothesis.get(hypothesisKey(r.key)) ?? []), ...r.evidenceIds.flatMap(id => scope.attemptsByEvidence.get(id) ?? [])])].sort();
     const impact = r.impact && { capability: r.impact.capability, object: r.impact.object, result: r.impact.result, scope: r.impact.scope, prerequisites: r.impact.prerequisites };
     return { value: { id: r.id, key: r.key, title: r.title, target: r.target, status: r.status, rating: r.rating, factIds: r.factIds,
       evidenceIds: r.evidenceIds, next: r.next, review: r.review, impact, pocEvidenceId: r.pocEvidenceId, attempts,
+      ...(r.observationReview ? { observationReview: r.observationReview, reviewIssues: r.observationReview.kinds } : {}),
       ...(r.cvss ? { cvss: projectCvss(r.cvss), cvssIssues: cvssIssues(board, r) } : {}) },
     dependencies: [...source("fact", r.factIds), ...source("evidence", [...r.evidenceIds, ...(r.pocEvidenceId ? [r.pocEvidenceId] : [])]), ...source("attempt", attempts)] };
   }
   if (ref.kind === "evidence") {
-    const r = board.evidence.find(item => item.id === ref.id);
+    const r = scope.evidence.get(ref.id);
     return r && { value: { id: r.id, stepId: r.stepId, path: r.path, pathBase: r.pathBase, sha256: r.sha256, bytes: r.bytes, description: r.description }, dependencies: [] };
   }
-  const r = board.attempts?.find(item => item.id === ref.id);
+  const r = scope.attempts.get(ref.id);
+  const conflicts = scope.conflicts.get(ref.id) ?? [];
   return r && { value: { id: r.id, stepId: r.stepId, hypothesis: r.hypothesis, scope: r.scope, identity: r.identity, stateVersion: r.stateVersion,
-    baseline: r.baseline, changedVariable: r.changedVariable, outcome: r.outcome, observation: r.observation, evidenceIds: r.evidenceIds }, dependencies: source("evidence", r.evidenceIds) };
+    baseline: r.baseline, changedVariable: r.changedVariable, outcome: r.outcome, observation: r.observation, evidenceIds: r.evidenceIds,
+    ...(conflicts.length ? { conflicts, reviewIssues: ["observation_conflict"] } : {}) }, dependencies: [...source("evidence", r.evidenceIds), ...source("attempt", conflicts)] };
 }
 
 export function wikiBasis(board: BoardSnapshot, roots: WikiSource[]): WikiStamp[] {
+  return withWikiReadScope(board, () => collectWikiBasis(board, roots));
+}
+function collectWikiBasis(board: BoardSnapshot, roots: WikiSource[]): WikiStamp[] {
   const queue = [...roots];
   const found = new Map<string, WikiStamp>();
   for (let i = 0; i < queue.length; i++) {
@@ -231,6 +275,9 @@ export function applyWikiPages(board: BoardSnapshot, proposals: WikiPageProposal
 /** Review flags describe recorded-source changes, not file integrity or whether
  * an author's interpretation is true. Re-reading alone never clears them. */
 export function wikiIssues(board: BoardSnapshot, page: WikiRevision): (WikiIssue & { blockId: string })[] {
+  return withWikiReadScope(board, () => collectWikiIssues(board, page));
+}
+function collectWikiIssues(board: BoardSnapshot, page: WikiRevision): (WikiIssue & { blockId: string })[] {
   const issues: (WikiIssue & { blockId: string })[] = [];
   const byBlock = wikiBlocks(board.wikiPages ?? []);
   for (const root of page.blocks) {
@@ -243,6 +290,8 @@ export function wikiIssues(board: BoardSnapshot, page: WikiRevision): (WikiIssue
       for (const ref of block.basis) {
         const current = wikiRecord(board, ref);
         if (!current || wikiDigest(current.value) !== ref.signature) add({ kind: ref.kind, id: ref.id, reason: current ? "source_changed" : "source_missing", ...origin });
+        if (current && "reviewIssues" in current.value && Array.isArray(current.value.reviewIssues) && current.value.reviewIssues.some(code => code !== "source_replaced"))
+          add({ kind: ref.kind, id: ref.id, reason: "source_review_required", ...origin });
       }
       for (const ref of block.requiredBasis ?? []) {
         const current = byBlock.get(blockKey(ref));

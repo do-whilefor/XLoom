@@ -7,6 +7,7 @@ import { retrieveWiki } from "./retrieval.js";
 import { refKey, retrievalDocuments, type RetrievalRef } from "./catalog.js";
 import { readDiscovery, searchTask } from "./query.js";
 import { createReadingTracker } from "./reading.js";
+import { compareEvidence } from "../observations/read.js";
 
 export interface TaskReadContext {
   dataDir: string; snapshot: () => BoardSnapshot; materialBaseline?: Record<string, string>;
@@ -29,6 +30,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
       : url.hostname === "materials" ? ["budgetChars", "refresh"] : url.hostname === "record" ? ["kind", "id", "page", "budgetChars"]
       : url.hostname === "original" ? ["evidenceId", "sha256", "byteOffset", "byteLength"]
       : url.hostname === "discover" ? ["consumerId", "limit", "maxAlternatives", "budgetChars"]
+      : url.hostname === "compare" ? ["left", "right", "fields"]
       : url.hostname === "search" ? ["query", "limit", "refresh", "mode", "budgetChars"] : [];
     if (!allowed.length || [...p.keys()].some(key => !allowed.includes(key) || p.getAll(key).length !== 1)) throw new Error("Unknown or duplicate xloom read parameters");
     const required = (key: string) => { const value = p.get(key); if (!value) throw new Error(`Missing xloom read parameter: ${key}`); return value; };
@@ -36,6 +38,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     const board = context.snapshot();
     if (p.has("refresh") && !["true", "false"].includes(required("refresh"))) throw new Error("refresh must be true or false");
     const refresh = p.get("refresh") === "true";
+    if (url.hostname === "compare") return compareEvidence(board, context.dataDir, workspace, required("left"), required("right"), p.has("fields") ? JSON.parse(required("fields")) : []);
     if (url.hostname === "materials") {
       const result = planningMaterials(board, refresh ? {} : baseline, context.dataDir, workspace, number("budgetChars") ?? 6000);
       announce(result.items);

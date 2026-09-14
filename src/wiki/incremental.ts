@@ -1,6 +1,6 @@
 import type { BoardSnapshot } from "../types.js";
 import { refKey, retrievalDocuments, terms, type RetrievalIndex } from "./catalog.js";
-import { cachedEntry, pruneEntries, putEntry, withIndexCache } from "./cache.js";
+import { cachedEntries, pruneEntries, putEntry, withIndexCache } from "./cache.js";
 import { wikiDigest } from "./model.js";
 import { wikiGenerator } from "./format.js";
 
@@ -8,8 +8,9 @@ export function incrementalRetrievalIndex(board: BoardSnapshot, dataDir: string,
   return withIndexCache(dataDir, workspace, (db, stats) => {
     const { documents, fields } = retrievalDocuments(board), postings: RetrievalIndex["postings"] = Object.create(null), lengths: number[] = [];
     stats.removed = pruneEntries(db, "metadata", new Set(documents.map(doc => refKey(doc.ref))));
+    const previousEntries = cachedEntries<[string, number][]>(db, "metadata");
     fields.forEach((field, i) => {
-      const key = refKey(documents[i]!.ref), signature = wikiDigest(field), previous = cachedEntry<[string, number][]>(db, "metadata", key);
+      const key = refKey(documents[i]!.ref), signature = wikiDigest(field), previous = previousEntries.get(key);
       if (previous && (!Array.isArray(previous.value) || previous.value.some(entry => !Array.isArray(entry) || entry.length !== 2
         || typeof entry[0] !== "string" || !Number.isSafeInteger(entry[1]) || entry[1] < 1))) throw new Error("Invalid metadata cache terms");
       let counts: [string, number][];

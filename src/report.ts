@@ -8,6 +8,7 @@ export function renderReport(board: BoardSnapshot, location?: { dataDir: string;
     lines.push(`### ${finding.id} — ${finding.title}`, "", `Status: ${finding.status} | Rating: ${finding.rating}`, `Target: ${finding.target}`, `Next / reopening conditions: ${finding.next}`, "");
     if (finding.impact) for (const [key, value] of Object.entries(finding.impact)) lines.push(`- ${key}: ${value}`);
     if (finding.review) lines.push("", `Review: ${finding.review}`);
+    if (finding.observationReview) lines.push("", `Review required: ${finding.observationReview.kinds.join(", ")}. Status/rating above are historical until reviewed.`);
     if (finding.cvss) {
       const cvss = finding.cvss, issues = cvssIssues(board, finding);
       lines.push("", `CVSS 3.1 Base: **${cvss.baseScore.toFixed(1)} ${cvss.severity}** · ${cvss.status}`, "", `\`${cvss.vector}\``, "",

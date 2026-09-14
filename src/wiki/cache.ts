@@ -61,6 +61,11 @@ export function cachedEntry<T>(db: DatabaseSync, namespace: string, key: string)
   const row = db.prepare("SELECT signature,payload FROM entries WHERE namespace=? AND key=?").get(namespace, key);
   return row ? { signature: String(row.signature), value: JSON.parse(String(row.payload)) as T } : undefined;
 }
+/** One indexed read for the namespace, rather than prepare/get per record. */
+export function cachedEntries<T>(db: DatabaseSync, namespace: string): Map<string, { signature: string; value: T }> {
+  return new Map(db.prepare("SELECT key,signature,payload FROM entries WHERE namespace=?").all(namespace)
+    .map(row => [String(row.key), { signature: String(row.signature), value: JSON.parse(String(row.payload)) as T }]));
+}
 export function removeEntry(db: DatabaseSync, namespace: string, key: string): void {
   db.prepare("DELETE FROM terms WHERE namespace=? AND key=?").run(namespace, key);
   db.prepare("DELETE FROM entries WHERE namespace=? AND key=?").run(namespace, key);

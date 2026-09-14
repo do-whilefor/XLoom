@@ -7,6 +7,8 @@ import { ChatSession, chatPrompt } from "../src/runtime/chat.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
 import { powerShellPrompt } from "../src/runtime/powershell.js";
 import { stagePath } from "../src/runtime/stage.js";
+import { createWorkspaceReadTool } from "../src/runtime/read.js";
+import { join } from "node:path";
 import type { BoardSnapshot, RunRequest, RuntimeEvent } from "../src/types.js";
 
 const model: Model<"openai-completions"> = {
@@ -51,6 +53,21 @@ function promptFixture(mode: RunRequest["mode"], checkpoints = false): RunReques
 }
 
 describe("compact built-in prompts", () => {
+  it("adds observation comparison through the existing read tool without growing role instructions", () => {
+    const workspace = process.cwd(), dataDir = join(workspace, "synthetic-prompt-task");
+    for (const mode of ["decide", "execute", "metacog"] as const) {
+      const request = promptFixture(mode), plain = buildRunPrompt(request);
+      const native = buildRunPrompt({ ...request, workspace, blackboardPath: join(dataDir, "blackboard.md") });
+      expect(native.systemPrompt).toBe(plain.systemPrompt);
+      expect(native.systemPrompt.length).toBeLessThanOrEqual(960);
+      expect(native.systemPrompt).not.toContain("response.body");
+      const context = JSON.parse(native.userPrompt.split("\n").at(-1)!);
+      expect(context.wiki.observationsGuide.replaceAll("\\", "/")).toMatch(/resources\/observations\.md$/);
+      const read = createWorkspaceReadTool(workspace, undefined, { dataDir, snapshot: () => request.snapshot });
+      expect(read.name).toBe("read"); expect(read.description).toContain("compare?left=<Evidence ID>");
+      expect(read.description.length).toBeLessThanOrEqual(800);
+    }
+  });
   it("asks every research role for readable public summaries inside the JSON contract", () => {
     for (const mode of ["decide", "execute", "metacog"] as const) {
       const prompt = buildRunPrompt(promptFixture(mode));

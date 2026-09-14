@@ -17,9 +17,13 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
   if (!Number.isSafeInteger(limit) || limit < 1 || !(budget === Infinity || Number.isSafeInteger(budget) && budget > 0)) throw new Error("Retrieval limit and budgetChars must be positive integers.");
   const docs = index.documents, average = index.lengths.reduce((sum, value) => sum + value, 0) / (docs.length || 1) || 1;
   const scores = new Map<number, number>();
-  for (const term of new Set(terms(query))) {
+  const queryTerms = new Set(terms(query)), coverage = new Map<number, number>();
+  for (const term of queryTerms) {
     const entries = index.postings[term] ?? [], idf = Math.log(1 + (docs.length - entries.length + 0.5) / (entries.length + 0.5));
-    for (const [doc, tf] of entries) scores.set(doc, (scores.get(doc) ?? 0) + idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * index.lengths[doc]! / average)));
+    for (const [doc, tf] of entries) {
+      coverage.set(doc, (coverage.get(doc) ?? 0) + 1);
+      scores.set(doc, (scores.get(doc) ?? 0) + idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * index.lengths[doc]! / average)));
+    }
   }
   const anchors = new Set(options.anchors?.map(refKey));
   const exact = new Set<number>();
@@ -29,9 +33,13 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
       && (doc.ref.kind !== "block" || queryTokens.has(doc.ref.pageId!.toLowerCase()));
     if (explicit) { exact.add(i); scores.set(i, (scores.get(i) ?? 0) + 1000); }
   });
-  const ranked = [...scores].sort(([a, x], [b, y]) => Number(exact.has(b)) - Number(exact.has(a)) || y - x || refKey(docs[a]!.ref).localeCompare(refKey(docs[b]!.ref)));
+  // A rare single word must not outrank a record containing the whole explicit
+  // query. Preserve partial matches and exact IDs; no inferred semantic verdict.
+  const fullMatch = (i: number) => queryTerms.size > 0 && coverage.get(i) === queryTerms.size;
+  const ranked = [...scores].sort(([a, x], [b, y]) => Number(exact.has(b)) - Number(exact.has(a)) || Number(fullMatch(b)) - Number(fullMatch(a)) || y - x || refKey(docs[a]!.ref).localeCompare(refKey(docs[b]!.ref)));
   const byRef = new Map(docs.map(doc => [refKey(doc.ref), doc]));
   const delivered = new Map<string, object>();
+  const evidenceById = new Map(board.evidence.map(item => [item.id, item]));
   const hits: { ref: RetrievalRef; reason: string }[] = [], deferred: RetrievalRef[] = [];
   let deferredCount = 0, budgetDeferredCount = 0;
   const defer = (ref: RetrievalRef) => { deferredCount++; if (deferred.length < 6) deferred.push(ref); };
@@ -43,7 +51,7 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
       if (added.has(key) || delivered.has(key)) continue;
       const doc = byRef.get(key);
       if (!doc) { added.set(key, { ref, status: "source_missing" }); continue; }
-      const evidence = ref.kind === "evidence" ? board.evidence.find(item => item.id === ref.id) : undefined;
+      const evidence = ref.kind === "evidence" ? evidenceById.get(ref.id) : undefined;
       added.set(key, { ...doc, path: join(dataDir, "wiki", doc.path),
         status: doc.issues.length ? "review_required" : "recorded",
         ...(evidence ? { originalFile: evidencePath(evidence, dataDir, workspace), integrity: "not_checked", bodyIncluded: false,

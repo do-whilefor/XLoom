@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AttemptProposal, BoardSnapshot } from "../types.js";
 
-const normalize = (value: string) => value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+export const hypothesisKey = (value: string) => value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+const normalize = hypothesisKey;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /** Observation wording and volatile artifact bytes deliberately do not define a new experiment. */

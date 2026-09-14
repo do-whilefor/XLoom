@@ -204,8 +204,9 @@ describe("conditional research progress", () => {
     expect(board.steps.at(-1)?.status).toBe("no_progress");
     expect(board.evidence).toHaveLength(2);
     expect(board.facts).toHaveLength(2);
-    expect(board.attempts).toHaveLength(1);
-    expect(board.attempts![0].evidenceIds).toHaveLength(2);
+    expect(board.attempts).toHaveLength(2);
+    expect(board.attempts!.map(item => item.observation)).toContain("Different wording: the same condition still fails");
+    expect(board.attempts!.map(item => item.evidenceIds.length)).toEqual([1, 1]);
     expect(readFileSync(store.projectionPath, "utf8")).toContain("Conditional attempts");
   });
 

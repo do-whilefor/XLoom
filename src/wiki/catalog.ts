@@ -1,5 +1,5 @@
 import type { BoardSnapshot } from "../types.js";
-import { wikiBreadcrumb, wikiDigest, wikiIssues, wikiMetadata, wikiRecord, type WikiMetadata, type WikiSource } from "./model.js";
+import { wikiBreadcrumb, wikiDigest, wikiIssues, wikiMetadata, wikiRecord, withWikiReadScope, type WikiMetadata, type WikiSource } from "./model.js";
 import { wikiFilename, wikiGenerator } from "./format.js";
 
 export interface RetrievalRef { kind: WikiSource["kind"] | "block"; id: string; pageId?: string }
@@ -55,6 +55,9 @@ function searchable(value: unknown): string {
 
 /** Only explicit public state is projected. Author history and raw files are read on demand. */
 export function retrievalDocuments(board: BoardSnapshot) {
+  return withWikiReadScope(board, () => collectDocuments(board));
+}
+function collectDocuments(board: BoardSnapshot) {
   const documents: RetrievalDocument[] = [], fields: { title: string; body: string }[] = [];
   const collections = { goal: board.goals, step: board.steps, fact: board.facts, finding: board.findings, evidence: board.evidence, attempt: board.attempts ?? [], capability: board.capabilities ?? [], chain: board.chains ?? [] };
   for (const kind of Object.keys(collections) as WikiSource["kind"][]) for (const item of collections[kind]) {
@@ -121,7 +124,7 @@ export function organizeWiki(board: BoardSnapshot, index = buildRetrievalIndex(b
   return { generator: wikiGenerator, type: "organization", evidence: false, boardRevision: board.revision,
     notice: "Derived navigation and review suggestions, not evidence or a verdict. Source equality does not verify original files. No records were merged, deleted or marked reviewed.",
     counts: { records: index.documents.length - blocks.length, pages: board.wikiPages?.length ?? 0, blocks: blocks.length },
-    reviewRequired: index.documents.filter(doc => ["block", "capability", "chain"].includes(doc.ref.kind) && doc.issues.length).map(doc => ({ ref: doc.ref, path: doc.path, issues: doc.issues })),
+    reviewRequired: index.documents.filter(doc => doc.issues.length).map(doc => ({ ref: doc.ref, path: doc.path, issues: doc.issues })),
     missingSources: index.documents.flatMap(doc => doc.issues.filter(issue => ["source_missing", "required_block_missing"].includes(issue.code)).map(issue => ({ ref: doc.ref, source: issue.source }))),
     supersededFacts: board.facts.filter(fact => board.facts.some(other => other.supersedes === fact.id)).map(fact => ({ id: fact.id,
       replacedBy: board.facts.filter(other => other.supersedes === fact.id).map(other => other.id) })),

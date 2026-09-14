@@ -114,7 +114,7 @@ checkpoint 不结束 run / Step，不增加 `completedSteps`。新支持 / 反�
 
 `Execution.attempts?` 的每项为 `{ hypothesis, scope, identity, stateVersion, baseline, changedVariable, outcome, observation, evidenceRefs }`。`hypothesis` 是稳定标识，重复试验应复用；`outcome` 只允许 `supports | refutes | inconclusive | blocked`。每项必须引用至少一份经过大小 / SHA-256 校验的原始证据；该检查验证关联与完整性，无法代替对证据真实性、结论语义的审查。
 
-Store 生成 `conditionKey = hash(hypothesis, scope, identity, stateVersion, baseline, changedVariable)` 和 `outcomeKey = hash(conditionKey, outcome)`。假设标识做空白 / 大小写规范化；实际范围、身份、环境与变量保留大小写以区分敏感路径 / 值。同条件同结论仅合并证据引用，新的时间戳、不同 observation 措辞和新 Fact ID 不带来额外进展；原始事件、文件和事实仍归档。新的 `supports` / `refutes` 条件结论才算进展，`inconclusive` / `blocked` 留档但不单凭记录增加重置停滞。相同条件的支持与反证都保留，交由后续复核解释冲突。
+Store 生成 `conditionKey = hash(hypothesis, scope, identity, stateVersion, baseline, changedVariable)` 和 `outcomeKey = hash(conditionKey, outcome)`。假设标识做空白 / 大小写规范化；实际范围、身份、环境与变量保留大小写以区分敏感路径 / 值。同条件同结论且观察文字相同才合并证据引用；不同观察文字分别保留。新的时间戳、不同 observation 措辞和新 Fact ID 不带来额外进展；原始事件、文件和事实仍归档。新的 `supports` / `refutes` 条件结论才算进展，`inconclusive` / `blocked` 留档但不单凭记录增加重置停滞。相同条件的支持与反证都保留，交由后续复核解释冲突。
 
 旧输出未提交 attempts 时继续兼容，按规范化 Fact 描述 / 修正关系和有证据支持的 Finding 阶段新增判断。孤立 Evidence、未取证 lead、仅改 next 文案、仅重开 / 降级 Finding 不算进展。兼容模式不能识别任意语义改写；结构化模式也依赖稳定假设 ID 和真实条件描述，不能声称实现了通用语义去重。
 
@@ -161,3 +161,10 @@ Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 
 外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
 
 下一阶段应优先补真实模型契约成功率、针对自有测试环境的动态端到端验收、大型活动黑板的预算控制和真实终端人工体验。只有这一步完成，才适合评价红队任务成功率，而不只评价软件能否走通 Loop。
+
+## 观察比较的原生适配
+
+`src/observations` 复用 Webounty 只读差异语义，对接现有 Attempt、Evidence、Fact、
+Finding 与 Wiki；通过原有 read 和外层 Decide 复核运行。没有增加 Python、会话引擎、
+Agent 或 hook。来源变化的待复核标记与 Execute 在同一 SQLite 事务提交，完成前必须
+显式复核。数据映射和边界见[观察比较与复核](observation-comparison.md)。

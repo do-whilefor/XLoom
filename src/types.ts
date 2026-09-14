@@ -6,11 +6,12 @@ import type { Gap, GapProposal, GapRef } from "./knowledge/gaps.js";
 import type { WikiSource } from "./wiki/model.js";
 import type { CvssAssessment, CvssProposal } from "./scoring/cvss.js";
 import type { MaterialDelivery } from "./wiki/materials.js";
+import type { ObservationChange } from "./observations/changes.js";
 
 export type Mode = "decide" | "execute" | "metacog";
 export type AgentRole = "decide" | "execute";
 export interface OuterLoopTrigger {
-  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "knowledge_change" | "gap_review" | "hint" | "manual" | "completion" | "empty_plan";
+  kind: "start" | "resume" | "planned" | "execution_result" | "periodic" | "stagnation" | "blocked" | "technical_hit" | "fact_revision" | "observation_change" | "knowledge_change" | "gap_review" | "hint" | "manual" | "completion" | "empty_plan";
   reason: string;
 }
 export interface AgentHandoff {
@@ -62,6 +63,7 @@ export interface Finding {
   id: string; key: string; target: string; title: string; status: FindingStatus; rating: Rating;
   evidenceIds: string[]; factIds: string[]; next: string; impact?: Impact; review?: string; pocEvidenceId?: string;
   cvss?: CvssAssessment;
+  observationReview?: Omit<ObservationChange, "kind"> & { kinds: ObservationChange["kind"][] };
 }
 export interface Hint { id: string; content: string; createdAt: string }
 export interface Usage { input: number; output: number; cost: number }

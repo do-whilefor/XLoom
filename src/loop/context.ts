@@ -188,6 +188,7 @@ function projectFinding(finding: Finding): Finding {
     status: finding.status, rating: finding.rating, evidenceIds: [...finding.evidenceIds],
     factIds: [...finding.factIds], next: finding.next,
     ...(finding.review === undefined ? {} : { review: finding.review }),
+    ...(finding.observationReview ? { observationReview: structuredClone(finding.observationReview) } : {}),
     ...(finding.pocEvidenceId === undefined ? {} : { pocEvidenceId: finding.pocEvidenceId }),
     ...(finding.cvss === undefined ? {} : { cvss: projectCvss(finding.cvss) }),
     ...(finding.impact === undefined ? {} : { impact: {
@@ -246,6 +247,8 @@ export function projectContext(request: RunRequest): BlackboardContext {
     selected.findings.add(finding.id);
     for (const factId of finding.factIds) selected.facts.add(factId);
     for (const evidenceId of finding.evidenceIds) selected.evidence.add(evidenceId);
+    for (const factId of finding.observationReview?.factIds ?? []) selected.facts.add(factId);
+    for (const evidenceId of finding.observationReview?.evidenceIds ?? []) selected.evidence.add(evidenceId);
     if (finding.pocEvidenceId) selected.evidence.add(finding.pocEvidenceId);
   }
 
@@ -303,7 +306,7 @@ export function projectContext(request: RunRequest): BlackboardContext {
     for (const goal of board.goals) addGoal(goal.id);
     for (const step of board.steps.filter(pending)) addStep(step);
     for (const step of board.steps.filter(step => !pending(step)).slice(-tailLimits.steps)) addStep(step);
-    for (const finding of board.findings.filter(finding => finding.status !== "closed")) addFinding(finding);
+    for (const finding of board.findings.filter(finding => finding.status !== "closed" || finding.observationReview)) addFinding(finding);
     for (const finding of board.findings.filter(finding => finding.status === "closed").slice(-tailLimits.findings)) addFinding(finding);
     for (const fact of board.facts.slice(-tailLimits.facts)) selected.facts.add(fact.id);
     for (const item of board.evidence.slice(-tailLimits.evidence)) selected.evidence.add(item.id);

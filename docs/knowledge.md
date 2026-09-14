@@ -65,4 +65,4 @@ consumerId 精确选择一个当前任务消费者，仍使用全部任务能力
 
 本阶段参考本地 Webounty 的 `references/retrieval.md`、`references/storage.md`
 和能力发现/组合脚本的设计，围绕 Xloom 数据模型重新实现；不运行原脚本。全文
-原文索引、增量缓存和 CVSS 已分别原生接入；观察比较器尚未接入。
+原文索引、增量缓存、CVSS 及[观察比较器](observation-comparison.md)已原生接入。

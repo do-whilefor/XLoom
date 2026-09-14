@@ -61,6 +61,18 @@ function scan(evidence: Evidence, dataDir: string, workspace: string, window: (t
   } finally { closeSync(fd); }
 }
 
+/** Comparison uses the same full archive checks as original reading. Retain only
+ * the two explicitly selected originals, within the existing ingestion limit. */
+export function readVerifiedArchive(evidence: Evidence, dataDir: string, workspace: string): string {
+  if (evidence.bytes > 10 * 1024 * 1024) throw new Error("Comparison archive exceeds 10 MiB; read original ranges instead");
+  const chunks: Buffer[] = [];
+  scan(evidence, dataDir, workspace, () => {}, (chunk, offset) => {
+    if (offset + chunk.length > 10 * 1024 * 1024) throw new Error("Comparison archive exceeds 10 MiB; read original ranges instead");
+    chunks.push(Buffer.from(chunk));
+  });
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false) {
   if (!query.trim() || query.length > 4000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("Use a nonempty query up to 4000 characters and limit 1–20.");
   const tokens = [...new Set(terms(query))];
