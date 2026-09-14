@@ -457,7 +457,7 @@ export class BlackboardStore {
       }
       applyKnowledge(board, output, ref => factMap.get(ref) ?? ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       applyGapRecords(board, step, output, ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id }));
-      const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks.map(block => ({ ...block,
+      const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks?.map(block => ({ ...block,
         sources: block.sources.map(ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id })),
       })) }));
       return { progress: output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker)), wikiPages };

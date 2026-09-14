@@ -8,7 +8,7 @@ import { BlackboardStore } from "../src/store.js";
 import { executionSchema } from "../src/schema.js";
 import { projectContext } from "../src/loop/context.js";
 import { buildRunPrompt } from "../src/runtime/prompts.js";
-import { validateWikiReferences, wikiBasis, wikiIssues, wikiPagesSchema, type WikiPageProposal } from "../src/wiki/model.js";
+import { validateWikiReferences, wikiBasis, wikiIssues, wikiPagesSchema, type WikiBlockProposal, type WikiPageProposal } from "../src/wiki/model.js";
 import { renderWiki, wikiMarker } from "../src/wiki/projection.js";
 import type { Execution, RunRequest } from "../src/types.js";
 
@@ -29,7 +29,7 @@ function claim(store: BlackboardStore) {
   const artifacts = join(store.dataDir, "runs", `e-${id}`, "artifacts"); mkdirSync(artifacts, { recursive: true });
   return { runId: `e-${id}`, artifacts, step };
 }
-function page(factId = "f"): WikiPageProposal {
+function page(factId = "f"): WikiPageProposal & { blocks: WikiBlockProposal[] } {
   return { id: "WK-flow", title: "Synthetic workflow", blocks: [{ id: "B-boundary", title: "Observed and unknown",
     text: "The fixture returned a label. Cross-account consumption remains unverified.", sources: [{ kind: "fact", id: factId }] }] };
 }

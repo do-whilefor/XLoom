@@ -31,8 +31,10 @@ Add optional `wikiPages` to the existing Execute final JSON or checkpoint's
 The example is fictional; use actual sources and observations. Page IDs start
 with `WK-`, block IDs with `B-`, followed by lowercase ASCII letters/digits,
 underscores or hyphens. Keep IDs when renaming or revising. Block IDs are unique
-within a page. A full page replaces its previous title and blocks; include every
-block you intend to retain. Previous author versions remain as history.
+within a page. A full page (title + blocks) replaces its previous title and blocks;
+include every block you intend to retain. Omitted page metadata stays unchanged;
+omitted block metadata/requiredBlockRefs in a full replacement is removed.
+Previous author versions, including metadata and review bases, remain as history.
 
 Each block states a complete judgment with scope, conditions, supporting sources,
 counterevidence or uncertainty, and the remaining gap where relevant. One or more
@@ -54,3 +56,69 @@ and submit the full page explicitly after reevaluation. The same text may be
 retained if still justified; merely reading, renaming a Markdown file, or restarting
 does not acknowledge a change. Source equality does not prove current file
 integrity or that a conclusion is true. Ordinary chat does not use this feature.
+
+## Retrieval metadata and directories
+
+Pages and blocks may include `summary` (up to 2,000 characters), `questions` (up to
+16 strings of 512 characters), `keywords` and `aliases` (each up to 32 strings of
+128 characters). Use relevant ways a future question may refer to this material.
+These fields help lexical retrieval; they are locating hints, not new claims,
+sources, resolved questions or proof. Keep all conditions in the complete block
+text. Use an empty summary or empty arrays to clear hints.
+
+A page may set `parentPageId` to another page in this task, including one created
+in the same submission, or `null` to place it at the root. Missing parents and
+cycles are rejected. Ancestor titles form a searchable breadcrumb; ancestor
+blocks are not evidence and are not fetched merely because they are parents.
+Stable page IDs determine file identity, regardless of title or directory moves.
+
+## Required explanations
+
+When a judgment needs another block's qualification to be understood, add this
+to the judgment block:
+
+```json
+"requiredBlockRefs": [{"pageId": "WK-export-flow", "blockId": "B-scope"}]
+```
+
+The target must be an existing block or a block in a full page in the same batch.
+Up to 32 unique references are allowed per block. Self-references, cycles and
+missing targets in new full judgments are rejected. Sources are still required
+on every block; necessary explanations do not replace original observations.
+
+Retrieval carries the complete required explanation closure and its sources,
+including corrections and warnings. Oversized packages are deferred as a whole.
+Changing or removing a required block marks dependent judgments for review;
+their original text remains. Source changes propagate through required blocks.
+Resubmitting only the dependent judgment cannot clear an unreviewed dependency.
+After reading the originals and reevaluating all affected explanations, submit
+their full pages together; forward references are resolved against the final batch.
+Removing a block can leave old dependents pending review, never silently current.
+Title/directory/retrieval-metadata changes do not acknowledge source changes and
+do not change a block's factual dependency signature.
+
+## Metadata-only updates
+
+To rename/move an existing page or change its hints without reevaluating its
+judgments, omit `blocks`. For existing block titles/hints use `blockMetadata`:
+
+```json
+{
+  "summary": "Improve navigation while retaining source review warnings",
+  "result": "no_progress",
+  "wikiPages": [{
+    "id": "WK-export-flow",
+    "title": "Report submission and download boundary",
+    "parentPageId": null,
+    "aliases": ["report export"],
+    "blockMetadata": [{"id": "B-submit", "questions": ["Does a returned identifier prove a completed download?"]}]
+  }]
+}
+```
+
+Only supplied metadata fields change. Blocks, text, sources, requiredBlockRefs
+and their sealed review bases are retained. `blockMetadata` cannot change text,
+sources or dependencies, cannot add blocks, and cannot accompany a full `blocks`
+replacement. New pages require title + blocks. Repeating an identical update
+does not create another author revision. Metadata maintenance never clears review
+warnings, even after a correction, failed run, checkpoint replay or restart.

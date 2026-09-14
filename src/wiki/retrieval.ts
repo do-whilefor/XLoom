@@ -46,7 +46,7 @@ export function retrieveWiki(board: BoardSnapshot, dataDir: string, workspace: s
       added.set(key, { ...doc, path: join(dataDir, "wiki", doc.path),
         status: doc.issues.length ? "review_required" : "recorded",
         ...(evidence ? { originalFile: evidencePath(evidence, dataDir, workspace), integrity: "not_checked" } : {}) });
-      pending.push(...doc.sources);
+      pending.push(...doc.sources, ...doc.requiredBlocks ?? []);
     }
     const hit = { ref: root.ref, reason: exact.has(i) ? "exact_reference" : "lexical_match" };
     const size = JSON.stringify({ hits: [...hits, hit], records: [...delivered.values(), ...added.values()] }).length;

@@ -1,6 +1,6 @@
 import type { BoardSnapshot } from "../types.js";
 import { gapQueue, gapReadPath, gapSearchQuery, type GapRef } from "../knowledge/gaps.js";
-import { refKey, retrievalDocuments, terms, type RetrievalRef } from "./catalog.js";
+import { refKey, retrievalDocuments, retrievalSearchText, terms, type RetrievalRef } from "./catalog.js";
 import { wikiBasis, wikiDigest } from "./model.js";
 import { wikiGenerator } from "./format.js";
 import { searchOriginals } from "./originals.js";
@@ -40,7 +40,7 @@ export function materialDelivery(board: BoardSnapshot, baseline: Record<string, 
     if (!["fact", "evidence", "capability", "chain", "block"].includes(doc.ref.kind)) continue;
     const key = refKey(doc.ref), signature = wikiDigest(doc);
     if (baseline[key] === signature) { unchanged++; continue; }
-    const words = new Set(terms(`${doc.title} ${doc.text}`));
+    const words = new Set(terms(retrievalSearchText(doc)));
     const relatedGaps = roots.flatMap(({ gap, sources, words: query }) => {
       const explicit = sources.has(key), candidate = doc.ref.kind === "capability" && gap.candidates.some(item => item.capabilityId === doc.ref.id);
       const lexical = [...query].some(word => words.has(word)) || doc.ref.kind === "evidence" && originalMatches.get(`${gap.stepId}/${gap.gapId}`)?.has(doc.ref.id);

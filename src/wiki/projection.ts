@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { evidencePath } from "../paths.js";
 import type { BoardSnapshot } from "../types.js";
-import { wikiIssues, wikiRecord, type WikiSource } from "./model.js";
+import { wikiBreadcrumb, wikiIssues, wikiMetadata, wikiRecord, type WikiSource } from "./model.js";
 import { buildRetrievalIndex, organizeWiki } from "./catalog.js";
 import { incrementalRetrievalIndex } from "./incremental.js";
 import { isWikiDerived, wikiFilename as filename, wikiGenerator, wikiMarker } from "./format.js";
@@ -12,7 +12,8 @@ export { wikiMarker } from "./format.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 const label = (text: string) => text.replace(/[\r\n]+/g, " ").replace(/[\\`*_[\]<>]/g, "\\$&");
-const link = (ref: WikiSource) => `[${label(ref.id)}](${filename(ref.kind, ref.id)})`;
+const link = (ref: WikiSource | { kind: "block"; id: string; pageId: string }) => ref.kind === "block"
+  ? `[${label(`${ref.pageId}/${ref.id}`)}](${filename("note", ref.pageId)}#${ref.id})` : `[${label(ref.id)}](${filename(ref.kind, ref.id)})`;
 const json = (value: unknown) => {
   const text = JSON.stringify(value, null, 2);
   const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(match => match[0].length + 1)));
@@ -58,22 +59,34 @@ export function renderWiki(board: BoardSnapshot, dataDir: string, workspace: str
   }
   for (const page of board.wikiPages ?? []) {
     const issues = wikiIssues(board, page);
+    const breadcrumb = wikiBreadcrumb(board, page.id);
     const path = `pages/${filename("note", page.id)}`;
     const lines = [wikiMarker, `# ${label(page.title)}`, "", notice, "", `页面 ${page.id} · 修订 ${page.revision} · 提交时黑板修订 ${page.boardRevision}`, "",
       issues.length ? "**待复核：已登记来源发生变化或缺失；以下正文保留作者原来的判断。**" : "来源记录与作者提交时一致；这不代表判断已被独立验证。", "",
-      ...issues.map(issue => `- ${issue.blockId}: ${issue.reason} · ${issue.kind} ${link(issue)}`)];
-    for (const block of page.blocks) lines.push("", `<a id="${block.id}"></a>`, `## ${label(block.title)}`, "", block.text, "", "声明来源：", "",
-      ...block.sources.map(ref => `- ${ref.kind}: ${link(ref)}`));
+      ...issues.map(issue => `- ${issue.blockId}: ${issue.reason} · ${issue.kind} ${link(issue)}${issue.via ? ` · 经由 ${link({ kind: "block", id: issue.via.blockId, pageId: issue.via.pageId })}` : ""}`),
+      "", `目录（仅导航）：${breadcrumb.map(item => `[${label(item.title)}](${filename("note", item.id)})`).join(" / ")}`];
+    if (Object.keys(wikiMetadata(page)).length) lines.push("", "检索元数据（用于定位，不是证据）：", "", json(wikiMetadata(page)));
+    for (const block of page.blocks) {
+      lines.push("", `<a id="${block.id}"></a>`, `## ${label(block.title)}`, "", block.text, "", "声明来源：", "",
+        ...block.sources.map(ref => `- ${ref.kind}: ${link(ref)}`));
+      if (Object.keys(wikiMetadata(block)).length) lines.push("", "检索元数据（用于定位，不是证据）：", "", json(wikiMetadata(block)));
+      if (block.requiredBlockRefs?.length) lines.push("", "必要解释（阅读时必须连同其来源与复核提示）：", "",
+        ...block.requiredBlockRefs.map(ref => `- ${link({ kind: "block", id: ref.blockId, pageId: ref.pageId })}`));
+    }
     if (page.history.length) {
       lines.push("", "## 历史解释（不作为当前判断）", "");
       for (const old of page.history) {
-        lines.push(`### 修订 ${old.revision} · ${label(old.title)}`, "", `提交时黑板修订 ${old.boardRevision}`, "");
-        for (const block of old.blocks) lines.push(`#### ${label(block.title)}`, "", block.text, "", ...block.sources.map(ref => `- 历史来源 ${ref.kind}: ${link(ref)}`), "");
+        lines.push(`### 修订 ${old.revision} · ${label(old.title)}`, "", `提交时黑板修订 ${old.boardRevision}`, "", json({ parentPageId: old.parentPageId ?? null, ...wikiMetadata(old) }), "");
+        for (const block of old.blocks) {
+          lines.push(`#### ${label(block.title)}`, "", block.text, "", ...block.sources.map(ref => `- 历史来源 ${ref.kind}: ${link(ref)}`), "");
+          if (Object.keys(wikiMetadata(block)).length) lines.push(json(wikiMetadata(block)), "");
+          if (block.requiredBlockRefs?.length) lines.push("历史必要解释引用：", "", ...block.requiredBlockRefs.map(ref => `- ${link({ kind: "block", pageId: ref.pageId, id: ref.blockId })}`), "");
+        }
       }
     }
     files.set(path, `${lines.join("\n")}\n`);
-    entries.push({ kind: "note", id: page.id, path, revision: page.revision, reviewRequired: issues.length > 0, issues });
-    addIndex("研究解释", `- [${label(page.id)} · ${label(page.title)}](${path}) [${issues.length ? "待复核" : "来源记录未变"}] · 修订 ${page.revision}`);
+    entries.push({ kind: "note", id: page.id, path, revision: page.revision, parentPageId: page.parentPageId ?? null, breadcrumb, retrievalMetadata: wikiMetadata(page), reviewRequired: issues.length > 0, issues });
+    addIndex("研究解释", `- [${label(page.id)} · ${label(breadcrumb.map(item => item.title).join(" / "))}](${path}) [${issues.length ? "待复核" : "来源记录未变"}] · 修订 ${page.revision}`);
   }
   files.set("search-index.json", `${JSON.stringify(retrieval)}\n`);
   files.set("organization.json", `${JSON.stringify(organizeWiki(board, retrieval), null, 2)}\n`);

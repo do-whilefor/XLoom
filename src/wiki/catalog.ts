@@ -1,5 +1,5 @@
 import type { BoardSnapshot } from "../types.js";
-import { wikiDigest, wikiIssues, wikiRecord, type WikiSource } from "./model.js";
+import { wikiBreadcrumb, wikiDigest, wikiIssues, wikiMetadata, wikiRecord, type WikiMetadata, type WikiSource } from "./model.js";
 import { wikiFilename, wikiGenerator } from "./format.js";
 
 export interface RetrievalRef { kind: WikiSource["kind"] | "block"; id: string; pageId?: string }
@@ -10,7 +10,10 @@ export interface RetrievalDocument {
   text: string;
   path: string;
   sources: WikiSource[];
-  issues: { code: string; source: WikiSource }[];
+  requiredBlocks?: RetrievalRef[];
+  breadcrumb?: { id: string; title: string }[];
+  retrievalMetadata?: { page: WikiMetadata; block: WikiMetadata };
+  issues: { code: string; source: RetrievalRef; via?: { pageId: string; blockId: string } }[];
 }
 export interface RetrievalIndex {
   generator: typeof wikiGenerator;
@@ -69,15 +72,23 @@ export function retrievalDocuments(board: BoardSnapshot) {
   }
   for (const page of board.wikiPages ?? []) {
     const issues = wikiIssues(board, page);
+    const breadcrumb = wikiBreadcrumb(board, page.id), title = breadcrumb.map(item => item.title).join(" / ");
     for (const block of page.blocks) {
       const sources = block.sources.map(({ kind, id }) => ({ kind, id }));
-      documents.push({ ref: { kind: "block", pageId: page.id, id: block.id }, title: `${page.title} / ${block.title}`, text: block.text,
+      const hints = { page: wikiMetadata(page), block: wikiMetadata(block) };
+      const requiredBlocks = [...new Map([...block.requiredBlockRefs ?? [], ...block.requiredBasis ?? []]
+        .map(ref => { const value = { kind: "block" as const, pageId: ref.pageId, id: ref.blockId }; return [refKey(value), value]; })).values()];
+      documents.push({ ref: { kind: "block", pageId: page.id, id: block.id }, title: `${title} / ${block.title}`, text: block.text,
         path: `pages/${wikiFilename("note", page.id)}`, sources,
+        ...(breadcrumb.length > 1 ? { breadcrumb } : {}),
+        ...(Object.keys(hints.page).length || Object.keys(hints.block).length ? { retrievalMetadata: hints } : {}),
+        ...(requiredBlocks.length ? { requiredBlocks } : {}),
         issues: [
-          ...issues.filter(issue => issue.blockId === block.id).map(issue => ({ code: issue.reason, source: { kind: issue.kind, id: issue.id } })),
+          ...issues.filter(issue => issue.blockId === block.id).map(issue => ({ code: issue.reason,
+            source: { kind: issue.kind, id: issue.id, ...(issue.kind === "block" ? { pageId: issue.pageId } : {}) }, ...(issue.via ? { via: issue.via } : {}) })),
           ...sources.filter(source => !wikiRecord(board, source)).map(source => ({ code: "source_missing", source })),
         ] });
-      fields.push({ title: `${page.title} ${block.title}`, body: block.text });
+      fields.push({ title: `${title} ${block.title}`, body: `${block.text}${searchable(hints) ? ` ${searchable(hints)}` : ""}` });
     }
   }
   return { documents, fields };
@@ -111,12 +122,16 @@ export function organizeWiki(board: BoardSnapshot, index = buildRetrievalIndex(b
     notice: "Derived navigation and review suggestions, not evidence or a verdict. Source equality does not verify original files. No records were merged, deleted or marked reviewed.",
     counts: { records: index.documents.length - blocks.length, pages: board.wikiPages?.length ?? 0, blocks: blocks.length },
     reviewRequired: index.documents.filter(doc => ["block", "capability", "chain"].includes(doc.ref.kind) && doc.issues.length).map(doc => ({ ref: doc.ref, path: doc.path, issues: doc.issues })),
-    missingSources: index.documents.flatMap(doc => doc.issues.filter(issue => issue.code === "source_missing").map(issue => ({ ref: doc.ref, source: issue.source }))),
+    missingSources: index.documents.flatMap(doc => doc.issues.filter(issue => ["source_missing", "required_block_missing"].includes(issue.code)).map(issue => ({ ref: doc.ref, source: issue.source }))),
     supersededFacts: board.facts.filter(fact => board.facts.some(other => other.supersedes === fact.id)).map(fact => ({ id: fact.id,
       replacedBy: board.facts.filter(other => other.supersedes === fact.id).map(other => other.id) })),
     duplicateText: [...duplicateGroups.values()].filter(group => group.length > 1).map(refs => ({ refs, action: "Review source and condition differences; identical text does not establish identical applicability." })),
     unreferencedEvidenceIds: board.evidence.filter(item => !usedEvidence.has(item.id)).map(item => item.id),
     topics: board.wikiPages?.map(page => ({ id: page.id, title: page.title, path: `pages/${wikiFilename("note", page.id)}`,
-      blocks: page.blocks.map(block => ({ id: block.id, title: block.title, sources: block.sources.map(({ kind, id }) => ({ kind, id })) })) })) ?? [],
+      parentPageId: page.parentPageId ?? null, breadcrumb: wikiBreadcrumb(board, page.id), retrievalMetadata: wikiMetadata(page),
+      blocks: page.blocks.map(block => ({ id: block.id, title: block.title, retrievalMetadata: wikiMetadata(block), requiredBlockRefs: block.requiredBlockRefs ?? [],
+        sources: block.sources.map(({ kind, id }) => ({ kind, id })) })) })) ?? [],
   };
 }
+
+export const retrievalSearchText = (doc: RetrievalDocument): string => `${doc.title} ${doc.text} ${searchable(doc.retrievalMetadata)}`;

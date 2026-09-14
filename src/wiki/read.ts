@@ -47,7 +47,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
       const budgetChars = number("budgetChars") ?? 16000;
       if (budgetChars < 1024 || budgetChars > 64000) throw new Error("Record budgetChars must be 1024–64000");
       const result = retrieveWiki(board, context.dataDir, workspace, "", { anchors, limit: anchors.length, budgetChars: Math.max(1, budgetChars - 1024) });
-      const complete = !result.deferredCount && !result.missingAnchors.length;
+      const complete = !result.deferredCount && !result.missingAnchors.length && !result.records.some(record => "status" in record && record.status === "source_missing");
       const packet = { ...result, complete, readPath: path, next: "Read original ranges and preserve source conditions/corrections. A delivered record is not a reviewed or resolved gap." };
       if (JSON.stringify(packet).length > budgetChars) return { type: "retrieval", evidence: false, complete: false, status: "budget_exhausted",
         hits: [], records: [], deferredCount: anchors.length, next: "Increase record budgetChars (up to 64000); no source package was delivered." };

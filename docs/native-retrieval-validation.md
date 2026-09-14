@@ -51,5 +51,6 @@ node --import tsx scripts/validate-native-retrieval.ts --live --output .xloom/ch
 新增反证引发的消费者待复核、预算完整装包与补读引用、同轮重复查询与新角色重读，
 以及错误目标的 revisit 事务回滚。现有来源校验和研究完成条件没有放宽。
 
-本批范围不含 Wiki 的父子目录、问题别名和 requiredBlockRefs；这些仍是下一批
-知识表达优化。没有引入 Webounty 会话引擎、Python 运行时、额外 Agent 或新工具。
+上批原生查询入口提交 `9ac550b` 不含 Wiki 的父子目录、问题别名和 requiredBlockRefs；
+后续接入和验证见 [Wiki 结构验证记录](wiki-structure-validation.md)。没有引入
+Webounty 会话引擎、Python 运行时、额外 Agent 或新工具。
