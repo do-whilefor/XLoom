@@ -1,14 +1,18 @@
-/** Opt-in paid Execute smoke test against a synthetic page in the user's running Chrome. */
+/** Opt-in paid Chat/Execute smoke test against a synthetic page in the user's running Chrome. */
 import { strict as assert } from "node:assert";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { promisify } from "node:util";
 import { defaultConfig, loadConfig } from "../src/config.js";
 import { projectConfigPath } from "../src/paths.js";
 import { createChromeSession, type ChromeSession } from "../src/runtime/chrome.js";
+import { controlChrome } from "../src/runtime/chrome-daemon.js";
+import { ChatSession } from "../src/runtime/chat.js";
 import { PiRunner } from "../src/runtime/pi-runner.js";
 import { resolveModel } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
@@ -19,6 +23,7 @@ if (!values.live) throw new Error("Pass --live to use the configured model and t
 const configured = loadConfig(projectConfigPath(process.cwd()));
 if (configured.chrome?.enabled === false) throw new Error("Chrome is disabled in the project settings.");
 const selected = await resolveModel(configured.models.execute, AbortSignal.timeout(30_000));
+const selectedChat = await resolveModel(configured.models.chat ?? configured.models.execute, AbortSignal.timeout(30_000));
 const root = await mkdtemp(join(tmpdir(), "xloom-chrome-live-"));
 const reportFile = resolve(values.output ?? join(root, "report.json"));
 const cookieName = `xloom_smoke_${randomUUID().replaceAll("-", "")}`, cookie = randomUUID(), confirmation = randomUUID();
@@ -59,8 +64,13 @@ async function browserFingerprint() {
   return createHash("sha256").update(endpoint).digest("hex");
 }
 const previousHome = process.env.XLOOM_HOME;
+// The bridge identity must be the same for bootstrap, Chat, Execute and cleanup.
+process.env.XLOOM_HOME = join(root, "home");
 let bootstrap: ChromeSession | undefined, cleanup: ChromeSession | undefined, store: BlackboardStore | undefined;
+let chat: ChatSession | undefined;
 let failure: string | undefined, runDir: string | undefined, requests = 0, modelUsage: unknown, execution: Execution | undefined;
+let chatRequests = 0;
+const chatUsage: unknown[] = [];
 const events: RuntimeEvent[] = [], checks: Record<string, boolean> = {};
 const call = async (session: ChromeSession, tool: string, args = {}) => {
   const result = await session.tool.execute("harness", { action: "call", tool, args }, AbortSignal.timeout(60_000));
@@ -72,8 +82,38 @@ try {
   console.log("Preparing the fixture in the existing Chrome session...");
   await call(bootstrap, "new_page", { url: `${origin}${prefix}/seed`, background: true });
   assert.equal(seeds, 1); assert.equal(authenticatedProbes, 1);
+  const originalBridge = await controlChrome(chromeOptions, "status");
+  assert("bridgeRunning" in originalBridge && originalBridge.bridgeRunning);
   await bootstrap.close(); bootstrap = undefined;
-  process.env.XLOOM_HOME = join(root, "home");
+  checks.bridgeSurvivedToolClose = JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge);
+  const chatOptions = { storageDirectory: join(root, "chat"), resolveModel: async () => ({ ...selectedChat,
+    streamFn: (...args: Parameters<typeof selectedChat.streamFn>) => {
+      if (chatRequests++ === 0) checks.chatFiveTools = JSON.stringify(args[1].tools?.map(tool => tool.name)) === JSON.stringify(["read", "write", "edit", "powershell", "chrome"]);
+      return selectedChat.streamFn(...args);
+    } }) };
+  const chatInput = { workspace: root, model: configured.models.chat ?? configured.models.execute, chrome: configured.chrome,
+    limits: { ...configured.limits, maxTurnsPerRun: 24, maxMinutes: 10, stepTimeoutSeconds: 300 },
+    onEvent: (event: RuntimeEvent) => {
+      events.push(event);
+      if (event.type === "tool_start") { const args = JSON.parse(event.text); console.log(`Chat: ${event.toolName} ${args.action ?? ""} ${args.tool ?? ""}`); }
+    } };
+  const instructions = `Only operate the already open synthetic page ${url}. Use only chrome. Discover tools with list and describe before call; obtain pageId from list_pages. Do not create pages, use evaluate_script, set/read cookies or log in. `;
+  chat = new ChatSession(chatOptions);
+  chatUsage.push(await chat.send({ ...chatInput, signal: AbortSignal.timeout(300_000), text: instructions + "Read the page snapshot and report its title and button label." }));
+  checks.firstChatUsedChrome = events.some(event => event.mode === "chat" && event.type === "tool_start" && event.toolName === "chrome");
+  checks.bridgeSurvivedFirstChat = JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge);
+  const firstConfirmations = confirmations;
+  chatUsage.push(await chat.send({ ...chatInput, signal: AbortSignal.timeout(300_000), text: instructions + "Click Confirm session, read the resulting snapshot and report the full confirmation code." }));
+  checks.secondChatUsedExistingCookie = confirmations > firstConfirmations && chat.history().messages.some(item => item.role === "assistant" && item.text.includes(confirmation));
+  checks.bridgeSurvivedSecondChat = JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge);
+  chat.close(); chat = new ChatSession(chatOptions);
+  chatUsage.push(await chat.send({ ...chatInput, signal: AbortSignal.timeout(300_000), text: instructions + "Read the current snapshot and report the full existing confirmation code without clicking again." }));
+  checks.reopenedChatReadConfirmation = chat.history().messages.at(-1)?.text.includes(confirmation) === true;
+  chat.reset(); chat.close(); chat = undefined;
+  checks.bridgeSurvivedChatReset = JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge);
+  const childSource = `import {controlChrome} from ${JSON.stringify(new URL("../src/runtime/chrome-daemon.ts", import.meta.url).href)}; console.log(JSON.stringify(await controlChrome(${JSON.stringify(chromeOptions)}, "status")));`;
+  const independent = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childSource], { windowsHide: true, timeout: 30_000 });
+  checks.sameBridgeFromIndependentProcess = JSON.stringify(JSON.parse(independent.stdout)) === JSON.stringify(originalBridge);
   const config = defaultConfig("验证已有 Chrome 会话可被 Execute 复用", `Only operate the synthetic page ${url}. Other Chrome pages are outside this smoke test.`);
   config.models = configured.models; config.chrome = configured.chrome;
   config.limits = { ...config.limits, maxTurnsPerRun: 28, maxMinutes: 10, stepTimeoutSeconds: 480 };
@@ -88,7 +128,10 @@ try {
   const runId = "chrome-execute";
   const snapshot = store.beginRun(runId, "execute", step.id);
   runDir = join(store.dataDir, "runs", runId);
-  const runner = new PiRunner({ resolveModel: async () => ({ ...selected, streamFn: (...args) => { requests++; return selected.streamFn(...args); } }) });
+  const runner = new PiRunner({ resolveModel: async () => ({ ...selected, streamFn: (...args) => {
+    if (requests++ === 0) checks.executeFiveTools = JSON.stringify(args[1].tools?.map(tool => tool.name)) === JSON.stringify(["read", "write", "edit", "powershell", "chrome"]);
+    return selected.streamFn(...args);
+  } }) });
   const result = await runner.run({ id: runId, mode: "execute", snapshot, workspace: root, runDir, blackboardPath: store.projectionPath,
     step: snapshot.steps.find(item => item.id === step.id), signal: AbortSignal.timeout(480_000), onEvent: event => {
       events.push(event);
@@ -96,7 +139,7 @@ try {
     } });
   execution = result.output as Execution; modelUsage = result.usage;
   const board = store.applyExecution(runId, execution, result.usage);
-  const calls = events.filter(event => event.type === "tool_start" && event.toolName === "chrome").map(event => JSON.parse(event.text));
+  const calls = events.filter(event => event.mode === "execute" && event.type === "tool_start" && event.toolName === "chrome").map(event => JSON.parse(event.text));
   const originals = await Promise.all((await readdir(join(runDir, "artifacts"))).filter(file => /^chrome-.*\.json$/.test(file)).map(async file => JSON.parse(await readFile(join(runDir!, "artifacts", file), "utf8"))));
   Object.assign(checks, {
     modelUsedChrome: calls.some(call => call.action === "call"),
@@ -108,14 +151,15 @@ try {
     evidenceCommitted: board.evidence.length > 0,
     noToolErrors: !events.some(event => event.type === "tool_end" && event.isError),
     completed: execution.result === "done",
+    bridgeSurvivedExecute: JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge),
   });
   if (before !== undefined) checks.sameBrowserInstance = before === await browserFingerprint();
   assert(Object.values(checks).every(Boolean), `Chrome smoke checks failed: ${JSON.stringify(checks)}`);
 } catch (error) { failure = error instanceof Error ? error.message : String(error); }
 finally {
   await bootstrap?.close();
+  chat?.close();
   store?.close();
-  if (previousHome === undefined) delete process.env.XLOOM_HOME; else process.env.XLOOM_HOME = previousHome;
   try {
     cleanup = createChromeSession(chromeOptions);
     const result = await call(cleanup, "list_pages");
@@ -129,10 +173,18 @@ finally {
     checks.browserStillConnected = !!result.structuredContent?.pages;
   } catch (error) { failure ??= `Cleanup failed: ${error instanceof Error ? error.message : String(error)}`; }
   await cleanup?.close();
+  try {
+    await controlChrome(chromeOptions, "disconnect");
+    const disconnected = await controlChrome(chromeOptions, "status");
+    checks.manualDisconnectStoppedBridge = "bridgeRunning" in disconnected && !disconnected.bridgeRunning && disconnected.manuallyDisconnected;
+  } catch (error) { failure ??= `Disconnect failed: ${error instanceof Error ? error.message : String(error)}`; }
+  if (previousHome === undefined) delete process.env.XLOOM_HOME; else process.env.XLOOM_HOME = previousHome;
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
 }
-const report = { status: failure ? "failed" : "passed", scope: "Guided local Execute tool smoke test in the existing Chrome; no external website tested.",
+if (!Object.values(checks).every(Boolean)) failure ??= "One or more Chrome checks failed.";
+const report = { status: failure ? "failed" : "passed", scope: "Guided local Chat/Execute tool smoke test in the existing Chrome; no external website tested.",
   model: { provider: selected.model.provider, id: selected.model.id, supportsImages: selected.model.input.includes("image") }, requests, usage: modelUsage, checks,
+  chat: { model: `${selectedChat.model.provider}/${selectedChat.model.id}`, requests: chatRequests, usage: chatUsage },
   otherTools: events.filter(event => event.type === "tool_start" && event.toolName !== "chrome").map(event => event.toolName),
   server: { seeds, authenticatedProbes, confirmations, unauthorizedRequests }, runDir, ...(failure ? { failure } : {}) };
 await mkdir(dirname(reportFile), { recursive: true }); await writeFile(reportFile, JSON.stringify(report, null, 2), { mode: 0o600 });

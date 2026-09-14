@@ -38,6 +38,20 @@ function setup(options: AppOptions = {}, describeModel?: NonNullable<AppOptions[
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
 describe("saved task navigation", () => {
+  it("passes Chrome configuration into Chat and keeps explicit disconnect state across reset and application close", async () => {
+    const test = setup(); test.config.chrome = { enabled: false, channel: "beta" };
+    await test.app.close();
+    const configured = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(configured);
+    await configured.chat("Use configured tools");
+    expect(test.chatRequests[0]?.chrome).toEqual(test.config.chrome);
+    await configured.chromeControl("disconnect"); configured.resetChat(); await configured.close();
+    const reopened = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(reopened);
+    expect(await reopened.chromeControl("status")).toEqual({ bridgeRunning: false, manuallyDisconnected: true });
+    await reopened.chromeControl("connect");
+    expect(await reopened.chromeControl("status")).toEqual({ bridgeRunning: false, manuallyDisconnected: false });
+    await expect(test.app.chromeControl("status")).rejects.toThrow("已关闭");
+  });
+
   it.each(["paused", "error"])("retains an idle task's %s diagnosis through app close and reopen", async status => {
     const test = setup();
     if (status === "error") test.runner.run.mockRejectedValue(new Error("Synthetic original checksum failure"));

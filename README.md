@@ -11,7 +11,9 @@
 
 Xloom 是一个本地运行、面向授权安全研究的双 Agent 研究 Loop。
 
-默认以普通聊天打开，模型可以使用四个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，仅有 `read`；Execute 使用 `read / write / edit / powershell / chrome` 深入调查当前步骤，并可先提交关键观察再继续或交回规划。`chrome` 按需复用用户已登录的 Chrome；[连接与验证说明](docs/chrome.md)。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
+默认以普通聊天打开。Chat 和 Execute 都可使用 `read / write / edit / powershell / chrome` 五个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，仅有 `read`；Execute 深入调查当前步骤，并可先提交关键观察再继续或交回规划。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
+
+`chrome` 按需复用用户已登录的 Chrome，连接跨回复和应用重启保留；用 `/chrome disconnect` 手动断开，`/chrome connect` 允许重连。详见[连接与验证说明](docs/chrome.md)。
 
 它不做批量扫描，也不预设漏洞数量，而是模拟真实研究过程：
 
@@ -35,7 +37,7 @@ Xloom 是一个本地运行、面向授权安全研究的双 Agent 研究 Loop�
 `decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。每个新 run 创建新的 Pi Agent，消息数组从空开始；不同 run / 角色之间不共享 `messages`。
 
 - **Decide / 元认知**：仅挂载 `read`，负责规划、读取证据、验证交接条件与审查。元认知映射到 Decide 的模型，在同一套黑板上的全新上下文复核。
-- **Execute**：使用四个工具完成调查与状态变更，新增的权威事实 / 证据由 Execute 提交。
+- **Execute**：使用五个工具完成调查与状态变更，新增的权威事实 / 证据由 Execute 提交。
 
 一次典型闭环：
 

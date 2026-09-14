@@ -138,7 +138,7 @@ export class AppController {
     return this.perform("chat", async signal => {
       this.chatStatus = "running";
       try {
-        this.addChatUsage(await this.chatSession.send({ text, workspace: this.workspace, model: this.config.models.chat ?? this.config.models.execute, limits: this.config.limits, signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) }));
+        this.addChatUsage(await this.chatSession.send({ text, workspace: this.workspace, model: this.config.models.chat ?? this.config.models.execute, limits: this.config.limits, chrome: this.config.chrome, signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) }));
         this.chatStatus = "idle";
       } catch (error) {
         if (error && typeof error === "object" && "usage" in error) this.addChatUsage(error.usage);
@@ -149,6 +149,11 @@ export class AppController {
   }
   resetChat(): void { this.idle(); this.chatSession.reset(); this.chatUsage = { input: 0, output: 0, cost: 0 }; this.chatStatus = "idle"; this.mode = "chat"; this.refreshDisplayInfo(); this.emit({ type: "session" }); }
   chatHistory() { return this.chatSession.history?.(); }
+  async chromeControl(action: "status" | "disconnect" | "connect") {
+    if (this.closed) throw new Error("当前 xloom 会话已关闭。");
+    const { controlChrome } = await import("./runtime/chrome-daemon.js");
+    return controlChrome({ workspace: this.workspace, config: this.config.chrome, artifactsDirectory: projectDirectory(this.workspace) }, action);
+  }
 
   listTasks() { return listTasks(this.workspace); }
   storagePaths() {

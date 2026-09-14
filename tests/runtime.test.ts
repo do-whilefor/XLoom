@@ -14,6 +14,7 @@ import { stagePath, stageWriter } from "../src/runtime/stage.js";
 import { createChromeSession } from "../src/runtime/chrome.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { controlChrome } from "../src/runtime/chrome-daemon.js";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
@@ -203,7 +204,7 @@ describe("Pi runtime isolation", () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(() => process.kill(pid!, 0)).toThrow();
   });
-  it.each(["success", "failure", "cancel"])("closes Execute's Chrome connection on run %s", async outcome => {
+  it.each(["success", "failure", "cancel"])("releases Execute's turn-local Chrome handle on run %s", async outcome => {
     const input = await request("execute"), controller = new AbortController(); input.signal = controller.signal;
     const close = vi.fn(async () => {});
     const runner = new PiRunner({ createChrome: options => ({ ...createChromeSession(options), close }),
@@ -1261,6 +1262,62 @@ describe.each(["chat", "decide"] as const)("Pi-returned thinking in %s", kind =>
 });
 
 describe("private Pi chat session", () => {
+  it("uses Chrome through the actual Pi loop on consecutive replies, with private artifacts and a configurable fifth tool", async () => {
+    const input = await chatRequest(); input.limits.maxTurnsPerRun = 5;
+    const events: RuntimeEvent[] = []; input.onEvent = event => events.push(event);
+    const closed = vi.fn(), storageDirectory = join(input.workspace, "chat-storage");
+    let requests = 0;
+    const factory = vi.fn((options: Parameters<typeof createChromeSession>[0]) => {
+      const session = createChromeSession(options, () => new StdioClientTransport({ command: process.execPath,
+        args: [fileURLToPath(new URL("./fixtures/chrome-server.mjs", import.meta.url))], stderr: "ignore" }));
+      return { ...session, close: async () => { await session.close(); closed(); } };
+    });
+    const session = new ChatSession({ storageDirectory, createChrome: factory, resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (input.chrome?.enabled === false) { expect(context.tools?.map(tool => tool.name)).not.toContain("chrome"); return message([{ type: "text", text: "Disabled" }]); }
+      const args = [{ action: "list" }, { action: "describe", tool: "echo" }, { action: "call", tool: "echo", args: { value: "private browser result" } }][requests++ % 4];
+      if (args) return message([{ type: "toolCall", id: `chat-chrome-${requests}`, name: "chrome", arguments: args }], "toolUse");
+      expect(JSON.stringify(context.messages)).toContain("private browser result");
+      expect(JSON.stringify(context.messages)).toContain("chat-storage");
+      return message([{ type: "text", text: "Verified private fixture" }]);
+    }) }) });
+    try {
+      await session.send(input); await session.send({ ...input, text: "continue" });
+      expect(factory).toHaveBeenCalledTimes(2); expect(closed).toHaveBeenCalledTimes(2);
+      expect(events.filter(event => event.type === "tool_end" && event.toolName === "chrome")).toHaveLength(6);
+      expect(events.some(event => event.isError)).toBe(false);
+      input.chrome = { enabled: false }; await session.send(input); expect(factory).toHaveBeenCalledTimes(2);
+      await expect(readFile(join(input.workspace, "blackboard.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { session.close(); }
+  });
+
+  it("shares the actual persistent daemon between Chat and Execute through replies, resets, errors and cancellation", async () => {
+    const run = await request("execute"), input = await chatRequest(); input.workspace = run.workspace;
+    const options = { workspace: run.workspace, artifactsDirectory: run.runDir };
+    let calls = 0, outcome = "success";
+    const control = new AbortController();
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      if (++calls % 2 === 1) return message([{ type: "toolCall", id: `offline-${calls}`, name: "chrome", arguments: { action: "call", tool: "take_snapshot", args: { pageId: "offline-invalid" } } }], "toolUse");
+      if (outcome === "cancel") control.abort();
+      return outcome === "failure" ? { ...message([], "error"), errorMessage: "Synthetic fatal model failure" } : message([{ type: "text", text: "PRIVATE_CHAT_RESULT" }]);
+    }) }) });
+    try {
+      await session.send(input);
+      const original = await controlChrome(options, "status"); expect(original.bridgeRunning).toBe(true);
+      await session.send(input); session.reset();
+      outcome = "failure"; await expect(session.send(input)).rejects.toThrow("Synthetic fatal"); session.reset();
+      outcome = "cancel"; await expect(session.send({ ...input, signal: control.signal })).rejects.toThrow(); session.close();
+      expect(await controlChrome(options, "status")).toEqual(original);
+      let turns = 0;
+      const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+        expect(JSON.stringify(context)).not.toContain("PRIVATE_CHAT_RESULT");
+        return ++turns === 1 ? message([{ type: "toolCall", id: "execute-browser", name: "chrome", arguments: { action: "call", tool: "take_snapshot", args: { pageId: "offline-invalid" } } }], "toolUse")
+          : message([{ type: "text", text: '{"summary":"Offline schema fixture","result":"done"}' }]);
+      }) }) });
+      await runner.run(run);
+      expect(await controlChrome(options, "status")).toEqual(original);
+    } finally { session.close(); await controlChrome(options, "disconnect"); }
+  }, 30_000);
+
   it("retains ordinary chat history, streams natural text and counts each response's usage", async () => {
     const input = await chatRequest();
     const seen: Context[] = [];
@@ -1276,7 +1333,7 @@ describe("private Pi chat session", () => {
     expect(await session.send({ ...input, text: "second message" })).toEqual({ input: 13, output: 4, cost: 0.02 });
     expect(resolves).toBe(2);
     expect(agents).toHaveLength(1);
-    expect(agents[0].initialState?.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+    expect(agents[0].initialState?.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
     expect(agents[0].beforeToolCall).toBeUndefined();
     expect(agents[0].afterToolCall).toBeUndefined();
     expect(seen.map(context => context.messages.length)).toEqual([1, 3]);

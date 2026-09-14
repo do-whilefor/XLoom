@@ -21,6 +21,7 @@ const parameters = {
 const inputSchema = z.object({ action: z.enum(["list", "describe", "call"]), tool: z.string().min(1).optional(), args: z.record(z.unknown()).optional() }).strict();
 const connectionHelp = "Use the already running Chrome; enable chrome://inspect/#remote-debugging and accept Chrome's connection prompt. No browser/profile was launched. After a timeout or disconnect, inspect page state before retrying an action.";
 const maxText = 24_000;
+const catalogs = new Map<string, Tool[]>();
 
 export interface ChromeOptions {
   workspace: string;
@@ -43,12 +44,10 @@ export function chromeServerParameters(options: ChromeOptions): StdioServerParam
   ], cwd: options.workspace, stderr: "ignore", env: { CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: "1", CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: "1" } };
 }
 
-/** One lazy stdio connection per Execute run; only the bridge process is owned by Xloom. */
+/** A turn-local tool handle; the default browser connection belongs to the persistent CLI daemon. */
 export function createChromeSession(options: ChromeOptions,
-  transportFactory: () => Transport | Promise<Transport> = async () => {
-    const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-    return new StdioClientTransport(chromeServerParameters(options));
-  }): ChromeSession {
+  transportFactory?: () => Transport | Promise<Transport>): ChromeSession {
+  const catalogKey = options.config?.channel ?? "stable";
   let client: Client | undefined;
   let transport: Transport | undefined;
   let ready: Promise<Tool[]> | undefined;
@@ -63,9 +62,11 @@ export function createChromeSession(options: ChromeOptions,
     return closing;
   };
   const connect = (signal: AbortSignal) => ready ??= (async () => {
+    if (!transportFactory && catalogs.has(catalogKey)) return catalogs.get(catalogKey)!;
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     signal.throwIfAborted();
-    const candidate = await transportFactory();
+    const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+    const candidate = transportFactory ? await transportFactory() : new StdioClientTransport(chromeServerParameters(options));
     if (signal.aborted) { await candidate.close(); signal.throwIfAborted(); }
     transport = candidate;
     client = new Client({ name: "xloom-chrome", version: "0.1.0" });
@@ -79,6 +80,11 @@ export function createChromeSession(options: ChromeOptions,
       if (cursor && cursors.has(cursor)) throw new Error("Chrome tool listing repeated a cursor.");
       if (cursor) cursors.add(cursor);
     } while (cursor);
+    if (!transportFactory) {
+      // tools/list does not attach Chrome. Reuse definitions without retaining this discovery process.
+      await client.close(); await transport.close(); client = undefined; transport = undefined;
+      catalogs.set(catalogKey, tools);
+    }
     return tools;
   })();
   const jsonResult = (value: unknown): AgentToolResult<unknown> => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
@@ -89,7 +95,7 @@ export function createChromeSession(options: ChromeOptions,
       parameters,
       async execute(_id, value, toolSignal) {
         const input = inputSchema.parse(value);
-        if (closed) throw new Error("Chrome connection is closed for this run.");
+        if (closed) throw new Error("Chrome tool handle is closed for this turn.");
         if (options.config?.enabled === false) throw new Error("Chrome is disabled in this task's configuration.");
         const signal = AbortSignal.any([lifetime.signal, ...[options.signal, toolSignal].filter((item): item is AbortSignal => !!item)]);
         signal.throwIfAborted();
@@ -104,7 +110,9 @@ export function createChromeSession(options: ChromeOptions,
         if (!tool) throw new Error(`Unknown Chrome tool: ${input.tool}. Use list.`);
         if (input.action === "describe") return jsonResult(tool);
         let result: CallToolResult;
-        try { result = await client!.callTool({ name: tool.name, arguments: input.args ?? {} }, undefined, { signal, timeout: 120_000 }) as CallToolResult; }
+        try { result = transportFactory
+          ? await client!.callTool({ name: tool.name, arguments: input.args ?? {} }, undefined, { signal, timeout: 120_000 }) as CallToolResult
+          : await (await import("./chrome-daemon.js")).callPersistentChrome(options, tool.name, input.args ?? {}, signal); }
         catch (error) { await close(); throw new Error(`Chrome call failed; it was not replayed: ${error instanceof Error ? error.message : String(error)}. ${connectionHelp}`); }
         signal.throwIfAborted();
         const artifactBase = join(options.artifactsDirectory, `chrome-${randomUUID()}`);

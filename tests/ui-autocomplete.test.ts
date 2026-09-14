@@ -69,10 +69,10 @@ describe("command-only autocomplete", () => {
   });
 
   it("completes required and optional arguments with a space, but not no-argument commands", async () => {
-    for (const name of ["/run", "/hint", "/model", "/apikey", "/help", "/exit"]) {
+    for (const name of ["/run", "/hint", "/model", "/apikey", "/chrome", "/help", "/exit"]) {
       const suggestions = (await query(name))!;
       const result = provider.applyCompletion([name], 0, name.length, suggestions.items[0]!, name);
-      const hasArgument = ["/run", "/hint", "/model", "/apikey"].includes(name);
+      const hasArgument = ["/run", "/hint", "/model", "/apikey", "/chrome"].includes(name);
       expect(result.lines).toEqual([name + (hasArgument ? " " : "")]);
       expect(result.cursorCol).toBe(result.lines[0]!.length);
     }

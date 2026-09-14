@@ -88,6 +88,20 @@ afterEach(() => {
 });
 
 describe("command-line entry points", () => {
+  it("controls Chrome without TTY, model credentials, a configured task or browser startup", () => {
+    const root = workspace();
+    const status = () => JSON.parse(cli(["chrome"], root).stdout);
+    expect(status()).toEqual({ bridgeRunning: false, manuallyDisconnected: false });
+    expect(existsSync(projectDirectory(root))).toBe(false);
+    expect(cli(["chrome", "disconnect"], root).status).toBe(0);
+    expect(status()).toEqual({ bridgeRunning: false, manuallyDisconnected: true });
+    expect(cli(["chrome", "connect"], root).status).toBe(0);
+    expect(status()).toEqual({ bridgeRunning: false, manuallyDisconnected: false });
+    expect(existsSync(projectConfigPath(root))).toBe(false);
+    expect(cli(["chrome", "unknown"], root).combined).toContain("Use chrome");
+    expect(cli(["chrome", "connect", "extra"], root).status).toBe(1);
+  }, 30_000);
+
   it("resolves arbitrary launch directories and explicit workspace without creating local data", () => {
     const a = workspace(); const b = workspace();
     const first = JSON.parse(cli(["paths"], a).stdout);
@@ -107,7 +121,8 @@ describe("command-line entry points", () => {
     expect(result.stdout).toContain("local two-agent research loop");
     expect(result.stdout).toContain("read/write/edit/powershell");
     expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell");
-    expect(result.stdout).toContain("Execute also has chrome for the running browser");
+    expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell/chrome");
+    expect(result.stdout).toContain("chrome [status|disconnect|connect]");
     expect(result.stdout).toContain("Decide and metacog have read only");
     expect(result.stdout).toContain("--headless");
     expect(result.stdout).toContain("Ctrl+O");

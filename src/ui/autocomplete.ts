@@ -17,6 +17,7 @@ export const COMMANDS = [
   { name: "/tasks", description: "列出当前工作区的历史研究任务" },
   { name: "/open", argumentHint: "<任务ID>", description: "选择历史任务，使用 /start 继续" },
   { name: "/paths", description: "查看聊天、任务和证据的数据位置" },
+  { name: "/chrome", argumentHint: "[status|disconnect|connect]", description: "查看 Chrome 常驻连接，手动断开或允许重新连接" },
   { name: "/pause", description: "暂停当前运行" },
   { name: "/stop", description: "停止当前运行，保留黑板与证据" },
   { name: "/hint", argumentHint: "<信息>", description: "向任务黑板补充信息" },

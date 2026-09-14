@@ -2,7 +2,7 @@
 
 ## 聊天与任务入口
 
-`AppController` 负责应用级模式、模型设置和当前任务指针。普通文字只交给独立 `ChatSession`，使用 Pi Agent 的持续消息历史与四工具，自然语言回复，不使用红队 JSON 契约。应用启用 `ChatArchive` 将续接上下文持久化；`/new`、切换模型或凭据会新建聊天并保留旧文件。关闭应用不改变聊天指针；重启后仅在模型端点与身份一致且无待完成工具时恢复。详见 [会话与任务](sessions.md)。
+`AppController` 负责应用级模式、模型设置和当前任务指针。普通文字只交给独立 `ChatSession`，使用 Pi Agent 的持续消息历史与五工具，自然语言回复，不使用红队 JSON 契约。应用启用 `ChatArchive` 将续接上下文持久化；`/new`、切换模型或凭据会新建聊天并保留旧文件。关闭应用不改变聊天指针；重启后仅在模型端点与身份一致且无待完成工具时恢复。详见 [会话与任务](sessions.md)。
 
 `/run 目标` 创建 `.xloom/tasks/<id>` 下的新黑板，由原 `LoopController` 运行；不带入聊天、旧 Hint 或旧任务范围。`/start` 恢复当前选中任务。新任务不删除旧数据，工具 cwd 始终是用户项目目录。应用锁防止同一工作区并发开启聊天/任务应用；单个 App 中也不并发运行聊天、红队 Loop 与凭据变更。旧根黑板仍可恢复。
 
@@ -28,8 +28,8 @@ Loop 没有固定执行步数上限。连续无进展仅触发元认知：有可
 | --- | --- | --- |
 | `types.ts` / `schema.ts` | 版本化配置、FGS、运行与结果契约 | 迁移器、更多有类型的证据/关系 |
 | `app.ts` / `workspace.ts` | 聊天/任务路由、任务指针、单工作区锁、非秘密模型设置 | 会话选择与任务管理，不共享历史 |
-| `runtime/chat.ts` | 独立普通聊天 Pi Agent、四工具、取消与用量 | 可选聊天持久化，不注入红队黑板 |
-| `runtime/chrome.ts` | Execute 专用的当前 Chrome 会话连接、能力发现、原件与图片归档 | 固定 MCP stdio 适配，无通用插件或浏览器启动回退 |
+| `runtime/chat.ts` | 独立普通聊天 Pi Agent、五工具、取消与用量 | 可选聊天持久化，不注入红队黑板 |
+| `runtime/chrome.ts` | Chat／Execute 共用的当前 Chrome 会话连接、能力发现、原件与图片归档 | 固定 MCP 能力目录＋上游 CLI 常驻连接，无浏览器启动回退 |
 | `runtime/settings.ts` | Pi 目录、持久凭据与 OAuth callbacks | 复用 Pi 新增的供应商登录能力 |
 | `loop/context.ts` | `ContextProjector`：事实索引、因果与修正闭包、组合条件、旧依赖复核 | 更细粒度的任务上下文策略 |
 | `loop/attempts.ts` | 条件试验去重、兼容旧输出的进展标记 | 改善假设标识稳定性，不以新文件冒充进展 |
@@ -151,7 +151,7 @@ Controller 在提交前检查 NEED_INPUT 的结构性前提（考虑本次 revie
 
 ## Pi 模型复用
 
-Execute 另挂载 `runtime/chrome.ts` 的单一 `chrome` 工具，以 list／describe／call 按需发现固定 Chrome MCP 包的能力；客户端和 stdio 进程懒加载。连接固定使用 autoConnect，复用当前登录态，拒绝隔离 context，不启动浏览器。每个 run 独占连接，退出／取消关闭 stdio，Chrome 保持运行。原始调用和图片写入 run artifacts，后续仍按既有 Evidence／Fact 提交流程验证；MCP isError 转为 Pi 工具错误，传输失败不重放。详见 [Chrome](chrome.md)。
+Chat 和 Execute 挂载 `runtime/chrome.ts` 的单一 `chrome` 工具，以 list／describe／call 按需发现固定 Chrome MCP 包的能力。目录临时读取后缓存，实际调用经 `runtime/chrome-daemon.ts` 复用上游 CLI 常驻进程。连接固定使用 autoConnect，复用当前登录态，拒绝隔离 context，不启动浏览器。同工作区与 XLOOM_HOME 共享一条连接，回复／运行结束、取消、聊天重置和应用重启均保留；只有显式 `/chrome disconnect` 停止进程并阻止工具重连，`/chrome connect` 解除手动断开标记。浏览器关闭或撤权仍可能断线。Chat 原件写入私有聊天 artifacts，Execute 原件写入 run artifacts 并按既有 Evidence／Fact 提交流程验证；MCP isError 转为 Pi 工具错误，取消只停止等待，失败不重放。详见 [Chrome](chrome.md)。
 
 使用 Pi 公开 ModelRuntime，不复制供应商实现或限制自定义 API 为三种。读取 Pi 用户目录的 auth.json、models.json 及缓存目录，由 Pi 处理已有 OAuth 登录刷新、环境/API Key 认证、供应商特有 headers 和流式请求。`models` CLI 仅列本地内置/缓存/自定义目录；运行时按需发现动态目录，遵守 PI_OFFLINE。模型身份与凭据不进入共享黑板提示词；执行期间刷新产生的凭据也加入日志/流式文本过滤。
 
@@ -159,7 +159,7 @@ Execute 另挂载 `runtime/chrome.ts` 的单一 `chrome` 工具，以 list／des
 
 ## 验证层次
 
-Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 失败保留 / 用量差额、条件变化与重复观察；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证阶段交接、旧依赖复核、取消、预算和恢复；Context / Policy 测试覆盖递归因果闭包、事实索引、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、Decide 只读 / Execute 四工具及 Chrome、上下文压缩、同次瞬断续接、协议修复、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
+Schema / Store 测试覆盖字段与图一致性、checkpoint 事务 / 幂等 / 失败保留 / 用量差额、条件变化与重复观察；App 测试覆盖模式隔离、多任务恢复、模型设置与取消；Controller 测试用合成 Runner 验证阶段交接、旧依赖复核、取消、预算和恢复；Context / Policy 测试覆盖递归因果闭包、事实索引、字段隔离与触发优先级；Runtime 测试覆盖真实 Pi API、Decide 只读 / Chat 与 Execute 五工具、上下文压缩、同次瞬断续接、协议修复、凭据过滤及 Windows 进程树终止；Settings/UI 测试使用隔离凭据存储、可控终端与模拟剪贴板检查设置、隐私、布局和生命周期；CLI 演示不访问真实目标。
 
 外层集成测试串联真实 Controller、SQLite、Pi Agent 和原生 write/read 工具，只替换模型解析及供应商响应流：验证文件写入/读取、证据归档、黑板交接、fresh Decide 完成复核，以及写入后供应商失败时定位残留文件、安排新 Step 检查而不自动重放副作用。这证明软件组件的闭环与隔离，不代表真实 LLM 的协议遵从率或漏洞验证成功率。
 

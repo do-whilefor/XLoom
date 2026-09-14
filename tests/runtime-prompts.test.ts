@@ -99,17 +99,17 @@ describe("compact built-in prompts", () => {
         expect(context.systemPrompt).not.toContain(powerShellPrompt);
         expect(context.systemPrompt).not.toMatch(/Decide|Execute|blackboard|checkpointFile|yieldToDecide/);
         expect(JSON.stringify(context)).not.toMatch(/methodIds|methods.catalog|baseline-authz|findingContext|wikiPages|authoringGuide/);
-        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell"]);
+        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
         const definitions = JSON.stringify(context.tools?.map(({ name, description, parameters }) => ({ name, description, parameters })));
-        expect(definitions.length).toBeLessThanOrEqual(3_300);
-        expect(context.systemPrompt!.length + definitions.length).toBeLessThanOrEqual(3_600);
+        expect(definitions.length).toBeLessThanOrEqual(3_950);
+        expect(context.systemPrompt!.length + definitions.length).toBeLessThanOrEqual(4_250);
         // Measure everything exposed at the provider boundary, including full tool
         // definitions and conversation roles/content. Exclude volatile timestamps
         // and response usage metadata; provider-specific framing is not estimated.
         const size = footprint(context.systemPrompt!, JSON.stringify(context.tools),
           JSON.stringify(context.messages.map(({ role, content }) => ({ role, content }))));
-        expect(size.chars).toBeLessThanOrEqual(turn === 0 ? 3_750 : 3_900);
-        expect(size.estimatedTokens).toBeLessThanOrEqual(turn === 0 ? 940 : 980);
+        expect(size.chars).toBeLessThanOrEqual(turn === 0 ? 4_400 : 4_550);
+        expect(size.estimatedTokens).toBeLessThanOrEqual(turn === 0 ? 1_100 : 1_140);
         const shell = context.tools!.find(tool => tool.name === "powershell")!;
         expect(shell.description.split(powerShellPrompt)).toHaveLength(2);
       }

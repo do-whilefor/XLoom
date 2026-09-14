@@ -23,6 +23,7 @@ const help = `xloom — local two-agent research loop (Windows MVP)
   xloom models [--provider NAME]  List Pi's local built-in/cached/custom model catalog
   xloom paths                Show workspace, user data and configuration paths
   xloom tasks                List saved research tasks without running agents
+  xloom chrome [status|disconnect|connect]  Manage the persistent Chrome connection
   xloom migrate [--pi-dir PATH]  Import legacy workspace data / Pi settings; retain originals
   xloom demo [--headless]     Offline synthetic fixture in a new temporary workspace
 
@@ -31,7 +32,7 @@ TUI: plain text chats; /run GOAL starts a separate two-agent task
      /model /apikey /new /tasks /open TASK_ID /paths /start /pause /stop /hint /meta /board /help /exit
      Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
-Chat and Execute have read/write/edit/powershell; Execute also has chrome for the running browser.
+Chat and Execute have read/write/edit/powershell/chrome for the running browser.
 Decide and metacog have read only.
 Tools run with the current user's OS permissions.
 `;
@@ -44,9 +45,9 @@ async function main(): Promise<void> {
   }, allowPositionals: true, strict: true });
   const command = positionals[0] ?? "run";
   if (values.help || command === "help") { process.stdout.write(help); return; }
-  if (positionals.length > 1) throw new Error("Unexpected positional arguments; use --goal for task text.");
+  if (positionals.length > (command === "chrome" ? 2 : 1)) throw new Error("Unexpected positional arguments; use --goal for task text.");
   const demo = command === "demo";
-  if (!["init", "run", "status", "report", "doctor", "demo", "models", "paths", "tasks", "migrate"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
+  if (!["init", "run", "status", "report", "doctor", "demo", "models", "paths", "tasks", "migrate", "chrome"].includes(command)) throw new Error(`Unknown command: ${command}. Use --help.`);
   if (values.provider !== undefined && command !== "models") throw new Error("--provider is only supported by the models command.");
   if (values["pi-dir"] !== undefined && command !== "migrate") throw new Error("--pi-dir is only supported by migrate.");
   if (command === "models") {
@@ -59,6 +60,15 @@ async function main(): Promise<void> {
   if (demo && (values.workspace || values.config)) throw new Error("Demo always uses a new temporary workspace; omit --workspace and --config.");
   const workspace = demo ? mkdtempSync(path.join(tmpdir(), "xloom-demo-")) : realpathSync(path.resolve(values.workspace ?? process.cwd()));
   const configPath = values.config ? path.resolve(workspace, values.config) : projectConfigPath(workspace);
+  if (command === "chrome") {
+    const action = positionals[1] ?? "status";
+    if (action !== "status" && action !== "disconnect" && action !== "connect") throw new Error("Use chrome [status|disconnect|connect].");
+    const { controlChrome } = await import("./runtime/chrome-daemon.js");
+    const result = await controlChrome({ workspace, artifactsDirectory: projectDirectory(workspace),
+      config: existsSync(configPath) ? loadConfig(configPath).chrome : undefined }, action);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "tasks") { process.stdout.write(`${JSON.stringify(listTasks(workspace), null, 2)}\n`); return; }
   if (command === "paths") {
     const taskId = currentTaskId(workspace);

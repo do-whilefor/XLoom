@@ -394,6 +394,21 @@ describe("response timeline model", () => {
 });
 
 describe("TUI command routing", () => {
+  it("routes explicit Chrome controls and reports failures without calling an Agent", async () => {
+    const { controller } = fakeController();
+    const chromeControl = vi.fn(async (_action: string) => ({ bridgeRunning: true }));
+    const actions = { start: vi.fn(), quit: vi.fn(), print: vi.fn(), chat: vi.fn() };
+    for (const command of ["/chrome", "/chrome disconnect", "/chrome connect", "/chrome invalid", "/chrome status extra"]) dispatchCommand(command, { ...controller, chromeControl }, actions);
+    await vi.waitFor(() => expect(actions.print).toHaveBeenCalledWith("Chrome", '{"bridgeRunning":true}'));
+    expect(chromeControl.mock.calls).toEqual([["status"], ["disconnect"], ["connect"]]);
+    expect(actions.chat).not.toHaveBeenCalled(); expect(controller.hint).not.toHaveBeenCalled();
+    chromeControl.mockRejectedValueOnce(new Error("Synthetic socket error"));
+    dispatchCommand("/chrome status", { ...controller, chromeControl }, actions);
+    await vi.waitFor(() => expect(actions.print).toHaveBeenCalledWith("Chrome", "Synthetic socket error"));
+    dispatchCommand("/chrome", controller, actions);
+    expect(actions.print).toHaveBeenCalledWith("xloom", expect.stringContaining("没有 Chrome"));
+  });
+
   it("sends only explicit /hint to blackboard and ordinary input to isolated chat", () => {
     const { controller } = fakeController();
     const chat = vi.fn(async () => {});

@@ -28,6 +28,7 @@ export interface UiController {
   openTask?(id: string): void;
   storagePaths?(): object;
   chatHistory?(): { id?: string; file?: string; pendingToolCalls: string[]; messages: { role: string; text: string }[] } | undefined;
+  chromeControl?(action: "status" | "disconnect" | "connect"): Promise<object>;
   getSessionInfo?(): SessionInfo;
   getModels?(): Promise<{ provider: string; model: string; name: string }[]>;
   getProviders?(): Promise<{ id: string; name: string; authTypes: string[] }[]>;
@@ -38,7 +39,8 @@ export interface UiController {
 }
 
 export const HELP = [
-  "普通输入：和模型聊天，可使用 read / write / edit / powershell；/new 新建聊天；/history 保存内容",
+  "普通输入：和模型聊天，可使用 read / write / edit / powershell / chrome；/new 新建聊天；/history 保存内容",
+  "/chrome [status|disconnect|connect]  查看 Chrome 连接、手动断开或允许重连",
   "/run 目标  新建双 Agent 任务（不读取聊天历史）",
   "/start  开始 / 继续    /pause  暂停    /stop  停止",
   "/tasks  历史任务    /open 任务ID  选择任务    /paths  数据位置",
@@ -369,7 +371,7 @@ export function dispatchCommand(input: string, controller: UiController, actions
   }
   const [command, ...rest] = value.split(/\s+/);
   const argument = value.slice(command!.length).trim();
-  if (rest.length && !["/hint", "/run", "/model", "/apikey", "/open"].includes(command!)) {
+  if (rest.length && !["/hint", "/run", "/model", "/apikey", "/open", "/chrome"].includes(command!)) {
     actions.print("xloom", `命令 ${command} 不接受参数。`);
     return;
   }
@@ -411,6 +413,14 @@ export function dispatchCommand(input: string, controller: UiController, actions
       else actions.print("xloom", "当前模式不支持切换任务。");
       break;
     case "/paths": actions.print("Paths", controller.storagePaths ? JSON.stringify(controller.storagePaths(), null, 2) : "使用 xloom paths 查看数据目录。"); break;
+    case "/chrome": {
+      const action = argument || "status";
+      if (!["status", "disconnect", "connect"].includes(action)) { actions.print("xloom", "用法：/chrome [status|disconnect|connect]"); break; }
+      if (!controller.chromeControl) { actions.print("xloom", "当前演示没有 Chrome 连接。"); break; }
+      void controller.chromeControl(action as "status" | "disconnect" | "connect").then(result => actions.print("Chrome", JSON.stringify(result)))
+        .catch(error => actions.print("Chrome", error instanceof Error ? error.message : String(error)));
+      break;
+    }
     case "/pause": controller.pause(); actions.print("xloom", "已请求暂停；正在取消当前运行。"); break;
     case "/stop": controller.stop(); actions.print("xloom", "已请求停止；黑板与证据保留。"); break;
     case "/meta": controller.requestMetacog(); actions.print("xloom", "已请求 Decide 在下一调度点进行元认知复核。"); break;
