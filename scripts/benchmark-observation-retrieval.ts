@@ -11,9 +11,11 @@ import { buildRetrievalIndex } from "../src/wiki/catalog.js";
 import { incrementalRetrievalIndex } from "../src/wiki/incremental.js";
 import { retrieveWiki } from "../src/wiki/retrieval.js";
 
-const { values } = parseArgs({ options: { baseline: { type: "string" }, size: { type: "string", default: "1000" }, output: { type: "string" } }, strict: true });
+const { values } = parseArgs({ options: { baseline: { type: "string" }, size: { type: "string", default: "1000" }, samples: { type: "string", default: "30" }, output: { type: "string" } }, strict: true });
 const size = Number(values.size);
+const samples = Number(values.samples);
 assert(Number.isSafeInteger(size) && size >= 20 && size <= 10000, "size must be 20–10000");
+assert(Number.isSafeInteger(samples) && samples >= 5 && samples <= 200, "samples must be 5–200");
 const root = realpathSync(mkdtempSync(join(tmpdir(), "xloom-rag-benchmark-"))), workspace = process.cwd();
 let linked = false;
 const board = observationRetrievalFixture(size), before = JSON.stringify(board), query = `item${Math.floor(size / 2)} downloadReport`;
@@ -21,21 +23,23 @@ const measure = <T>(run: () => T) => { const start = performance.now(), result =
 function bench(name: string, api: { buildRetrievalIndex: typeof buildRetrievalIndex; incrementalRetrievalIndex: typeof incrementalRetrievalIndex; retrieveWiki: typeof retrieveWiki }) {
   const task = join(root, name); mkdirSync(task);
   const cold = measure(() => api.incrementalRetrievalIndex(board, task, workspace));
-  const warm = Array.from({ length: 5 }, () => measure(() => api.incrementalRetrievalIndex(board, task, workspace)));
+  const warm = Array.from({ length: samples }, () => measure(() => api.incrementalRetrievalIndex(board, task, workspace)));
   const expected = api.buildRetrievalIndex(board);
   for (const sample of warm) {
     assert.deepEqual(sample.result.index, expected);
     assert.equal(sample.result.stats.indexedBytes, 0);
     assert.equal(sample.result.stats.reused, expected.documents.length);
   }
-  const search = Array.from({ length: 5 }, () => measure(() => api.retrieveWiki(board, task, workspace, query, { limit: 1, budgetChars: 16000 })));
+  const search = Array.from({ length: samples }, () => measure(() => api.retrieveWiki(board, task, workspace, query, { limit: 1, budgetChars: 16000 })));
   for (const sample of search) {
     assert.equal(sample.result.hits[0]?.ref.id, `F-${Math.floor(size / 2)}`);
     assert.equal(sample.result.budgetDeferredCount, 0);
     assert(JSON.stringify(sample.result.records).includes("Cross-tenant access is NOT verified"));
   }
   const median = (rows: { ms: number }[]) => rows.map(row => row.ms).sort((a, b) => a - b)[Math.floor(rows.length / 2)]!;
+  const p95 = (rows: { ms: number }[]) => rows.map(row => row.ms).sort((a, b) => a - b)[Math.ceil(rows.length * .95) - 1]!;
   return { name, records: expected.documents.length, coldMs: cold.ms, warmMedianMs: median(warm), searchMedianMs: median(search),
+    warmP95Ms: p95(warm), searchP95Ms: p95(search), warmSamplesMs: warm.map(sample => sample.ms), searchSamplesMs: search.map(sample => sample.ms),
     warmIndexedBytes: warm[0]!.result.stats.indexedBytes, checks: { fullIndexParity: true, exactQueryRecall: true, negativeConditionRetained: true } };
 }
 try {
@@ -53,7 +57,7 @@ try {
   }
   const current = bench("current-cache", { buildRetrievalIndex, incrementalRetrievalIndex, retrieveWiki });
   assert.equal(JSON.stringify(board), before);
-  const report = { node: process.version, platform: process.platform, size, samples: 5, baseline, current,
+  const report = { node: process.version, platform: process.platform, size, samples, baseline, current,
     ...(baseline ? { warmSpeedup: +(baseline.warmMedianMs / current.warmMedianMs).toFixed(2), searchSpeedup: +(baseline.searchMedianMs / current.searchMedianMs).toFixed(2) } : {}),
     scope: "Synthetic metadata retrieval only; excludes model latency, original hashing and real-world answer accuracy. Timings vary by machine/load." };
   if (values.output) writeFileSync(resolve(values.output), JSON.stringify(report, null, 2) + "\n");

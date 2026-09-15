@@ -515,7 +515,9 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.requests.find((request) => request.mode === "execute" && request.snapshot.completedSteps === 24)?.snapshot.goals[0]?.status).toBe("active");
     expect(test.requests.at(-1)?.mode).toBe("metacog");
     expect(test.controller.snapshot().goals[0]).toMatchObject({ id: "G0", status: "satisfied" });
-  });
+  // 27 complete execution cycles now also flush each Wiki generation. This is
+  // a lifecycle assertion; retrieval latency is measured by its own benchmark.
+  }, 30000);
 
   it("runs metacognition after repeated no-progress outputs then pauses without NEED_INPUT", async () => {
     const test = setup((request) => {

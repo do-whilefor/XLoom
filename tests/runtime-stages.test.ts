@@ -293,7 +293,9 @@ describe("durable Execute checkpoints through the real Pi tool loop", () => {
     expect(board.facts).toHaveLength(1);
     expect(test.store.runs().every(run => run.status === "completed")).toBe(true);
     const tools = test.events.flatMap(event => event.runtime?.type === "tool_end" ? [event.runtime] : []);
-    expect(tools.filter(event => event.isError).map(event => event.toolCallId)).toEqual(["bad-read-0", "bad-read-1"]);
+    // The two independent filesystem reads run in parallel; completion order
+    // is not part of the artifact-recovery contract.
+    expect(tools.filter(event => event.isError).map(event => event.toolCallId).sort()).toEqual(["bad-read-0", "bad-read-1"]);
     expect(tools.filter(event => event.toolName === "write")).toHaveLength(2);
     expect(tools.some(event => event.toolName === "powershell")).toBe(false);
     assertExactUsage(test);

@@ -71,8 +71,9 @@ Execute 的原生 `wikiPages`（最终结果或 checkpoint）支持以下字段�
 Markdown、manifest、organization 与检索缓存均可重建。普通聊天继续与研究资料隔离。
 
 本批验证与真实配置模型回放见 [Wiki 结构验证记录](wiki-structure-validation.md)。
-观察对比已接入，见 [观察与复核](observation-comparison.md)。跨轮交接已有新增／变更
-导航；通用问题记录、删除／组合失效差量通知、页面检查持久缓存仍是后续工作。
+观察对比已接入，见 [观察与复核](observation-comparison.md)。跨轮交接支持新增／变更
+导航，并持久记录 removed／inactive 提示回执。本轮缓存、恢复和语义检索的验证见
+[Wiki 与 RAG 优化验证](wiki-rag-optimization-validation.md)。
 
 ## 多前提查询与 Wiki 维护
 
@@ -376,3 +377,6 @@ material_receipts 事务保存；已提示的移除不重复通知，重新出�
 每个辅助调用有 120 秒故障看门狗；用户取消立即传递，超时返回明确降级。这个时限不是
 金额或 token 预算。semantic.requests 记录辅助调用尝试次数，实际 stream 用量另计入
 研究运行统计。
+
+冷热检索测量、真实配置模型回放及失败记录见
+[Wiki 与 RAG 优化验证](wiki-rag-optimization-validation.md)。

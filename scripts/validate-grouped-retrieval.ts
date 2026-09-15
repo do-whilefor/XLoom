@@ -23,7 +23,8 @@ const previousHome = process.env.XLOOM_HOME; process.env.XLOOM_HOME = join(root,
 const config = defaultConfig("依据当前任务归档，判断报表读取还缺什么条件并规划下一步", "Only synthetic local files; read-only planning; no external target");
 config.models = configured.models;
 config.limits = { ...config.limits, maxTokens: null, maxCost: null, maxTurnsPerRun: null, stepTimeoutSeconds: null };
-config.context = "这是只读原生检索接口回放。先读取所给缺口的 question 入口；complete=false 时先按返回诊断和 nextReadPath 补全来源包，预算最高 64000。随后使用返回的 xloom://original 定位入口精读有关授权和对象的归档原件，核对实际身份、版本和结果；本场景验证带完整性校验的原生读取。依据观察规划有界下一步，禁止新增观察或访问外部目标。检索命中不表示业务完成；不要为了继续查询而创建多条检索步骤。";
+config.context = "这是只读原生检索接口回放。先读取所给缺口的 question 入口；complete=false 时先按返回诊断和 nextReadPath 补全来源包，预算最高 64000。随后使用返回的 xloom://original 定位入口精读有关授权和对象的归档原件，核对实际身份、版本和结果；本场景验证带完整性校验的原生读取。依据观察规划有界下一步，禁止新增观察或访问外部目标。检索命中不表示业务完成；不要为了继续查询而创建多条检索步骤。继续已有缺口的步骤须使用该缺口原 goalId，并带 revisits 引用。同一缺口在 gapReviews 中最多出现一次。";
+config.context += "本回放还要验证 original 精读接口：提交之前必须实际调用 read 分别读取授权和对象的 xloom://original 路径（使用 question 返回的路径即可）。即使 question 已展示有关片段，也不能跳过这两次接口调用；本次检验包含工具路径可用性，不只是根据片段答题。";
 const store = new BlackboardStore(root, config, { taskId: "task-grouped-live" });
 let requests = 0, failure: string | undefined;
 const events: RuntimeEvent[] = [];
