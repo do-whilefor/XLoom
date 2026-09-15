@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { analyzeToolOutcomes } from "../scripts/lib/tool-outcomes.js";
 import type { LoopEvent } from "../src/types.js";
+import { matchesBrowserToolContract } from "../scripts/lib/browser-tool-contract.js";
+
+describe("browser validation tool contract", () => {
+  const operations = ["read", "write", "edit", "powershell", "chrome"];
+  const tools = (names: string[]) => names.map(name => ({ name }));
+  it("requires Execute's submit channel while keeping Chat's five operation tools", () => {
+    expect(matchesBrowserToolContract("chat", tools(operations))).toBe(true);
+    expect(matchesBrowserToolContract("execute", tools([...operations, "submit"].reverse()))).toBe(true);
+    expect(matchesBrowserToolContract("execute", tools(operations))).toBe(false);
+    expect(matchesBrowserToolContract("chat", tools([...operations, "submit"]))).toBe(false);
+  });
+  it.each([undefined, [], [...operations, "unexpected"], ["read", "read", "edit", "powershell", "chrome"]])("rejects missing, extra and duplicate tools: %j", names => {
+    expect(matchesBrowserToolContract("chat", names && tools(names))).toBe(false);
+  });
+});
 
 const handoff = (id: string): LoopEvent => ({ type: "handoff", handoff: {
   role: "decide", mode: "decide", runId: id, revision: 0, trigger: { kind: "start" },

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { matchesBrowserToolContract } from "../scripts/lib/browser-tool-contract.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -262,6 +263,7 @@ describe("Pi runtime isolation", () => {
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
     expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read", "submit"], ["read", "write", "edit", "powershell", "chrome", "submit"], ["read", "submit"]]);
+    expect(matchesBrowserToolContract("execute", options[1].initialState?.tools)).toBe(true);
     expect(options.map(entry => entry.initialState?.tools?.find(tool => tool.name === "read")?.description.includes("artifact://"))).toEqual([false, true, false]);
     expect(options.every((entry) => entry.toolExecution === "parallel" && entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(options.flatMap(entry => entry.initialState?.tools ?? []).every(tool => tool.executionMode === (tool.name === "read" ? "parallel" : "sequential"))).toBe(true);

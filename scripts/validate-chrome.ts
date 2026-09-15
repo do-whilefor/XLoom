@@ -17,6 +17,7 @@ import { PiRunner } from "../src/runtime/pi-runner.js";
 import { resolveModel } from "../src/runtime/models.js";
 import { BlackboardStore } from "../src/store.js";
 import type { Execution, RuntimeEvent } from "../src/types.js";
+import { matchesBrowserToolContract } from "./lib/browser-tool-contract.js";
 
 const { values } = parseArgs({ options: { live: { type: "boolean" }, output: { type: "string" } }, strict: true });
 if (!values.live) throw new Error("Pass --live to use the configured model and the current Chrome session.");
@@ -88,7 +89,7 @@ try {
   checks.bridgeSurvivedToolClose = JSON.stringify(await controlChrome(chromeOptions, "status")) === JSON.stringify(originalBridge);
   const chatOptions = { storageDirectory: join(root, "chat"), resolveModel: async () => ({ ...selectedChat,
     streamFn: (...args: Parameters<typeof selectedChat.streamFn>) => {
-      if (chatRequests++ === 0) checks.chatFiveTools = JSON.stringify(args[1].tools?.map(tool => tool.name)) === JSON.stringify(["read", "write", "edit", "powershell", "chrome"]);
+      if (chatRequests++ === 0) checks.chatToolContract = matchesBrowserToolContract("chat", args[1].tools);
       return selectedChat.streamFn(...args);
     } }) };
   const chatInput = { workspace: root, model: configured.models.chat ?? configured.models.execute, chrome: configured.chrome,
@@ -129,7 +130,7 @@ try {
   const snapshot = store.beginRun(runId, "execute", step.id);
   runDir = join(store.dataDir, "runs", runId);
   const runner = new PiRunner({ resolveModel: async () => ({ ...selected, streamFn: (...args) => {
-    if (requests++ === 0) checks.executeFiveTools = JSON.stringify(args[1].tools?.map(tool => tool.name)) === JSON.stringify(["read", "write", "edit", "powershell", "chrome"]);
+    if (requests++ === 0) checks.executeToolContract = matchesBrowserToolContract("execute", args[1].tools);
     return selected.streamFn(...args);
   } }) });
   const result = await runner.run({ id: runId, mode: "execute", snapshot, workspace: root, runDir, blackboardPath: store.projectionPath,
