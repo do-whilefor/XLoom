@@ -228,19 +228,19 @@ export class ChatSession {
       signal.addEventListener("abort", onAbort, { once: true });
       detachAbort = () => signal.removeEventListener("abort", onAbort);
       signal.throwIfAborted();
+      // Include the incoming message in compaction. Commit the projection only
+      // after it fits, so a rejected input cannot poison an existing conversation.
+      const candidate = await compactMessages([...agent.state.messages, inputMessage]);
+      // A summary can consume the penultimate request; apply both the tool and
+      // reporting constraints to the resulting normal request before preflight.
       if (finalRequest()) {
         agent.state.tools = [];
         agent.state.systemPrompt += "\nThis is the final allowed model request. Report only completed results; no tools are available.";
       }
-      // Include the incoming message in compaction. Commit the projection only
-      // after it fits, so a rejected input cannot poison an existing conversation.
-      const candidate = await compactMessages([...agent.state.messages, inputMessage]);
       requireContextCapacity(selected.model, { systemPrompt: agent.state.systemPrompt, tools: agent.state.tools,
         messages: candidate as import("@earendil-works/pi-ai").Message[] },
         "This message was not added to chat. Split the input or use /history and /new if the retained context cannot be compacted.");
       agent.state.messages = candidate.slice(0, -1);
-      // Compaction itself may have consumed the penultimate allowed request.
-      if (finalRequest()) agent.state.tools = [];
       await agent.prompt(inputMessage);
       signal.throwIfAborted();
       let recoveredTransient = false;

@@ -174,6 +174,7 @@ describe("chat context maintenance integration", () => {
       calls++;
       if (isSummary(context)) { summaries++; return assistant([{ type: "text", text: "Earlier observations retained." }]); }
       expect(context.tools).toEqual([]);
+      expect(context.systemPrompt).toContain("This is the final allowed model request.");
       return assistant([{ type: "text", text: "Final reply from existing observations." }]);
     }) }) });
     await session.send(input);
