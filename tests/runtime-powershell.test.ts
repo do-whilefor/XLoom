@@ -172,6 +172,19 @@ describe.runIf(process.platform === "win32")("PowerShell syntax regressions on W
     expect(output).not.toContain("execution diagnostics");
   });
 
+  it("explains method-argument format errors without replaying writes, and accepts the corrected expression", async () => {
+    const directory = await workspace(), tool = createCheckedPowerShellTool(directory);
+    const failure = await tool.execute("bad-format", { command: "Add-Content -LiteralPath 'once.txt' -Value 'once'; $items=[System.Collections.Generic.List[string]]::new(); $items.Add('x={0}, y={1}' -f 1,2); Write-Output 'continued'", timeout: 10 }).catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toContain("parenthesize the complete -f expression");
+    expect(failure.message).toContain("$list.Add(('x={0}, y={1}' -f $x, $y))");
+    expect(failure.message).toContain("do not blindly rerun");
+    expect(failure.message).toContain("continued");
+    const corrected = await tool.execute("fixed-format", { command: "$items=[System.Collections.Generic.List[string]]::new(); $items.Add(('x={0}, y={1}' -f 1,2)); $items", timeout: 10 });
+    expect(corrected.content.filter(part => part.type === "text").map(part => part.text).join("").trim()).toBe("x=1, y=2");
+    expect((await readFile(join(directory, "once.txt"), "utf8")).trim()).toBe("once");
+  });
+
   it("keeps the caller's environment, working directory and default preference scope", async () => {
     const directory = await workspace();
     const chunks: Buffer[] = [];

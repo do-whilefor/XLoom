@@ -9,6 +9,7 @@ export const powerShellPrompt = `Raw PowerShell, no Markdown escapes. Backslash 
 const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;
 const syntaxHelp = "\nFix the reported PowerShell source before retrying. Check matching parentheses; split deeply nested method arguments into named temporary variables. Backslash does not escape quotes in PowerShell. Use single-quoted literals: '\"' for a double quote and 'it''s' for an apostrophe. Do not add Markdown escapes such as \\_ or \\: to raw commands. For complex data, write a JSON/text file and read it with Get-Content -LiteralPath. No command text was repaired or replayed automatically.\n";
+const formatHelp = "PowerShell -f formatting failed. Check placeholder indices and parenthesize the complete -f expression inside method arguments: $list.Add(('x={0}, y={1}' -f $x, $y)). Or format into a named variable first. Inspect existing artifacts before correcting only the failed operation; do not blindly rerun the script.";
 
 function checkedScript(path: string): string {
   // Keep parser variables/preferences out of the user's scope. Execute in-memory
@@ -35,14 +36,16 @@ try {
 }
 }
 & {
-  ${state} = @{ succeeded = $true; errors = 0 }
+  ${state} = @{ succeeded = $true; errors = 0; formatError = $false }
   . ([scriptblock]::Create([System.IO.File]::ReadAllText(${quoteLiteral(path)}) + "\`n" + '${state}.succeeded = $?')) 2>&1 | ForEach-Object {
     # Native stderr alone is not failure (successful programs also write it).
     # Caught/suppressed PowerShell errors never reach this stream.
     if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -notmatch '^NativeCommandError(?:Message)?$') { ${state}.errors++ }
+    if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -eq 'FormatError') { ${state}.formatError = $true }
     $_
   }
   if (${state}.errors -gt 0 -or ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) -or -not ${state}.succeeded) {
+    if (${state}.formatError) { Write-Output ${quoteLiteral(formatHelp)} }
     Write-Output ('PowerShell execution diagnostics: unhandled errors={0}; final command succeeded={1}; last native exit code={2}. Inspect partial side effects before retrying; nothing was replayed.' -f ${state}.errors, ${state}.succeeded, $LASTEXITCODE)
     exit 1
   }

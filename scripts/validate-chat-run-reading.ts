@@ -111,6 +111,15 @@ try {
       failureVisible: results.length === 1 && results[0].isError === true && results[0].text.includes("last native exit code=7") && results[0].text.includes("NEXT_OK"),
       chatRecovered: app!.getSessionInfo().status === "idle" && !app!.getSessionInfo().busy };
   });
+  await phase("chat-format-error-recovery", async (entry, start) => {
+    activeRole = "chat";
+    await app!.chat("这是故意的 PowerShell 格式错误回归。先原样实际调用 powershell：$items=[System.Collections.Generic.List[string]]::new(); $items.Add('x={0}, y={1}' -f 1,2); $items 。不要预先修正。收到报错后根据工具提示改正表达式，再调用一次 powershell 输出正确的格式化结果。不要调用其他工具、访问文件或执行其他动作，最后如实总结。");
+    const seen = runtime(start), calls = toolStarts(seen), results = seen.filter(event => event.type === "tool_end");
+    entry.reply = finalChat(); entry.checks = { bounded: calls.length === 2 && calls.every(call => call.toolName === "powershell"),
+      guidance: results[0]?.isError === true && results[0].text.includes("parenthesize the complete -f expression"),
+      corrected: results[1]?.isError === false && results[1].text.includes("x=1, y=2"),
+      chatRecovered: app!.getSessionInfo().status === "idle" && !app!.getSessionInfo().busy };
+  });
   await phase("chat-cancel-and-recover", async entry => {
     activeRole = "chat";
     let cancelled = false;
@@ -135,7 +144,7 @@ try {
   });
   let completedTask = "";
   await phase("run-goal-file-roundtrip", async (entry, start) => {
-    await app!.runGoal("合成本地软件回归，只在当前 workspace：验证合成假设 fixture-copy-corruption（复制会改变输入字节），未测试真实目标或真实漏洞。安排一个有界 Execute 完成读取 input.txt、复制到本轮 artifacts/observed.txt、实际读回与 SHA256 对比。使用 PowerShell Copy-Item、.NET ReadAllBytes 和 SHA256 即可完成对照；本回放不测试 fc/cmp、嵌套 powershell.exe 或其他旧工具兼容性，不开展额外工具排错。把原样文件、比较命令和真实输出留在 artifacts 并登记 Evidence/Fact，说明 identity/state/result，不能把 DENIED 说成成功。Execute 登记一个对应合成假设的 Finding（lead），供后续基于真实对照结果复核关闭；关闭理由包含重新检查的条件。只有新鲜元认知读到归档原件、确认这个假设有对照证据且关闭后，才满足根目标并以 NOT_REPRODUCED 结束合成测试。不要追加其他调查，不读取聊天历史。");
+    await app!.runGoal("合成本地软件回归，只在当前 workspace：验证合成假设 fixture-copy-corruption（复制会改变输入字节），未测试真实目标或真实漏洞。安排一个有界 Execute 完成读取 input.txt、复制到本轮 artifacts/observed.txt、实际读回与 SHA256 对比。使用 PowerShell Copy-Item、.NET ReadAllBytes 和 SHA256 即可完成对照；本回放不测试 fc/cmp、嵌套 powershell.exe 或其他旧工具兼容性，不开展额外工具排错。把原样文件、比较命令和真实输出留在 artifacts 并登记 Evidence/Fact：artifacts/observed.txt 必须作为独立 Evidence 登记，不能只登记哈希或日志。Fact 必须逐字保留输入中的 identity=alice、state=v2、result=DENIED；这是合成文件内容，与复制操作成功是两回事，不能把 DENIED 说成成功。Execute 登记一个对应合成假设的 Finding（lead），供后续基于真实对照结果复核关闭；关闭理由包含重新检查的条件。只有新鲜元认知读到归档原件、确认这个假设有对照证据且关闭后，才满足根目标并以 NOT_REPRODUCED 结束合成测试。不要追加其他调查，不读取聊天历史。");
     const board = app!.snapshot(), seen = runtime(start), results = parsedOutputs(seen);
     const roles = events.slice(start).flatMap(event => event.handoff ? [event.handoff.mode] : []);
     entry.board = board; entry.checks = { completed: board.status === "completed" && board.outcome === "NOT_REPRODUCED", roles: ["decide", "execute", "metacog"].every(role => roles.includes(role as any)),
