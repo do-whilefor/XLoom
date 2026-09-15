@@ -39,18 +39,14 @@ $items | ConvertTo-Json -Compress`;
       expect(options.env).toBe(env);
       expect(options.timeout).toBeGreaterThan(0);
       expect(options.timeout).toBeLessThanOrEqual(10);
-      if (seen.length === 1) {
-        sourcePath = parserSourcePath(source);
-        expect(await readFile(sourcePath, "utf8")).toBe(`\uFEFF${command}`);
-        expect(source).not.toContain(command);
-        return { exitCode: 0 };
-      }
+      sourcePath = parserSourcePath(source);
+      expect(await readFile(sourcePath, "utf8")).toBe(`\uFEFF${command}`);
+      expect(source).not.toContain(command);
       options.onData(Buffer.from("observed output"));
       return { exitCode: 0 };
     } };
     await expect(createCheckedPowerShellOperations(operations).exec(command, "workspace", { onData, signal, env, timeout: 10 })).resolves.toEqual({ exitCode: 0 });
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toBe(command);
+    expect(seen).toHaveLength(1);
     expect(onData).toHaveBeenCalledExactlyOnceWith(Buffer.from("observed output"));
     await expect(readFile(sourcePath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(dirname(sourcePath))).rejects.toMatchObject({ code: "ENOENT" });
@@ -61,6 +57,8 @@ $items | ConvertTo-Json -Compress`;
     const onData = vi.fn();
     const exec = vi.fn<PowerShellOperations["exec"]>(async (source, _cwd, options) => {
       expect(source).not.toBe(command);
+      expect(source).toContain("Backslash does not escape quotes");
+      expect(source).toContain("No command text was repaired or replayed automatically");
       options.onData(Buffer.from("PowerShell ParserError: Line 1, column 24"));
       return { exitCode: 65 };
     });
@@ -68,34 +66,27 @@ $items | ConvertTo-Json -Compress`;
     expect(exec).toHaveBeenCalledTimes(1);
     const text = onData.mock.calls.map(([data]) => data.toString()).join("");
     expect(text).toContain("Line 1, column 24");
-    expect(text).toContain("Backslash does not escape quotes");
-    expect(text).toContain("Check matching parentheses");
-    expect(text).toContain("named temporary variables");
-    expect(text).toContain("No command text was repaired or replayed automatically");
   });
 
   it("does not replay a valid command after a runtime error", async () => {
-    const exec = vi.fn<PowerShellOperations["exec"]>()
-      .mockResolvedValueOnce({ exitCode: 0 })
-      .mockResolvedValueOnce({ exitCode: 1 });
+    const exec = vi.fn<PowerShellOperations["exec"]>().mockResolvedValueOnce({ exitCode: 1 });
     await expect(createCheckedPowerShellOperations({ exec }).exec("Write-Output 'partial'; exit 1", "workspace", { onData() {} })).resolves.toEqual({ exitCode: 1 });
-    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec).toHaveBeenCalledTimes(1);
   });
 
-  it.each([1, null])("never executes source if the parser process exits with %s", async exitCode => {
+  it.each([1, null])("does not retry an incomplete or failed process (%s)", async exitCode => {
     const exec = vi.fn<PowerShellOperations["exec"]>().mockResolvedValue({ exitCode });
     const result = createCheckedPowerShellOperations({ exec }).exec("Write-Output 'test'", "workspace", { onData() {} });
-    if (exitCode === null) await expect(result).rejects.toThrow("preflight did not complete");
+    if (exitCode === null) await expect(result).rejects.toThrow("inspect possible side effects");
     else await expect(result).resolves.toEqual({ exitCode });
     expect(exec).toHaveBeenCalledTimes(1);
   });
 
   it("uses one timeout across parsing and execution", async () => {
-    let now = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => now);
-    const exec = vi.fn<PowerShellOperations["exec"]>(async () => {
-      now = 1500;
-      return { exitCode: 0 };
+    vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValue(250);
+    const exec = vi.fn<PowerShellOperations["exec"]>(async (_source, _cwd, options) => {
+      expect(options.timeout).toBe(0.75);
+      throw new Error("timeout:0.75");
     });
     await expect(createCheckedPowerShellOperations({ exec }).exec("Write-Output 'test'", "workspace", { onData() {}, timeout: 1 })).rejects.toThrow("timeout:1");
     expect(exec).toHaveBeenCalledTimes(1);
@@ -135,6 +126,40 @@ $items | ConvertTo-Json -Compress`;
 });
 
 describe.runIf(process.platform === "win32")("PowerShell syntax regressions on Windows", () => {
+  it.each([
+    ["Write-Error 'runtime failure'", 1],
+    ["Write-Error 'recoverable'; Write-Output 'continued'", 0],
+    ["& cmd.exe /c exit 37", 1],
+    ["& cmd.exe /c exit 37; Write-Output 'continued'", 0],
+    ["throw 'terminating failure'", 1],
+    ["exit 65", 65],
+    ["exit 17", 17],
+  ])("preserves command-mode exit status: %s", async (command, exitCode) => {
+    const output: Buffer[] = [];
+    const result = await createCheckedPowerShellOperations().exec(command, await workspace(), { onData: chunk => output.push(chunk), timeout: 10 });
+    expect(result.exitCode).toBe(exitCode);
+    expect(Buffer.concat(output).toString()).not.toContain("syntax preflight");
+  });
+
+  it("keeps the caller's environment, working directory and default preference scope", async () => {
+    const directory = await workspace();
+    const chunks: Buffer[] = [];
+    await createCheckedPowerShellOperations().exec("@($env:XLOOM_TEST_VALUE, (Get-Location).Path, $ErrorActionPreference.ToString(), $PSScriptRoot, $PSCommandPath) | ConvertTo-Json -Compress", directory,
+      { env: { ...process.env, XLOOM_TEST_VALUE: "fixture" }, onData: chunk => chunks.push(chunk), timeout: 10 });
+    expect(JSON.parse(Buffer.concat(chunks).toString())).toEqual(["fixture", directory, "Continue", "", ""]);
+  });
+
+  it.each(["timeout", "cancel"])("stops a running command on %s without replaying its side effect", async kind => {
+    const directory = await workspace();
+    const control = new AbortController();
+    const chunks: Buffer[] = [];
+    const running = createCheckedPowerShellOperations().exec("Add-Content -LiteralPath 'once.txt' -Value 'once'; Write-Output 'started'; Start-Sleep -Seconds 30; Set-Content -LiteralPath 'late.txt' -Value 'late'", directory,
+      { timeout: kind === "timeout" ? 2 : 10, signal: control.signal, onData(chunk) { chunks.push(chunk); if (kind === "cancel" && Buffer.concat(chunks).toString().includes("started")) control.abort(); } });
+    await expect(running).rejects.toThrow(kind === "timeout" ? "timeout:2" : "aborted");
+    expect((await readFile(join(directory, "once.txt"), "utf8")).trim()).toBe("once");
+    await expect(readFile(join(directory, "late.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("preserves a nested script's parser failure after executing its valid launcher exactly once", async () => {
     const directory = await workspace();
     await writeFile(join(directory, "invalid-child.ps1"), `Add-Content -LiteralPath 'child-executed.txt' -Value 'must not run'

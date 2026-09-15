@@ -1,5 +1,10 @@
 # Efficient HTTP work in Execute
 
+The `powershell` tool parses the supplied command before executing it in the same
+PowerShell process. Invalid source has no command side effects. Valid source runs
+once, with its original command-mode exit status, environment and working directory;
+parsing and execution share one timeout. Invoked scripts still have their own errors.
+
 Use the bundled PowerShell helper for repeated HTTP requests. Dot-source its absolute `httpHelper` path once and create one client per script. Run the script once through `powershell`; keep the request loop inside that process. Python's in-process HTTP clients are also suitable when installed. Do not spawn curl/PowerShell for each request in a large loop.
 
 ```powershell

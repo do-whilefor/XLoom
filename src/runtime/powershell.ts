@@ -9,8 +9,12 @@ const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;
 const syntaxHelp = "\nFix the reported PowerShell source before retrying. Check matching parentheses; split deeply nested method arguments into named temporary variables. Backslash does not escape quotes in PowerShell. Use single-quoted literals: '\"' for a double quote and 'it''s' for an apostrophe. Do not add Markdown escapes such as \\_ or \\: to raw commands. For complex data, write a JSON/text file and read it with Get-Content -LiteralPath. No command text was repaired or replayed automatically.\n";
 
-function parserScript(path: string): string {
-  return `$ErrorActionPreference = 'Stop'
+function checkedScript(path: string): string {
+  // Keep parser variables/preferences out of the user's scope. Execute in-memory
+  // source so $PSScriptRoot/$PSCommandPath do not become the temporary directory.
+  // Capture $? INSIDE that script block: invoking a block resets its status.
+  return `& {
+$ErrorActionPreference = 'Stop'
 try {
   $tokens = $null
   $parseErrors = $null
@@ -20,13 +24,15 @@ try {
     foreach ($issue in $parseErrors) {
       Write-Output ('Line {0}, column {1} ({2}): {3}' -f $issue.Extent.StartLineNumber, $issue.Extent.StartColumnNumber, $issue.ErrorId, $issue.Message)
     }
+    Write-Output ${quoteLiteral(syntaxHelp)}
     exit ${syntaxExitCode}
   }
-  exit 0
 } catch {
   Write-Output ('PowerShell syntax preflight failed; command was not executed: {0}' -f $_.Exception.Message)
   exit 1
-}`;
+}
+}
+. ([scriptblock]::Create([System.IO.File]::ReadAllText(${quoteLiteral(path)}) + "\`n" + 'exit ([int](-not $?))'))`;
 }
 
 /** Parse only the supplied command, then run it unchanged once. Invoked scripts
@@ -42,20 +48,18 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
         if (remaining <= 0) throw new Error(`timeout:${options.timeout}`);
         return remaining;
       };
-      // A short parser command avoids expanding user input into a Windows command
+      // One process parses and executes; the source stays off the Windows command
       // line. The BOM keeps ParseFile correct on both PowerShell 5.1 and 7.
       const directory = await mkdtemp(join(tmpdir(), "xloom-powershell-check-"));
       try {
         const source = join(directory, "command.ps1");
         await writeFile(source, `\uFEFF${command}`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-        const parsed = await operations.exec(parserScript(source), cwd, { ...options, timeout: remainingTimeout() });
-        if (parsed.exitCode === syntaxExitCode) options.onData(Buffer.from(syntaxHelp));
-        if (parsed.exitCode === null) throw new Error("PowerShell syntax preflight did not complete; command was not executed.");
-        if (parsed.exitCode !== 0) return parsed;
         if (options.signal?.aborted) throw new Error("aborted");
-        return await operations.exec(command, cwd, { ...options, timeout: remainingTimeout() });
+        const result = await operations.exec(checkedScript(source), cwd, { ...options, timeout: remainingTimeout() });
+        if (result.exitCode === null) throw new Error("PowerShell process did not complete; inspect possible side effects before retrying.");
+        return result;
       } catch (error) {
-        // Both processes share the caller's timeout; retain its original value in
+        // Setup and the process share the caller's timeout; retain its original value in
         // Pi's timeout diagnostic instead of reporting the remaining fraction.
         if (error instanceof Error && error.message.startsWith("timeout:") && options.timeout !== undefined) {
           throw new Error(`timeout:${options.timeout}`);
