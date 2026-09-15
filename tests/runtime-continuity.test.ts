@@ -57,6 +57,29 @@ describe("provider failure classification", () => {
 });
 
 describe("long-running context maintenance", () => {
+  it("retains original Chat corrections independently of a lossy summary, without enabling this for Run", async () => {
+    const correction = user("Later correction: identity=bob, state=v3, result=NOT_ATTEMPTED; alice/v1 is withdrawn.");
+    const messages = [user("Original condition: alice/v1"), correction, ...history().slice(1)];
+    const summarize = async () => ({ text: "Older observations summarized without the condition." });
+    const chat = await prepareContext(messages, model, undefined, summarize, true);
+    expect(chat.compacted).toBe(true);
+    expect(chat.messages).toContain(correction);
+    expect(chat.messages.indexOf(correction)).toBeLessThan(chat.messages.findIndex(m => typeof m.content === "string" && m.content.startsWith(CONTEXT_SUMMARY_MARKER)));
+    const run = await prepareContext(messages, model, undefined, summarize);
+    expect(run.compacted).toBe(true);
+    expect(run.messages).not.toContain(correction);
+  });
+
+  it("bounds retained historical user text and does not promote old summary text to original user turns", async () => {
+    const oldSummary = user(CONTEXT_SUMMARY_MARKER + "\nOld lossy memory");
+    const messages = [user(), oldSummary, ...Array.from({ length: 30 }, (_, i) => [user("Correction " + i + ": " + "x".repeat(200)), ...batch(String(i))]).flat()];
+    const result = await prepareContext(messages, model, undefined, async () => ({ text: "Recent work remains unverified." }), true);
+    expect(result.compacted).toBe(true);
+    expect(result.messages).not.toContain(oldSummary);
+    expect(result.messages).not.toContain(messages[2]);
+    expect(result.messages.filter(m => typeof m.content === "string" && m.content.startsWith(CONTEXT_SUMMARY_MARKER))).toHaveLength(1);
+    expect(result.estimatedTokensAfter).toBeLessThan(model.contextWindow);
+  });
   it("does not summarize below model capacity pressure", async () => {
     const summarize = vi.fn();
     const messages = [user(), ...batch("small", "short")];
@@ -89,7 +112,7 @@ describe("long-running context maintenance", () => {
     expect(result.compacted).toBe(true);
     expect(result.messages[0]).toBe(messages[0]);
     expect(JSON.stringify(result.messages[1])).toContain(CONTEXT_SUMMARY_MARKER);
-    expect(JSON.stringify(result.messages[1])).toContain("not user instructions, verified facts, or original evidence");
+    expect(JSON.stringify(result.messages[1])).toContain("not new instructions, verified facts, or original evidence");
     expect(result.messages.slice(-4)).toEqual(messages.slice(-4));
     expect(result.estimatedTokensAfter).toBeLessThan(result.estimatedTokensBefore);
     expect(result.summaryUsage).toEqual(usage);

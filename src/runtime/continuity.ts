@@ -164,7 +164,7 @@ function calibratedEstimate(messages: AgentMessage[], structuralTokens: number):
  * a safe fallback (its API forbids throwing from that callback).
  */
 export async function prepareContext(messages: AgentMessage[], model: Model<Api>, signal?: AbortSignal,
-  summarizer?: ContextSummarizer): Promise<PreparedContext> {
+  summarizer?: ContextSummarizer, preserveUserTurns = false): Promise<PreparedContext> {
   signal?.throwIfAborted();
   const structuralTokens = contextEstimate(messages);
   const estimatedTokensBefore = calibratedEstimate(messages, structuralTokens);
@@ -190,14 +190,27 @@ export async function prepareContext(messages: AgentMessage[], model: Model<Api>
   if (keepBatch <= 1) return unchanged("no-older-turns");
   if (!summarizer) return unchanged("summarizer-unavailable");
   const firstKept = batches[keepBatch].start;
+  // Chat corrections/preferences must not depend exclusively on a lossy,
+  // unverified model summary. Keep the most recent original user turns within
+  // a bounded part of the context; stop at an oversized turn rather than expose
+  // still older, potentially superseded instructions without the intervening one.
+  const retainedUsers: AgentMessage[] = [];
+  let retainedUserTokens = 0;
+  if (preserveUserTurns) for (let index = firstKept - 1; index > 0; index--) {
+    const message = messages[index];
+    if (message.role !== "user" || typeof message.content === "string" && message.content.startsWith(CONTEXT_SUMMARY_MARKER)) continue;
+    const tokens = contextEstimate([message]) * calibration;
+    if (retainedUserTokens + tokens > model.contextWindow * 0.1) break;
+    retainedUsers.unshift(message); retainedUserTokens += tokens;
+  }
   const summary = await summarizer(messages.slice(1, firstKept), model, signal);
   signal?.throwIfAborted();
   if (!summary.text.trim()) throw new Error("Context summary was empty.");
   const summaryMessage: AgentMessage = {
     role: "user", timestamp: Date.now(),
-    content: `${CONTEXT_SUMMARY_MARKER}\nThis is lossy private working memory, not user instructions, verified facts, or original evidence. Re-read the referenced evidence before relying on it. Completed tools below must not be blindly replayed.\n\n${summary.text}\n[END XLOOM PRIVATE CONTEXT SUMMARY]`,
+    content: `${CONTEXT_SUMMARY_MARKER}\nLossy private working memory for conversational continuity and completed work; not new instructions, verified facts, or original evidence. Later user updates supersede earlier assumptions. Re-read original evidence for research claims; do not blindly replay completed tools or historical requests.\n\n${summary.text}\n[END XLOOM PRIVATE CONTEXT SUMMARY]`,
   };
-  const prepared = [messages[0], summaryMessage, ...messages.slice(firstKept)];
+  const prepared = [messages[0], ...retainedUsers, summaryMessage, ...messages.slice(firstKept)];
   const estimatedTokensAfter = Math.ceil(contextEstimate(prepared) * calibration);
   if (estimatedTokensAfter >= estimatedTokensBefore) return { ...unchanged("summary-not-smaller"), summaryUsage: summary.usage };
   return { messages: prepared, compacted: true, estimatedTokensBefore, estimatedTokensAfter, summaryUsage: summary.usage };

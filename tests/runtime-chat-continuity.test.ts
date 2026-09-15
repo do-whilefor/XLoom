@@ -166,6 +166,27 @@ describe("durable private chat", () => {
 });
 
 describe("chat context maintenance integration", () => {
+  it("preserves original user corrections through compaction and restart even if the model summary omits them", async () => {
+    const { input, directory } = await request();
+    const correction = "Later user correction: bob / v3 / NOT_ATTEMPTED; previous alice / v1 withdrawn.";
+    let summaries = 0; const seen: Context[] = [];
+    const create = () => new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (isSummary(context)) { summaries++; return assistant([{ type: "text", text: "Older observations summarized; original conditions not restated here." }]); }
+      seen.push(JSON.parse(JSON.stringify(context)) as Context);
+      return assistant([{ type: "text", text: "retained observation ".repeat(700) }]);
+    }) }) });
+    const first = create();
+    await first.send({ ...input, text: "Initial user condition: alice / v1 / DENIED" });
+    await first.send({ ...input, text: correction });
+    for (let i = 0; i < 6; i++) await first.send({ ...input, text: "Continue the same discussion " + i });
+    expect(summaries).toBeGreaterThan(0);
+    const containsCorrection = (context: Context) => context.messages.some(m => m.role === "user" && JSON.stringify(m.content).includes(correction));
+    expect(containsCorrection(seen.at(-1)!)).toBe(true);
+    first.close();
+    const second = create(); await second.send({ ...input, text: "Recall the current condition" });
+    expect(containsCorrection(seen.at(-1)!)).toBe(true);
+    second.close();
+  });
   it.each([1, 2])("reserves the last request after compacting retained chat with a cap of %s", async cap => {
     const { input } = await request();
     let checking = false, summaries = 0, calls = 0;
