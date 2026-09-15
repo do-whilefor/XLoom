@@ -70,7 +70,8 @@ function recordScope(board: BoardSnapshot) {
     for (const id of new Set([...step.from, ...step.combination.requires])) add(counterSteps, id, step);
   return { goals: index(board.goals), steps: index(board.steps), facts: index(board.facts), findings: index(board.findings), evidence: index(board.evidence),
     attempts: index(board.attempts ?? []), replacedBy, attemptsByEvidence, attemptsByHypothesis, counterSteps,
-    conflicts: observationConflicts(board), records: new Map<string, PublicRecord | undefined>() };
+    conflicts: observationConflicts(board), records: new Map<string, PublicRecord | undefined>(),
+    blocks: wikiBlocks(board.wikiPages ?? []), issues: new Map<WikiRevision, (WikiIssue & { blockId: string })[]>() };
 }
 const readScopes = new WeakMap<BoardSnapshot, ReturnType<typeof recordScope>>();
 /** Synchronous operation-local cache. No revision/identity cache survives a read:
@@ -275,11 +276,15 @@ export function applyWikiPages(board: BoardSnapshot, proposals: WikiPageProposal
 /** Review flags describe recorded-source changes, not file integrity or whether
  * an author's interpretation is true. Re-reading alone never clears them. */
 export function wikiIssues(board: BoardSnapshot, page: WikiRevision): (WikiIssue & { blockId: string })[] {
-  return withWikiReadScope(board, () => collectWikiIssues(board, page));
+  return withWikiReadScope(board, () => {
+    const cache = readScopes.get(board)!.issues;
+    if (!cache.has(page)) cache.set(page, collectWikiIssues(board, page));
+    return cache.get(page)!;
+  });
 }
 function collectWikiIssues(board: BoardSnapshot, page: WikiRevision): (WikiIssue & { blockId: string })[] {
   const issues: (WikiIssue & { blockId: string })[] = [];
-  const byBlock = wikiBlocks(board.wikiPages ?? []);
+  const byBlock = readScopes.get(board)!.blocks;
   for (const root of page.blocks) {
     const pending: { block: WikiBlock; via?: WikiBlockRef }[] = [{ block: root }], seen = new Set<string>();
     const found = new Map<string, WikiIssue>();

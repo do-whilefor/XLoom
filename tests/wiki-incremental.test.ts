@@ -51,6 +51,17 @@ function source(board: BoardSnapshot, root: string, id: string, body: string) {
 const receipts = (delivery: ReturnType<typeof materialDelivery>) => Object.fromEntries(delivery.items.map(item => [item.key, item.signature]));
 
 describe("durable material announcements", () => {
+  it("announces removals once and invalidates receipts when records reappear", () => {
+    const { board } = fixture(), first = receipts(materialDelivery(board, {}, 64000));
+    const fact = board.facts.pop()!;
+    const removed = materialDelivery(board, first, 64000);
+    expect(removed.items).toContainEqual(expect.objectContaining({ id: fact.id, change: "removed", status: "removed" }));
+    expect(removed.removed).toBe(1);
+    const baseline = { ...first, ...receipts(removed) };
+    expect(materialDelivery(board, baseline, 64000).items).toEqual([]);
+    board.facts.push(fact);
+    expect(materialDelivery(board, baseline, 64000).items).toContainEqual(expect.objectContaining({ id: fact.id, change: "changed" }));
+  });
   it("announces only changed versions, preserves source identity and prioritizes old gaps", () => {
     const { board } = fixture();
     board.facts.push({ ...board.facts[0]!, id: "F-copy" });

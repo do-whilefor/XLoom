@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
 import { access, opendir, readFile, stat } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createReadTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 import { createTaskReader, type TaskReadContext } from "../wiki/read.js";
 import { retrievalFeedback } from "../wiki/feedback.js";
+import { assertWikiProjectionReady } from "../wiki/projection.js";
 
 const maxDirectoryEntries = 200;
 const maxDirectoryBytes = 16 * 1024;
@@ -125,6 +126,10 @@ export function createWorkspaceReadTool(workspace: string, artifactsDirectory?: 
     }
     if (artifactsDirectory && params.path.startsWith(artifactPrefix)) {
       params = { ...params, path: artifactReadPath(params.path, artifactsDirectory) };
+    }
+    if (task) {
+      const rel = relative(resolve(task.dataDir, "wiki"), resolve(workspace, params.path));
+      if (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`)) assertWikiProjectionReady(task.snapshot(), task.dataDir);
     }
     try {
       return await execute(id, params, signal, onUpdate);

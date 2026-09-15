@@ -3,6 +3,7 @@ import type { IndexStats } from "./cache.js";
 
 export function materialFeedback(delivery: MaterialDelivery): string {
   const lines = [`${delivery.baseline === "initial" ? "首次资料交接" : "本轮资料交接"}：新增 ${delivery.added} 项，更新 ${delivery.changed} 项。`];
+  if (delivery.removed) lines.push(`已移除 ${delivery.removed} 项旧资料；旧正文不再作为当前资料复用。`);
   const gaps = new Set(delivery.items.flatMap(item => item.relatedGaps.map(ref => `${ref.stepId}/${ref.gapId}`)));
   if (gaps.size) lines.push(`展示 ${gaps.size} 个关联问题入口：${[...gaps].slice(0, 3).join("、")}${gaps.size > 3 ? "等" : ""}。`);
   if (delivery.deferredCount) lines.push(`还有 ${delivery.deferredCount} 项未装入本轮提示。补读入口：${delivery.readPath}`);
