@@ -36,17 +36,17 @@ class HttpConnections {
   private entries = new Map<string, PoolEntry>();
   private transient = new Set<HttpAgent>();
   private closed = false;
-  borrow(input: HttpInput) {
+  borrow(input: HttpInput, url: URL) {
     if (this.closed) throw new Error("HTTP execution session is closed.");
     const headers = Object.fromEntries(Object.entries(input.headers).map(([key, value]) => [key.toLowerCase(), value]));
-    const key = JSON.stringify([new URL(input.url).origin, Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))]);
+    const key = JSON.stringify([url.origin, Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))]);
     let entry = this.entries.get(key);
     if (!entry) {
       if (this.entries.size >= 8) {
         const idle = [...this.entries].find(([, value]) => value.active === 0);
         if (idle) { idle[1].agent.destroy(); this.entries.delete(idle[0]); }
       }
-      const Agent = input.url.startsWith("https:") ? HttpsAgent : HttpAgent;
+      const Agent = url.protocol === "https:" ? HttpsAgent : HttpAgent;
       entry = { agent: new Agent({ keepAlive: true, maxSockets: 4, maxTotalSockets: 4, maxFreeSockets: 4, timeout: 10_000 }), active: 0 };
       if (this.entries.size < 8) this.entries.set(key, entry);
       else this.transient.add(entry.agent);
@@ -79,7 +79,7 @@ interface Observation {
 
 /** One application request, no redirect, cookie jar or retry. Even a failed
  * transport is an observation; it must never be mistaken for a complete reply. */
-async function observe(input: HttpInput, signal: AbortSignal, agent: HttpAgent): Promise<Observation> {
+async function observe(input: HttpInput, url: URL, signal: AbortSignal, agent: HttpAgent): Promise<Observation> {
   signal.throwIfAborted();
   const started = performance.now();
   const body = input.bodyBase64 === undefined ? Buffer.from(input.body ?? "", "utf8") : Buffer.from(input.bodyBase64, "base64");
@@ -106,7 +106,7 @@ async function observe(input: HttpInput, signal: AbortSignal, agent: HttpAgent):
       resolve();
     };
     try {
-      const request = (input.url.startsWith("https:") ? httpsRequest : httpRequest)(input.url,
+      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url,
         { method: observation.request.method, headers: input.headers, agent, signal: combined }, response => {
           observation.response = { status: response.statusCode!, headers: response.headers, bodyBase64: "" };
           response.on("data", (chunk: Buffer) => {
@@ -159,9 +159,10 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
       const results: Awaited<ReturnType<typeof perform>>[] = [];
       let next = 0, completed = 0, stopped = false;
       async function perform(index: number, request: HttpInput) {
-        const lease = connections.borrow(request);
+        const url = new URL(request.url);
+        const lease = connections.borrow(request, url);
         let observation: Observation;
-        try { observation = await observe(request, control, lease.agent); }
+        try { observation = await observe(request, url, control, lease.agent); }
         finally { lease.release(); }
         if (!observation.complete) stopped = true;
         const ref = `http-${randomUUID()}`;

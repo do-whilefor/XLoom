@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +53,37 @@ async function fixture() {
 }
 
 describe("automatic HTTP evidence", () => {
+  it.each([
+    ["HTTPS", "https", "HtTpS"],
+    ["HtTpS", "HTTPS", "https"],
+    ["https", "HTTPS", "HtTpS"],
+  ])("uses TLS for mixed-case HTTPS in cold and reused pools: %s, %s, %s", async (...schemes) => {
+    const f = await fixture();
+    const handshakes: Buffer[] = [];
+    const listener = createTcpServer(socket => {
+      socket.once("data", bytes => { handshakes.push(bytes); socket.destroy(); });
+    });
+    await new Promise<void>(resolve => listener.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (listener.address() as { port: number }).port;
+      for (const scheme of schemes) {
+        const url = `${scheme}://127.0.0.1:${port}/fixture`;
+        const output = await f.call({ http: { requests: [{ url }] } }, AbortSignal.timeout(5000));
+        const result = output.results[0];
+        // The local listener deliberately closes during TLS, before any HTTP request.
+        expect(result.complete).toBe(false);
+        expect(result.error).not.toContain("not supported");
+        const observation = JSON.parse(await readFile(result.evidence.path, "utf8"));
+        expect(observation.request.url).toBe(url);
+      }
+      expect(handshakes).toHaveLength(schemes.length);
+      expect(handshakes.every(bytes => bytes[0] === 0x16 && bytes[1] === 0x03)).toBe(true);
+    } finally {
+      disposeHttpTool(f.tool);
+      await new Promise<void>(resolve => listener.close(() => resolve()));
+    }
+  });
+
   it.each(["success", "failure", "cancel"])("disposes the real Pi runner's HTTP session on %s", async outcome => {
     const f = await fixture();
     const model: Model<"openai-completions"> = { api: "openai-completions", id: "fixture", provider: "fixture", name: "fixture", baseUrl: "https://example.invalid",
