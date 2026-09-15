@@ -25,7 +25,7 @@ import { validateCvssExecution } from "../scoring/cvss.js";
 import { createChromeSession, type ChromeSession } from "./chrome.js";
 import { scheduledTools } from "./execution.js";
 import { submissionTool } from "./submission.js";
-import { withHttpEvidence } from "./http.js";
+import { disposeHttpTool, withHttpEvidence } from "./http.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -182,6 +182,7 @@ export class PiRunner implements AgentRunner {
     let finalMessage: AssistantMessage | undefined;
     let forward: ReturnType<typeof createRuntimeForwarder> | undefined;
     let chrome: ChromeSession | undefined;
+    let executionTools: AgentTool[] = [];
     try {
       request.signal.throwIfAborted();
       if (request.mode === "execute" && !request.step) throw new Error("Execute requires an assigned Step.");
@@ -225,7 +226,8 @@ export class PiRunner implements AgentRunner {
         request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
           materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
           onAnnounced: items => { if (request.materials) (request.materialReads ??= []).push(...items); } } : undefined);
-      const tools: AgentTool[] = request.mode === "execute" ? executeTools(request.workspace, join(request.runDir, "artifacts")).map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
+      if (request.mode === "execute") executionTools = executeTools(request.workspace, join(request.runDir, "artifacts"));
+      const tools: AgentTool[] = request.mode === "execute" ? executionTools.map(tool => tool.name === "read" ? readTool : tool.name === "write" && stage ? stage.tool
         : tool.name === "edit" && stage ? createWorkspaceEditTool(request.workspace, join(request.runDir, "artifacts", "checkpoint.json")) : tool) : [readTool];
       if (request.mode === "execute" && request.snapshot.config.chrome?.enabled !== false && budget.toolsAllowed) {
         chrome = (this.options.createChrome ?? createChromeSession)({ workspace: request.workspace, artifactsDirectory: join(request.runDir, "artifacts"),
@@ -442,7 +444,7 @@ export class PiRunner implements AgentRunner {
       detachAbort?.();
       if (request.signal.aborted) agent?.abort();
       try { await agent?.waitForIdle(); }
-      finally { forward?.finish(); unsubscribe?.(); await chrome?.close(); }
+      finally { forward?.finish(); unsubscribe?.(); executionTools.forEach(disposeHttpTool); await chrome?.close(); }
     }
   }
 }

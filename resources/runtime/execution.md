@@ -39,6 +39,14 @@ On failure no queued requests start; in-flight reads finish and retain their
 evidence. A GET method alone cannot prove the target has no side effects: declare
 independence only after checking the operation's meaning.
 
+Within one Execute run, HTTP mode reuses connections across calls for the same
+origin and explicit headers. Changing identity headers selects a separate pool;
+there is no cookie jar or shared model history. At most eight origin/header pools
+are retained, with up to four sockets each; idle pools expire or are evicted.
+The runner closes them on success, failure or cancellation. PowerShell command
+mode still uses a fresh process, so shell variables and working-directory changes
+cannot leak into the next call.
+
 ## Scripted HTTP loops
 
 Use the bundled PowerShell helper for repeated HTTP requests. Dot-source its absolute `httpHelper` path once and create one client per script. Run the script once through `powershell`; keep the request loop inside that process. Python's in-process HTTP clients are also suitable when installed. Do not spawn curl/PowerShell for each request in a large loop.

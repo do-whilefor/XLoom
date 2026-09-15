@@ -159,7 +159,7 @@ projects/<工作区哈希>/
 
 ## 模型与配置
 
-Execute 的批量 HTTP 操作可复用内置的进程内客户端，逐请求保存结果，并从已完成前置步骤的 artifacts 检查可复用脚本。只含 `read` 的批次最多四路并发；混合写入、Shell 或 Chrome 的批次保持顺序。使用方式见 [执行效率与 HTTP helper](resources/runtime/execution.md)。
+Execute 的 `powershell` 工具支持结构化 `http` 请求：自动保存原始请求/响应及证据引用，同一 run 内按目标和身份请求头复用连接。明确独立的 GET/HEAD 请求可在一次调用内最多四路并发；普通命令、写入及修改状态的 HTTP 请求保持顺序。PowerShell 命令在同一进程内完成语法预检与执行。脚本循环仍可使用内置 HTTP helper，并复用已完成前置步骤的 artifacts。使用方式见 [执行效率与 HTTP helper](resources/runtime/execution.md)。
 
 模型目录、供应商适配和认证直接使用依赖 Pi 的 `ModelRuntime`，不维护独立的模型白名单。`models.chat`、`models.decide`、`models.execute` 可配置不同模型；元认知始终复用 decide。
 

@@ -1,8 +1,9 @@
-import { request as httpRequest, validateHeaderName, validateHeaderValue } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpAgent, request as httpRequest, validateHeaderName, validateHeaderValue } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isUtf8 } from "node:buffer";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { z } from "zod";
 
@@ -26,17 +27,59 @@ const batchSchema = z.object({ requests: z.array(requestSchema).min(1).max(16), 
   ["GET", "HEAD"].includes(request.method.toUpperCase()) && request.body === undefined && request.bodyBase64 === undefined)),
 "Concurrent batches require independent=true and only body-free GET/HEAD requests; dependent or mutating work stays sequential");
 type HttpInput = z.infer<typeof requestSchema>;
+const closeHttp = Symbol("closeHttp");
+type PoolEntry = { agent: HttpAgent; active: number };
+
+/** Per-run connections only. All explicit headers partition pools so identity
+ * changes cannot inherit a connection authenticated by a previous request. */
+class HttpConnections {
+  private entries = new Map<string, PoolEntry>();
+  private transient = new Set<HttpAgent>();
+  private closed = false;
+  borrow(input: HttpInput) {
+    if (this.closed) throw new Error("HTTP execution session is closed.");
+    const headers = Object.fromEntries(Object.entries(input.headers).map(([key, value]) => [key.toLowerCase(), value]));
+    const key = JSON.stringify([new URL(input.url).origin, Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))]);
+    let entry = this.entries.get(key);
+    if (!entry) {
+      if (this.entries.size >= 8) {
+        const idle = [...this.entries].find(([, value]) => value.active === 0);
+        if (idle) { idle[1].agent.destroy(); this.entries.delete(idle[0]); }
+      }
+      const Agent = input.url.startsWith("https:") ? HttpsAgent : HttpAgent;
+      entry = { agent: new Agent({ keepAlive: true, maxSockets: 4, maxTotalSockets: 4, maxFreeSockets: 4, timeout: 10_000 }), active: 0 };
+      if (this.entries.size < 8) this.entries.set(key, entry);
+      else this.transient.add(entry.agent);
+    } else { this.entries.delete(key); this.entries.set(key, entry); }
+    entry.active++;
+    const leased = entry;
+    return { agent: entry.agent, release: () => {
+      leased.active--;
+      if (this.transient.delete(leased.agent)) leased.agent.destroy();
+    } };
+  }
+  close() {
+    this.closed = true;
+    for (const entry of this.entries.values()) entry.agent.destroy();
+    for (const agent of this.transient) agent.destroy();
+    this.entries.clear(); this.transient.clear();
+  }
+}
+
+export function disposeHttpTool(tool: AgentTool): void {
+  (tool as AgentTool & { [closeHttp]?: () => void })[closeHttp]?.();
+}
 
 interface Observation {
   startedAt: string; durationMs: number; complete: boolean;
   request: { method: string; url: string; headers: Record<string, unknown>; bodyBase64: string };
-  response?: { status: number; headers: Record<string, unknown>; bodyBase64: string };
+  response?: { status: number; headers: Record<string, unknown>; bodyBase64: string; body?: string };
   error?: string;
 }
 
 /** One application request, no redirect, cookie jar or retry. Even a failed
  * transport is an observation; it must never be mistaken for a complete reply. */
-async function observe(input: HttpInput, signal: AbortSignal): Promise<Observation> {
+async function observe(input: HttpInput, signal: AbortSignal, agent: HttpAgent): Promise<Observation> {
   signal.throwIfAborted();
   const started = performance.now();
   const body = input.bodyBase64 === undefined ? Buffer.from(input.body ?? "", "utf8") : Buffer.from(input.bodyBase64, "base64");
@@ -53,14 +96,18 @@ async function observe(input: HttpInput, signal: AbortSignal): Promise<Observati
       finished = true;
       observation.durationMs = performance.now() - started;
       observation.complete = !error;
-      if (observation.response) observation.response.bodyBase64 = Buffer.concat(chunks).toString("base64");
+      if (observation.response) {
+        const bytes = Buffer.concat(chunks);
+        observation.response.bodyBase64 = bytes.toString("base64");
+        if (isUtf8(bytes)) observation.response.body = bytes.toString("utf8");
+      }
       if (error) observation.error = timeout.aborted ? "HTTP request timed out; side effects may have occurred; not retried."
         : signal.aborted ? "HTTP request cancelled; side effects may have occurred; not retried." : `${error.message}; not retried.`;
       resolve();
     };
     try {
       const request = (input.url.startsWith("https:") ? httpsRequest : httpRequest)(input.url,
-        { method: observation.request.method, headers: input.headers, agent: false, signal: combined }, response => {
+        { method: observation.request.method, headers: input.headers, agent, signal: combined }, response => {
           observation.response = { status: response.statusCode!, headers: response.headers, bodyBase64: "" };
           response.on("data", (chunk: Buffer) => {
             const remaining = responseLimit - bytes;
@@ -85,7 +132,8 @@ async function observe(input: HttpInput, signal: AbortSignal): Promise<Observati
 /** Extend Execute's existing tool, preserving its command interface. HTTP mode
  * records transport observations only; evidence submission/review stay explicit. */
 export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): AgentTool {
-  return {
+  const connections = new HttpConnections();
+  const enhanced: AgentTool = {
     ...tool,
     description: `${tool.description} For HTTP use http:{requests:[{url,method?,headers?,body?,bodyBase64?,timeoutSeconds?}],previewBytes?,independent?,concurrency?} instead of command. Batch known requests in one call; default sequential, independent=true allows up to 4 concurrent body-free GET/HEAD requests. Exact requests/responses are saved automatically; submit returned evidence refs/paths unchanged. No redirects, cookie sharing or retries. Body previews default to 2000 bytes; read evidence for full data.`,
     parameters: { type: "object", properties: {
@@ -111,7 +159,10 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
       const results: Awaited<ReturnType<typeof perform>>[] = [];
       let next = 0, completed = 0, stopped = false;
       async function perform(index: number, request: HttpInput) {
-        const observation = await observe(request, control);
+        const lease = connections.borrow(request);
+        let observation: Observation;
+        try { observation = await observe(request, control, lease.agent); }
+        finally { lease.release(); }
         if (!observation.complete) stopped = true;
         const ref = `http-${randomUUID()}`;
         const path = join(directory, `${ref}.json`);
@@ -148,4 +199,5 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
         notice: "Application-level HTTP observations; submission and independent review are still required. Incomplete requests were not retried." }) }], details: {} };
     },
   };
+  return Object.assign(enhanced, { [closeHttp]: () => connections.close() });
 }
