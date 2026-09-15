@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { AssistantMessageEventStream, type AssistantMessage, type Model, type Usage } from "@earendil-works/pi-ai";
-import { CONTEXT_SUMMARY_MARKER, createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint,
+import { CONTEXT_SUMMARY_MARKER, createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint, requireContextCapacity,
   type CheckpointIdentity, type CheckpointState } from "../src/runtime/continuity.js";
 
 const model: Model<"openai-completions"> = {
@@ -57,6 +57,23 @@ describe("provider failure classification", () => {
 });
 
 describe("long-running context maintenance", () => {
+  it("compacts for complete request pressure when provider usage is unavailable", async () => {
+    const selected = { ...model, contextWindow: 16000 };
+    const messages = history();
+    for (const message of messages) if (message.role === "assistant") message.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const envelope = { systemPrompt: "Keep this system instruction.", tools: [{ name: "read", description: "Tool documentation ".repeat(2100), parameters: { type: "object" as const } }] };
+    const original = structuredClone(messages);
+    expect(() => requireContextCapacity(selected, { ...envelope, messages: messages as any })).toThrow("capacity exhausted");
+    const summarize = vi.fn(async () => ({ text: "Completed reads retained; evidence remains unverified." }));
+    const prepared = await prepareContext(messages, selected, undefined, summarize, false, envelope);
+    expect(prepared.compacted).toBe(true);
+    expect(summarize).toHaveBeenCalledOnce();
+    expect(prepared.messages[0]).toBe(messages[0]);
+    expect(prepared.messages.slice(-4)).toEqual(messages.slice(-4));
+    expect(() => requireContextCapacity(selected, { ...envelope, messages: prepared.messages as any })).not.toThrow();
+    expect(messages).toEqual(original);
+  });
+
   it("retains original Chat corrections independently of a lossy summary, without enabling this for Run", async () => {
     const correction = user("Later correction: identity=bob, state=v3, result=NOT_ATTEMPTED; alice/v1 is withdrawn.");
     const messages = [user("Original condition: alice/v1"), correction, ...history().slice(1)];

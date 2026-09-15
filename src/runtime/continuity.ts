@@ -164,7 +164,7 @@ function calibratedEstimate(messages: AgentMessage[], structuralTokens: number):
  * a safe fallback (its API forbids throwing from that callback).
  */
 export async function prepareContext(messages: AgentMessage[], model: Model<Api>, signal?: AbortSignal,
-  summarizer?: ContextSummarizer, preserveUserTurns = false): Promise<PreparedContext> {
+  summarizer?: ContextSummarizer, preserveUserTurns = false, requestContext?: Pick<Context, "systemPrompt" | "tools">): Promise<PreparedContext> {
   signal?.throwIfAborted();
   const structuralTokens = contextEstimate(messages);
   const estimatedTokensBefore = calibratedEstimate(messages, structuralTokens);
@@ -173,9 +173,17 @@ export async function prepareContext(messages: AgentMessage[], model: Model<Api>
     messages, compacted: false, estimatedTokensBefore, estimatedTokensAfter: estimatedTokensBefore, ...(reason ? { reason } : {}),
   });
   if (!Number.isFinite(model.contextWindow) || model.contextWindow <= 0) return unchanged("unknown-capacity");
+  // Pi also reserves provider safety tokens and includes system/tool overhead.
+  // Message-only pressure can miss an exhausted request, especially after a
+  // restart or when the endpoint provides no usable context token accounting.
+  const responseReserve = Math.min(model.maxTokens, Math.ceil(model.contextWindow * 0.25));
+  const requestPressure = requestContext !== undefined && clampMaxTokensToContext(model,
+    { ...requestContext, messages: messages as Message[] }, Number.MAX_SAFE_INTEGER) <= responseReserve;
+  const retentionWindow = requestContext === undefined ? model.contextWindow : Math.min(model.contextWindow,
+    Math.max(0, clampMaxTokensToContext(model, { ...requestContext, messages: [] }, Number.MAX_SAFE_INTEGER) - responseReserve));
   if (!shouldCompact(estimatedTokensBefore, model.contextWindow, {
     enabled: true, reserveTokens: Math.ceil(model.contextWindow * 0.25), keepRecentTokens: 0,
-  })) return unchanged();
+  }) && !requestPressure) return unchanged();
   const batches = completeBatches(messages);
   if (!batches) return unchanged("pending-tools");
   const firstUser = messages.findIndex(message => message.role === "user");
@@ -183,7 +191,7 @@ export async function prepareContext(messages: AgentMessage[], model: Model<Api>
   let keepBatch = batches.length;
   let recentTokens = 0;
   // At least two complete recent batches survive. Never split even one tool pair.
-  while (keepBatch > 1 && (recentTokens < model.contextWindow * 0.25 || batches.length - keepBatch < 2)) {
+  while (keepBatch > 1 && (recentTokens < retentionWindow * 0.25 || batches.length - keepBatch < 2)) {
     const batch = batches[--keepBatch];
     recentTokens += contextEstimate(messages.slice(batch.start, batch.end)) * calibration;
   }
@@ -200,7 +208,7 @@ export async function prepareContext(messages: AgentMessage[], model: Model<Api>
     const message = messages[index];
     if (message.role !== "user" || typeof message.content === "string" && message.content.startsWith(CONTEXT_SUMMARY_MARKER)) continue;
     const tokens = contextEstimate([message]) * calibration;
-    if (retainedUserTokens + tokens > model.contextWindow * 0.1) break;
+    if (retainedUserTokens + tokens > retentionWindow * 0.1) break;
     retainedUsers.unshift(message); retainedUserTokens += tokens;
   }
   const summary = await summarizer(messages.slice(1, firstKept), model, signal);

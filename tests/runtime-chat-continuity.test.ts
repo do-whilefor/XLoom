@@ -44,6 +44,36 @@ async function request() {
 const isSummary = (context: Context) => context.systemPrompt?.startsWith("Summarize the older conversation as private working memory.") ?? false;
 
 describe("durable private chat", () => {
+  it("compacts a small-context chat including tool overhead when usage is unavailable, across restart", async () => {
+    const { input, directory } = await request();
+    input.chrome = { enabled: false };
+    const zero: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    let summaries = 0, replies = 0;
+    const create = () => new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({
+      model: { ...model, contextWindow: 12000 }, streamFn: stream(context => {
+        if (isSummary(context)) {
+          summaries++;
+          return assistant([{ type: "text", text: "Earlier synthetic chat data received; no tool actions or verified research findings." }], "stop", zero);
+        }
+        replies++;
+        expect(JSON.stringify(context.messages.at(-1))).toContain(`CURRENT_TURN_${replies}`);
+        return assistant([{ type: "text", text: `Reply ${replies}` }], "stop", zero);
+      }),
+    }) });
+    let session = create(), file: string | undefined;
+    for (let turn = 1; turn <= 20; turn++) {
+      await session.send({ ...input, text: `CURRENT_TURN_${turn}\n` + "Synthetic inert data. ".repeat(150) });
+      file ??= session.history().file;
+      expect(session.history().file).toBe(file);
+      if (turn === 10) { session.close(); session = create(); }
+    }
+    expect(replies).toBe(20); expect(summaries).toBeGreaterThan(0);
+    expect(session.history().messages.at(-1)?.text).toBe("Reply 20");
+    expect(session.history().pendingToolCalls).toEqual([]);
+    session.close();
+  });
+
   it.each([false, true])("rejects oversized input before changing chat or making a request (existing=%s)", async existing => {
     const { input, directory } = await request();
     let calls = 0;

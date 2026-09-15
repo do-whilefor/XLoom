@@ -138,7 +138,8 @@ export class ChatSession {
         requireRequest();
         // Summary calls share the request counter, but cannot consume the one
         // remaining request reserved for reporting completed observations.
-        const prepared = await prepareContext(messages, selected.model, signal, finalRequest() ? undefined : summarize, true);
+        const prepared = await prepareContext(messages, selected.model, signal, finalRequest() ? undefined : summarize, true,
+          agent ? { systemPrompt: agent.state.systemPrompt, tools: agent.state.tools } : undefined);
         // A summary is a real model call and can consume an explicitly configured
         // budget or receive cancellation before the next normal provider request.
         requireRequest();

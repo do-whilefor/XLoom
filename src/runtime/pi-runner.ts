@@ -288,7 +288,7 @@ export class PiRunner implements AgentRunner {
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted before context maintenance.");
           const next = await budget.prepareNextTurnWithContext(context);
           const base = next?.context ?? context.context;
-          const prepared = await prepareContext(base.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer);
+          const prepared = await prepareContext(base.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer, false, base);
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted during context maintenance.");
           if (prepared.compacted) {
             agent!.state.messages = prepared.messages;
@@ -370,7 +370,8 @@ export class PiRunner implements AgentRunner {
             agent!.state.tools = [];
             agent!.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
           }
-          const prepared = await prepareContext(agent!.state.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer);
+          const prepared = await prepareContext(agent!.state.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer, false,
+            { systemPrompt: agent!.state.systemPrompt, tools: agent!.state.tools });
           if (completingJson) jsonBaseMessages = prepared.messages.slice(0, -1);
           if (prepared.compacted) {
             agent!.state.messages = prepared.messages;

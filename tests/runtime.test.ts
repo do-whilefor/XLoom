@@ -641,8 +641,9 @@ describe("Pi runtime isolation", () => {
     expect(await readFile(join(input.workspace, "first.txt"), "utf8")).toBe("one");
   });
 
-  it("compacts long conversations at complete tool boundaries and accounts for summary tokens", async () => {
+  it.each([0, 4000])("compacts complete tool batches with %i extra context characters and accounts for summary tokens", async extraContext => {
     const input = await request("execute");
+    input.snapshot.config.context += "x".repeat(extraContext);
     input.snapshot.config.limits.maxTurnsPerRun = null;
     input.snapshot.config.limits.maxTokens = null;
     const events: RuntimeEvent[] = [];
