@@ -13,7 +13,7 @@ export function createRunBudget(limits: ProjectConfig["limits"], usage: Usage, s
     : "This is the final allowed model turn; tools are unavailable. Return the required JSON using observed results and existing artifacts. Unfinished Execute: no_progress/blocked; Decide: plan the next Step. Ending is not Goal completion.";
   const instruction = maxTurns === null
     ? ""
-    : `maxTurnsPerRun=${maxTurns}: at most ${maxTurns - 1} tool turns, then a tool-free final report. Save artifacts first. This limit does not mean the Goal is complete.`;
+    : `maxTurnsPerRun=${maxTurns}: at most ${maxTurns} model requests including summaries, retries and repairs; reserve the last for a tool-free final report. Save artifacts first. This limit does not mean the Goal is complete.`;
   const shouldStopAfterTurn: NonNullable<AgentOptions["shouldStopAfterTurn"]> = ({ message }) => {
     turns++;
     const tokens = spent.input + spent.output + usage.input + usage.output;

@@ -131,6 +131,27 @@ describe("durable private chat", () => {
 });
 
 describe("chat context maintenance integration", () => {
+  it.each([1, 2])("reserves the last request after compacting retained chat with a cap of %s", async cap => {
+    const { input } = await request();
+    let checking = false, summaries = 0, calls = 0;
+    const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (!checking) return assistant([{ type: "text", text: "retained observation ".repeat(200) }]);
+      calls++;
+      if (isSummary(context)) { summaries++; return assistant([{ type: "text", text: "Earlier observations retained." }]); }
+      expect(context.tools).toEqual([]);
+      return assistant([{ type: "text", text: "Final reply from existing observations." }]);
+    }) }) });
+    await session.send(input);
+    await session.send({ ...input, text: "One more observation." });
+    checking = true;
+    const result = await session.send({ ...input, limits: { ...input.limits, maxTurnsPerRun: cap }, text: "Summarize existing results." });
+    expect(calls).toBe(cap);
+    expect(summaries).toBe(cap - 1);
+    expect(result.input).toBe(cap * 3);
+    expect(result.output).toBe(cap);
+    session.close();
+  });
+
   it("compacts a continuing tool loop, meters each summary once and retains private history for the next send", async () => {
     const { input, events, directory } = await request();
     await writeFile(join(directory, "fixture.txt"), "synthetic observation ".repeat(110));

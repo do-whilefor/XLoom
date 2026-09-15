@@ -1,7 +1,7 @@
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { Agent, type AgentEvent, type AgentMessage, type AgentOptions, type AgentTool } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentOptions, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceEditTool } from "./edit.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -252,19 +252,20 @@ export class PiRunner implements AgentRunner {
       const finalInstruction = "This is the final allowed model request. Tools are unavailable. Return the required JSON from completed observations only; do not claim unfinished work succeeded.";
       const canRequest = () => budget.canRequest && (request.snapshot.config.limits.maxTurnsPerRun === null
         || modelRequests < request.snapshot.config.limits.maxTurnsPerRun);
-      const summarizer = createContextSummarizer(selected.streamFn, consumed => {
+      const mainStream: StreamFn = (...args) => {
+        request.signal.throwIfAborted();
+        if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");
+        modelRequests++;
+        return selected.streamFn(...args);
+      };
+      const summarizer = createContextSummarizer(mainStream, consumed => {
         const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
         usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
         emit({ type: "usage", mode: request.mode, text: "", usage: added });
       }, request.id);
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
         initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, config.thinking), messages: [], tools: budget.toolsAllowed ? scheduledTools(tools) : [] },
-        streamFn: (...args) => {
-          request.signal.throwIfAborted();
-          if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");
-          modelRequests++;
-          return selected.streamFn(...args);
-        },
+        streamFn: mainStream,
         toolExecution: "parallel",
         sessionId: request.id,
         beforeToolCall: async () => {
@@ -286,7 +287,7 @@ export class PiRunner implements AgentRunner {
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted before context maintenance.");
           const next = await budget.prepareNextTurnWithContext(context);
           const base = next?.context ?? context.context;
-          const prepared = await prepareContext(base.messages, selected.model, request.signal, summarizer);
+          const prepared = await prepareContext(base.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer);
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted during context maintenance.");
           if (prepared.compacted) {
             agent!.state.messages = prepared.messages;
@@ -367,7 +368,7 @@ export class PiRunner implements AgentRunner {
             agent!.state.tools = [];
             agent!.shouldStopAfterTurn = async context => { await budget.shouldStopAfterTurn(context); return true; };
           }
-          const prepared = await prepareContext(agent!.state.messages, selected.model, request.signal, summarizer);
+          const prepared = await prepareContext(agent!.state.messages, selected.model, request.signal, finalRequest() ? undefined : summarizer);
           if (completingJson) jsonBaseMessages = prepared.messages.slice(0, -1);
           if (prepared.compacted) {
             agent!.state.messages = prepared.messages;

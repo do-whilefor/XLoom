@@ -107,6 +107,7 @@ export class ChatSession {
       const budget = createRunBudget(request.limits, usage, { input: 0, output: 0, cost: 0 }, "chat", signal);
       let modelRequests = 0;
       let requestLimitReached = false;
+      const finalRequest = () => request.limits.maxTurnsPerRun !== null && modelRequests === request.limits.maxTurnsPerRun - 1;
       const withinRequestCount = () => request.limits.maxTurnsPerRun === null || modelRequests < request.limits.maxTurnsPerRun;
       const canRequest = () => budget.canRequest && withinRequestCount();
       const requireRequest = () => {
@@ -120,7 +121,7 @@ export class ChatSession {
         return selected.streamFn(model, context, options);
       };
       forward = createRuntimeForwarder("chat", emit, redact, rememberSecrets, true);
-      const summarize = createContextSummarizer(selected.streamFn, providerUsage => {
+      const summarize = createContextSummarizer(mainStream, providerUsage => {
         const summaryUsage = { input: providerUsage.input + providerUsage.cacheRead + providerUsage.cacheWrite,
           output: providerUsage.output, cost: providerUsage.cost.total };
         usage.input += summaryUsage.input;
@@ -130,7 +131,9 @@ export class ChatSession {
       });
       const compactMessages = async (messages: AgentMessage[]) => {
         requireRequest();
-        const prepared = await prepareContext(messages, selected.model, signal, summarize);
+        // Summary calls share the request counter, but cannot consume the one
+        // remaining request reserved for reporting completed observations.
+        const prepared = await prepareContext(messages, selected.model, signal, finalRequest() ? undefined : summarize);
         // A summary is a real model call and can consume an explicitly configured
         // budget or receive cancellation before the next normal provider request.
         requireRequest();
@@ -195,8 +198,7 @@ export class ChatSession {
         const messages = await compactMessages(next.messages);
         agent!.state.messages = messages;
         await persist();
-        const finalRequest = request.limits.maxTurnsPerRun !== null && modelRequests === request.limits.maxTurnsPerRun - 1;
-        return { ...update, context: { ...next, messages, ...(finalRequest ? {
+        return { ...update, context: { ...next, messages, ...(finalRequest() ? {
           tools: [], systemPrompt: `${next.systemPrompt}\nThe next response is the final allowed model request. Give an honest final reply from completed results. Do not call tools or claim unfinished work succeeded.`,
         } : {}) } };
       };
@@ -219,6 +221,10 @@ export class ChatSession {
       detachAbort = () => signal.removeEventListener("abort", onAbort);
       signal.throwIfAborted();
       agent.state.messages = await compactMessages(agent.state.messages);
+      if (finalRequest()) {
+        agent.state.tools = [];
+        agent.state.systemPrompt += "\nThis is the final allowed model request. Report only completed results; no tools are available.";
+      }
       await agent.prompt(redact(request.text));
       signal.throwIfAborted();
       let recoveredTransient = false;
@@ -238,7 +244,7 @@ export class ChatSession {
         }
         agent.state.messages = await compactMessages(agent.state.messages);
         requireRequest();
-        if (request.limits.maxTurnsPerRun !== null && modelRequests === request.limits.maxTurnsPerRun - 1) {
+        if (finalRequest()) {
           agent.state.tools = [];
           agent.state.systemPrompt += "\nThis is the final allowed model request. Report only completed results; no tools are available.";
         }

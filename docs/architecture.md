@@ -154,7 +154,7 @@ Controller 在提交前检查 NEED_INPUT 的结构性前提（考虑本次 revie
 
 单次/累计运行时间、回合数、输入/输出 Token、费用预算默认 null，只在用户显式设置时作为资源暂停条件；旧 maxSteps 加载时丢弃。旧配置若仍显式填写 180 秒，则须删除或改为 null 并重启才能解除。资源耗尽、调用失败、取消和没有可执行计划是操作状态，不强行映射到研究结论。
 
-`runtime/run-budget.ts` 为聊天及研究调用共享计数策略。`maxTurnsPerRun: null` 不限制回合，不禁用工具，也不强制进入收尾。仅在显式配置有限值时，才通过 Pi `prepareNextTurnWithContext` 为最后一轮禁用工具并整理结果；配置为 1 时首轮就禁用工具。仍要求正常 stop 和既有结果契约，Chat 每次 send 重置工具和预算闭包。资源预算在整轮结束后检查。模型解析层未收到显式 `models.<role>.maxTokens` 时不追加请求级输出覆盖；Pi/供应商的有限容量约束仍存在。
+`runtime/run-budget.ts` 为聊天及研究调用共享资源预算策略。`maxTurnsPerRun: null` 不限制请求，不禁用工具，也不强制进入收尾。显式有限值限制本次调用的应用层模型请求总数；正常生成、摘要、失败续接和协议修复经过同一个受限 stream 入口。最后一个请求保留给无工具报告，不能用于摘要；Pi `prepareNextTurnWithContext` 更新下一轮工具集合，Chat 恢复上下文后也重新检查剩余名额。配置为 1 时首轮就禁用工具。仍要求正常 stop 和既有结果契约，Chat 每次 send 重置工具和预算闭包。资源预算在整轮结束后和模型请求前检查。模型解析层未收到显式 `models.<role>.maxTokens` 时不追加请求级输出覆盖；Pi/供应商的有限容量约束仍存在。
 
 `runtime/powershell.ts` 包装 Pi PowerShell operations：临时源码文件交给同解释器 AST parser，仅执行语法检查，通过后原始 command 执行一次。预检与执行共享取消信号及总工具超时，finally 清理临时源码。语法预检不是运行时成功保证，也不修改源码含义。TUI 使用同一模型消息的 messageId 关联正文、真实思考和进展叙述，活动聚合仅影响呈现；usage 事件更新即时 token，权威用量提交后清除待计部分。
 

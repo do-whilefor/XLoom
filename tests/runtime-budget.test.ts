@@ -45,7 +45,7 @@ function answer(kind: Kind): AssistantMessage {
 }
 
 async function harness(kind: Kind, response: (context: Context, call: number) => AssistantMessage,
-  overrides: Partial<ProjectConfig["limits"]> = {}) {
+  overrides: Partial<ProjectConfig["limits"]> = {}, selectedModel = model) {
   const workspace = await mkdtemp(join(tmpdir(), "xloom-budget-test-"));
   directories.push(workspace);
   if (kind === "decide") await writeFile(join(workspace, "source.txt"), fixture);
@@ -77,7 +77,7 @@ async function harness(kind: Kind, response: (context: Context, call: number) =>
     return output;
   };
   let agentsCreated = 0;
-  const options = { resolveModel: async () => ({ model, streamFn }), createAgent: (entry: AgentOptions) => { agentsCreated++; return new Agent(entry); } };
+  const options = { resolveModel: async () => ({ model: selectedModel, streamFn }), createAgent: (entry: AgentOptions) => { agentsCreated++; return new Agent(entry); } };
   const session = new ChatSession(options);
   const runner = new PiRunner(options);
   return {
@@ -92,6 +92,27 @@ async function harness(kind: Kind, response: (context: Context, call: number) =>
 }
 
 describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn in %s", kind => {
+  it("counts context summaries in the request cap and preserves the final tool-free report", async () => {
+    let summaries = 0;
+    const test = await harness(kind, (context, call) => {
+      if (context.systemPrompt?.startsWith("Summarize the older conversation")) {
+        summaries++;
+        return message([{ type: "text", text: "Previous reads completed; use source.txt for original evidence." }]);
+      }
+      if (!context.tools?.length) return answer(kind);
+      return message([{ type: "toolCall", id: `read-${call}`, name: "read", arguments: { path: "source.txt" } }], "toolUse");
+    }, { maxTurnsPerRun: 8 }, { ...model, contextWindow: 2400 });
+    await writeFile(join(test.workspace, "source.txt"), "synthetic observation ".repeat(110));
+    const usage = await test.run();
+    expect(summaries).toBeGreaterThan(0);
+    expect(test.seen).toHaveLength(8);
+    expect(test.seen.at(-1)?.tools).toEqual([]);
+    expect(test.seen.at(-1)?.systemPrompt).not.toContain("Summarize the older conversation");
+    expect(usage.input).toBe(8 * once.input);
+    expect(usage.output).toBe(8 * once.output);
+    expect(test.events.filter(event => event.type === "tool_start")).toHaveLength(7 - summaries);
+  });
+
   it("keeps tools available beyond the old twelve-turn cap with unlimited input/output usage", async () => {
     const test = await harness(kind, (context, call) => {
       expect(context.tools?.map(tool => tool.name)).toEqual(availableTools(kind));
