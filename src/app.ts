@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { CHAT_GOAL, saveConfig } from "./config.js";
@@ -10,7 +10,7 @@ import { PiRunner } from "./runtime/pi-runner.js";
 import { SettingsService, type ModelDisplayInfo } from "./runtime/settings.js";
 import { projectConfigSchema, usageSchema } from "./schema.js";
 import { addUsage } from "./usage.js";
-import { currentTaskId, listTasks, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { listTasks, readSavedBoard, selectTask, WorkspaceLock } from "./workspace.js";
 import { ensureProject, projectDirectory, xloomHome } from "./paths.js";
 import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, ProjectConfig, Usage } from "./types.js";
 
@@ -52,13 +52,6 @@ export class AppController {
     this.chatSession = options.chat ?? new ChatSession({ storageDirectory: path.join(projectDirectory(this.workspace), "chats") });
     this.settings = options.settings ?? new SettingsService();
     this.lock = new WorkspaceLock(this.workspace);
-    try {
-      const taskId = currentTaskId(this.workspace);
-      if (taskId || existsSync(path.join(taskDirectory(this.workspace), "blackboard.sqlite"))) {
-        const saved = readSavedBoard(this.workspace, taskId);
-        this.attach(new BlackboardStore(this.workspace, { ...saved.config, models: this.config.models, limits: this.config.limits, chrome: this.config.chrome }, { taskId }));
-      }
-    } catch (error) { this.lock.close(); throw error; }
     this.refreshDisplayInfo();
   }
 
@@ -156,7 +149,10 @@ export class AppController {
     return controlChrome({ workspace: this.workspace, config: this.config.chrome, artifactsDirectory: projectDirectory(this.workspace) }, action);
   }
 
-  listTasks() { return listTasks(this.workspace); }
+  listTasks() {
+    const selected = this.store ? this.store.dataDir === projectDirectory(this.workspace) ? "@legacy" : path.basename(this.store.dataDir) : null;
+    return listTasks(this.workspace, selected);
+  }
   storagePaths() {
     return { workspace: this.workspace, home: xloomHome(), project: projectDirectory(this.workspace), config: this.configPath,
       task: this.store?.dataDir, chats: path.join(projectDirectory(this.workspace), "chats") };
@@ -183,19 +179,22 @@ export class AppController {
     this.idle();
     this.activeRole = "decide";
     const config = projectConfigSchema.parse({ ...this.config, goal: goal.trim(), scope: goal.trim(), context: "" });
+    this.createTask(config);
+    return this.perform("run", async () => this.loop!.start());
+  }
+  private createTask(config: ProjectConfig): void {
     const taskId = `task-${randomUUID()}`;
     const store = new BlackboardStore(this.workspace, config, { taskId });
     try { selectTask(this.workspace, taskId); } catch (error) { store.close(); throw error; }
     this.attach(store);
     this.emit({ type: "board", snapshot: store.snapshot() });
-    return this.perform("run", async () => this.loop!.start());
   }
   start(): Promise<void> {
     this.idle();
     this.activeRole = "decide";
     if (!this.loop) {
       if (this.config.goal === CHAT_GOAL) throw new Error("尚无红队任务，请输入 /run 目标。");
-      this.attach(new BlackboardStore(this.workspace, this.config));
+      this.createTask(this.config);
     }
     return this.perform("run", async () => this.loop!.start());
   }

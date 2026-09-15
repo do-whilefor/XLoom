@@ -46,9 +46,8 @@ export interface TaskInfo {
 }
 
 /** Inventory only: never recover runs, acquire a controller lock or rebuild Wiki. */
-export function listTasks(workspace: string): TaskInfo[] {
+export function listTasks(workspace: string, selected: string | null = currentTaskId(workspace) ?? "@legacy"): TaskInfo[] {
   const project = projectDirectory(workspace);
-  const selected = currentTaskId(workspace) ?? "@legacy";
   const root = path.join(project, "tasks");
   if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new Error("Task directory cannot be a symbolic link.");
   const ids = existsSync(root) ? readdirSync(root, { withFileTypes: true })

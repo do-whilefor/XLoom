@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,14 +10,14 @@ import { BlackboardStore } from "./store.js";
 import { LoopController } from "./controller.js";
 import { DemoRunner } from "./demo.js";
 import { renderReport } from "./report.js";
-import { currentTaskId, listTasks, readSavedBoard, taskDirectory, WorkspaceLock } from "./workspace.js";
+import { currentTaskId, listTasks, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
 import { ensureProject, projectConfigPath, projectDirectory, xloomHome } from "./paths.js";
 import { migrateWorkspace } from "./migration.js";
 
 const help = `xloom — local two-agent research loop (Windows MVP)
 
   xloom init --goal "User-supplied goal / authorized target" [--scope "target details"]
-  xloom run [--headless]       Open chat TUI, or resume configured task headlessly
+  xloom run [--headless]       Start fresh chat, or a new configured task headlessly
   xloom status               Read the saved board without running agents
   xloom report               Print a Markdown report with evidence references
   xloom doctor               Check local Node/PowerShell/config/model credentials
@@ -134,10 +135,10 @@ async function main(): Promise<void> {
   const sessionLock = new WorkspaceLock(workspace);
   let store: BlackboardStore;
   try {
-    const taskId = demo ? undefined : currentTaskId(workspace);
-    const saved = taskId || existsSync(path.join(taskDirectory(workspace, taskId), "blackboard.sqlite")) ? readSavedBoard(workspace, taskId) : undefined;
-    if (!saved && config.goal === CHAT_GOAL) throw new Error("No red-team goal yet. Open the TUI and use /run with your goal first.");
-    store = new BlackboardStore(workspace, saved ? { ...saved.config, models: config.models, limits: config.limits, chrome: config.chrome } : config, { taskId });
+    if (config.goal === CHAT_GOAL) throw new Error("No red-team goal yet. Use init --goal to configure a headless task, or open the TUI and use /run with your goal.");
+    const taskId = demo ? undefined : `task-${randomUUID()}`;
+    store = new BlackboardStore(workspace, config, { taskId });
+    try { selectTask(workspace, taskId ?? null); } catch (error) { store.close(); throw error; }
   } catch (error) { sessionLock.close(); throw error; }
   const controller = new LoopController(store, runner);
   try {

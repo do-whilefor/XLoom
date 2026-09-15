@@ -68,6 +68,8 @@ describe("saved task navigation", () => {
     await test.app.close();
     expect(readSavedBoard(test.root)).toEqual(before);
     const reopened = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(reopened);
+    expect(reopened.snapshot()).toMatchObject({ status: "idle", hints: [], facts: [], steps: [] });
+    reopened.openTask(currentTaskId(test.root)!);
     expect(reopened.snapshot()).toEqual(before);
   });
 
@@ -82,7 +84,7 @@ describe("saved task navigation", () => {
     expect(existsSync(workspaceLockPath(test.root))).toBe(false);
   });
 
-  it("lists without mutation and opens a historical task without running a model, retaining the selection on restart", async () => {
+  it("lists and explicitly opens historical tasks without running a model, clearing the in-memory selection on restart", async () => {
     const test = setup();
     await test.app.runGoal("First synthetic research");
     const first = currentTaskId(test.root)!;
@@ -107,7 +109,12 @@ describe("saved task navigation", () => {
     expect(currentTaskId(test.root)).toBe(first);
     await test.app.close();
     const reopened = new AppController(test.root, test.configPath, test.config, { chat: test.chat, settings: test.settings, runner: test.runner }); apps.push(reopened);
-    expect(reopened.snapshot().config.goal).toBe("First synthetic research");
+    expect(reopened.snapshot().config.goal).toBe(CHAT_GOAL);
+    expect(reopened.snapshot().hints).toEqual([]);
+    expect(reopened.storagePaths().task).toBeUndefined();
+    expect(reopened.listTasks().every(task => !task.selected)).toBe(true);
+    reopened.openTask(first);
+    expect(reopened.snapshot().hints[0]?.content).toBe("Retain this finding context");
     expect(readSavedBoard(test.root, second).hints).toEqual([]);
     expect(test.runRequests).toHaveLength(calls);
   });
@@ -237,13 +244,15 @@ describe("chat / red-team application boundary", () => {
     expect(readSavedBoard(test.root)).toEqual(before);
   });
 
-  it("reopens the selected task while starting the UI in chat mode", async () => {
+  it("starts with an empty board and requires an explicit open before continuing a saved task", async () => {
     const test = setup(); await test.app.runGoal("recover fixture goal");
-    const id = currentTaskId(test.root);
+    const id = currentTaskId(test.root)!;
     await test.app.close();
     const reopened = new AppController(test.root, test.configPath, loadConfig(test.configPath), { runner: test.runner, chat: test.chat, settings: test.settings }); apps.push(reopened);
     expect(reopened.getSessionInfo().mode).toBe("chat");
-    expect(reopened.snapshot().config.goal).toBe("recover fixture goal");
+    expect(reopened.snapshot().config.goal).toBe(CHAT_GOAL);
+    expect(() => reopened.start()).toThrow(/\/run/);
+    reopened.openTask(id);
     await reopened.start();
     expect(currentTaskId(test.root)).toBe(id);
     expect(reopened.snapshot().status).toBe("paused");
@@ -263,6 +272,8 @@ describe("chat / red-team application boundary", () => {
     const app = new AppController(test.root, test.configPath, loadConfig(test.configPath), { runner: test.runner, chat: test.chat, settings: test.settings });
     apps.push(app);
     expect(test.runner.run).not.toHaveBeenCalled();
+    expect(app.snapshot()).toMatchObject({ status: "idle", hints: [] });
+    app.openTask("@legacy");
     expect(app.snapshot()).toMatchObject({ status: "paused", goals: before.goals, hints: before.hints, usage: before.usage });
     expect(app.snapshot().config.limits).toMatchObject({ stepTimeoutSeconds: null, maxMinutes: null });
     await app.start();
@@ -278,11 +289,52 @@ describe("chat / red-team application boundary", () => {
     const store = new BlackboardStore(test.root, defaultConfig("legacy fixture goal")); store.hint("legacy hint"); store.close();
     const oldFile = path.join(projectDirectory(test.root), "blackboard.sqlite");
     const app = new AppController(test.root, test.configPath, test.config, { runner: test.runner, chat: test.chat, settings: test.settings }); apps.push(app);
-    expect(app.snapshot().config.goal).toBe("legacy fixture goal");
+    expect(app.snapshot().config.goal).toBe(CHAT_GOAL);
+    expect(app.snapshot().hints).toEqual([]);
     await app.runGoal("new fixture goal");
     expect(existsSync(oldFile)).toBe(true);
     const old = new BlackboardStore(test.root, defaultConfig("legacy fixture goal"));
     expect(old.snapshot().hints[0]?.content).toBe("legacy hint"); old.close();
+  });
+
+  it.each(["not JSON", '{"taskId":"missing-task"}', '{"taskId":"../outside"}'])("starts cleanly even with an unreadable old task and pointer %s", async pointer => {
+    const test = setup();
+    await test.app.runGoal("OLD_TASK_GOAL");
+    const id = currentTaskId(test.root)!;
+    await test.app.close();
+    const file = path.join(taskDirectory(test.root, id), "blackboard.sqlite");
+    writeFileSync(file, "corrupt old database");
+    const pointerFile = path.join(projectDirectory(test.root), "current-task.json");
+    writeFileSync(pointerFile, pointer);
+    const app = new AppController(test.root, test.configPath, test.config, { settings: test.settings, runner: test.runner }); apps.push(app);
+    expect(app.snapshot()).toMatchObject({ status: "idle", goals: [], facts: [], hints: [], evidence: [] });
+    expect(app.chatHistory()).toMatchObject({ messages: [], usage: { input: 0, output: 0, cost: 0 } });
+    expect(app.storagePaths().task).toBeUndefined();
+    expect(app.listTasks()).toContainEqual(expect.objectContaining({ id, selected: false, error: expect.any(String) }));
+    expect(readFileSync(file, "utf8")).toBe("corrupt old database");
+    expect(readFileSync(pointerFile, "utf8")).toBe(pointer);
+  });
+
+  it("starts the configured goal in a different task directory on every application launch", async () => {
+    const test = setup(); await test.app.close();
+    const config = defaultConfig("Configured fresh goal");
+    config.context = "Explicit configured context";
+    const legacy = new BlackboardStore(test.root, config); legacy.hint("LEGACY_PRIVATE_HINT"); legacy.close();
+    const ids: string[] = [];
+    for (let launch = 0; launch < 2; launch++) {
+      const app = new AppController(test.root, test.configPath, config, { settings: test.settings, runner: test.runner }); apps.push(app);
+      expect(app.snapshot().hints).toEqual([]);
+      await app.start();
+      ids.push(currentTaskId(test.root)!);
+      expect(app.snapshot().config.context).toBe(config.context);
+      expect(app.snapshot().hints).toEqual([]);
+      app.hint("PREVIOUS_LAUNCH_HINT");
+      await app.close();
+    }
+    expect(ids[0]).toMatch(/^task-/); expect(ids[1]).not.toBe(ids[0]);
+    expect(JSON.stringify(test.runRequests)).not.toContain("LEGACY_PRIVATE_HINT");
+    expect(JSON.stringify(test.runRequests)).not.toContain("PREVIOUS_LAUNCH_HINT");
+    expect(readSavedBoard(test.root, null).hints[0]?.content).toBe("LEGACY_PRIVATE_HINT");
   });
 
   it("rejects empty goals before switching or creating tasks", () => {
@@ -526,7 +578,10 @@ describe("workspace ownership", () => {
     const test = setup(); await test.app.close();
     writeFileSync(path.join(projectDirectory(test.root), "current-task.json"), JSON.stringify({ taskId: "../../outside" }));
     expect(() => readSavedBoard(test.root)).toThrow(/Invalid task ID/);
-    expect(() => new AppController(test.root, test.configPath, test.config)).toThrow(/Invalid task ID/);
+    const app = new AppController(test.root, test.configPath, test.config); apps.push(app);
+    expect(app.snapshot().hints).toEqual([]);
+    expect(() => app.openTask("../../outside")).toThrow("找不到");
+    await app.close();
     expect(existsSync(workspaceLockPath(test.root))).toBe(false);
   });
 

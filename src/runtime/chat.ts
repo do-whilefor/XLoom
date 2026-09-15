@@ -7,7 +7,7 @@ import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.j
 import { createRuntimeForwarder, executeTools, RuntimeRunError } from "./pi-runner.js";
 import { createRunBudget } from "./run-budget.js";
 import { redactCredentials } from "./redaction.js";
-import { createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint, requireContextCapacity, requireLengthProgress } from "./continuity.js";
+import { createContextSummarizer, isTransientModelFailure, prepareContext, recoverableMessages, saveCheckpoint, requireContextCapacity, requireLengthProgress } from "./continuity.js";
 import { ChatArchive } from "./chat-archive.js";
 import { join } from "node:path";
 import { projectDirectory } from "../paths.js";
@@ -47,14 +47,15 @@ export class ChatSession {
   }
 
   reset(): void {
-    this.archive?.reset();
     this.close();
+    this.archive?.reset();
   }
   close(): void {
     this.active?.abort(new Error("Chat session reset."));
     this.agent?.abort();
     this.agent = undefined;
     this.identity = undefined;
+    this.archive?.release();
     this.knownSecrets = new Set<string>();
     this.totalUsage = { input: 0, output: 0, cost: 0 };
   }
@@ -151,12 +152,7 @@ export class ChatSession {
       const archived = this.archive?.select(identity);
       const checkpointIdentity = { role: "chat" as const, workspace: request.workspace, provider: selected.model.provider, model: selected.model.id,
         api: selected.model.api, baseUrl: selected.model.baseUrl, taskId: archived?.id ?? `chat-${randomUUID()}`, stepId: null };
-      const restored = !this.agent && archived ? await loadCheckpoint(archived.file, checkpointIdentity) : undefined;
-      if (restored) {
-        baseUsage = restored.usage;
-        emit({ type: "notice", mode: "chat", text: "已恢复当前聊天上下文；/history 查看保存内容，/new 开始新聊天。工具不会因恢复而重放。" });
-      }
-      const priorMessages = this.agent?.state.messages ?? restored?.messages ?? [];
+      const priorMessages = this.agent?.state.messages ?? [];
       if (priorMessages.length) requireContextCapacity(selected.model, { messages: [priorMessages[0] as import("@earendil-works/pi-ai").Message] },
         "The retained first message is too large to compact. The archive is unchanged: use /history to inspect it and /new to start a fresh chat, then read the material from a file.");
       const pending = new Set<string>();
@@ -181,7 +177,7 @@ export class ChatSession {
         tools.push(chrome.tool);
       }
       agent = this.agent ?? (this.options.createAgent ?? (options => new Agent(options)))({
-        initialState: { systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, request.model.thinking), messages: restored?.messages ?? [], tools },
+        initialState: { systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, request.model.thinking), messages: [], tools },
         streamFn: mainStream,
         toolExecution: "sequential",
         sessionId: checkpointIdentity.taskId,

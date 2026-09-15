@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CHAT_GOAL, defaultConfig, loadConfig, saveNewConfig } from "../src/config.js";
 import { BlackboardStore } from "../src/store.js";
-import { selectTask } from "../src/workspace.js";
+import { currentTaskId, readSavedBoard, selectTask, taskDirectory } from "../src/workspace.js";
 import { renderReport } from "../src/report.js";
 import type { BoardSnapshot } from "../src/types.js";
 
@@ -56,7 +56,7 @@ function saveWorkspaceConfig(root: string, config: ReturnType<typeof defaultConf
 }
 
 function databaseState(root: string) {
-  const db = new DatabaseSync(path.join(projectDirectory(root), "blackboard.sqlite"), { readOnly: true });
+  const db = new DatabaseSync(path.join(taskDirectory(root, currentTaskId(root)), "blackboard.sqlite"), { readOnly: true });
   try {
     return {
       board: JSON.parse(String(db.prepare("SELECT value FROM board WHERE id=1").get()!.value)) as BoardSnapshot,
@@ -209,11 +209,14 @@ describe("command-line entry points", () => {
   it("does not turn a chat-only configuration into a headless research task", () => {
     const root = workspace();
     saveWorkspaceConfig(root, defaultConfig(CHAT_GOAL));
+    const old = new BlackboardStore(root, defaultConfig("Old saved goal"), { taskId: "task-old" });
+    const before = old.snapshot(); old.close(); selectTask(root, "task-old");
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("No red-team goal yet");
     expect(existsSync(path.join(projectDirectory(root), "blackboard.sqlite"))).toBe(false);
     expect(existsSync(workspaceLockPath(root))).toBe(false);
+    expect(readSavedBoard(root)).toEqual(before);
   });
 
   it("reads the selected independent TUI task rather than creating or using a root task", () => {
@@ -231,16 +234,19 @@ describe("command-line entry points", () => {
     expect(existsSync(path.join(projectDirectory(root), "blackboard.sqlite"))).toBe(false);
   });
 
-  it.each(["../outside", "missing-task"])("releases the headless session lock for an invalid selected task (%s)", taskId => {
+  it.each(["../outside", "missing-task"])("ignores an invalid old task pointer (%s) when starting a fresh headless task", taskId => {
     const root = workspace();
-    saveWorkspaceConfig(root, defaultConfig("Must not become replacement task"));
+    const config = defaultConfig("Fresh configured goal");
+    config.models.decide.apiKeyEnv = missingKeyVariable;
+    saveWorkspaceConfig(root, config);
     ensureProject(root);
     writeFileSync(path.join(projectDirectory(root), "current-task.json"), JSON.stringify({ taskId }));
     const result = cli(["run", "--headless"], root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toMatch(/Invalid task ID|No blackboard yet/);
+    expect(result.combined).toContain(`Missing model credential environment variable: ${missingKeyVariable}`);
     expect(existsSync(workspaceLockPath(root))).toBe(false);
-    expect(existsSync(path.join(projectDirectory(root), "tasks"))).toBe(false);
+    expect(currentTaskId(root)).not.toBe(taskId);
+    expect(databaseState(root).board).toMatchObject({ config: { goal: config.goal }, facts: [], hints: [] });
   });
 
   it("fails without a model request when the named credential variable is missing", () => {
@@ -248,7 +254,8 @@ describe("command-line entry points", () => {
     const config = defaultConfig("Missing-credential fixture");
     config.models.decide.apiKeyEnv = missingKeyVariable;
     config.models.execute.apiKeyEnv = missingKeyVariable;
-    new BlackboardStore(root, { ...config, chrome: { enabled: true } }).close();
+    const old = new BlackboardStore(root, { ...config, goal: "OLD_TASK_GOAL", chrome: { enabled: true } });
+    old.hint("OLD_TASK_HINT"); const before = old.snapshot(); old.close();
     config.chrome = { enabled: false, channel: "beta" };
     saveWorkspaceConfig(root, config);
     const result = cli(["run", "--headless"], root);
@@ -259,6 +266,14 @@ describe("command-line entry points", () => {
     expect(saved.board).toMatchObject({ status: "error", outcome: null, completedSteps: 0, usage: { input: 0, output: 0, cost: 0 } });
     expect(saved.board.facts).toEqual([]);
     expect(saved.board.config.chrome).toEqual(config.chrome);
+    expect(saved.board.config.goal).toBe(config.goal);
+    expect(saved.board.hints).toEqual([]);
+    expect(readSavedBoard(root, null)).toEqual(before);
+    const firstId = currentTaskId(root)!;
+    const repeated = cli(["run", "--headless"], root);
+    expect(repeated.combined).toContain(`Missing model credential environment variable: ${missingKeyVariable}`);
+    expect(currentTaskId(root)).not.toBe(firstId);
+    expect(readSavedBoard(root, firstId)).toEqual(saved.board);
     expect(existsSync(path.join(projectDirectory(root), "controller.lock"))).toBe(false);
   });
 

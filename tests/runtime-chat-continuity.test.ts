@@ -44,7 +44,7 @@ async function request() {
 const isSummary = (context: Context) => context.systemPrompt?.startsWith("Summarize the older conversation as private working memory.") ?? false;
 
 describe("durable private chat", () => {
-  it("compacts a small-context chat including tool overhead when usage is unavailable, across restart", async () => {
+  it("compacts a small-context chat including tool overhead when usage is unavailable within one session", async () => {
     const { input, directory } = await request();
     input.chrome = { enabled: false };
     const zero: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
@@ -66,7 +66,6 @@ describe("durable private chat", () => {
       await session.send({ ...input, text: `CURRENT_TURN_${turn}\n` + "Synthetic inert data. ".repeat(150) });
       file ??= session.history().file;
       expect(session.history().file).toBe(file);
-      if (turn === 10) { session.close(); session = create(); }
     }
     expect(replies).toBe(20); expect(summaries).toBeGreaterThan(0);
     expect(session.history().messages.at(-1)?.text).toBe("Reply 20");
@@ -90,7 +89,7 @@ describe("durable private chat", () => {
     expect(calls).toBe(existing ? 2 : 1);
   });
 
-  it("refuses an old oversized first-message archive without modifying it, and reset restores chat", async () => {
+  it("starts normally with an old oversized archive and leaves its bytes untouched", async () => {
     const { input, directory } = await request();
     let calls = 0;
     const create = () => new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model,
@@ -101,15 +100,14 @@ describe("durable private chat", () => {
     checkpoint.messages[0].content = "f".repeat(715000);
     const poisoned = JSON.stringify(checkpoint); await writeFile(file, poisoned);
     const second = create();
-    await expect(second.send({ ...input, text: "Continue" })).rejects.toThrow("use /history to inspect it and /new");
-    expect(calls).toBe(1);
-    expect(await readFile(file, "utf8")).toBe(poisoned);
-    second.reset(); await second.send({ ...input, text: "New small input" });
+    expect(second.history().messages).toEqual([]);
+    await second.send({ ...input, text: "New small input" });
     expect(calls).toBe(2);
+    expect(await readFile(file, "utf8")).toBe(poisoned);
     expect(second.history().file).not.toBe(file);
     expect(await readFile(file, "utf8")).toBe(poisoned);
   });
-  it("restores completed tool results after restart without replay, strips private thinking and credentials, and retains cumulative usage", async () => {
+  it("archives sanitized tool results but starts a new session with empty context and zero usage", async () => {
     const { input, directory } = await request();
     const storageDirectory = join(directory, "chats");
     let calls = 0;
@@ -125,21 +123,26 @@ describe("durable private chat", () => {
     const previousUsage = first.getUsage();
     first.close();
     const second = new ChatSession({ storageDirectory, resolveModel: async () => ({ model: { ...model, contextWindow: 100000 }, streamFn: stream(context => {
-      expect(context.messages.some(message => message.role === "toolResult" && message.toolCallId === "saved-write")).toBe(true);
-      expect(JSON.stringify(context.messages)).toContain(input.text);
-      return assistant([{ type: "text", text: "Continued from the saved observation" }]);
+      expect(context.messages).toHaveLength(1);
+      expect(JSON.stringify(context.messages)).not.toContain(input.text);
+      expect(JSON.stringify(context.messages)).not.toContain("saved-write");
+      return assistant([{ type: "text", text: "New session reply" }]);
     }) }) });
-    await second.send({ ...input, text: "Continue the discussion" });
-    expect(second.history().file).toBe(file);
-    expect(second.getUsage().input).toBe(previousUsage.input + 3);
+    expect(second.history()).toMatchObject({ messages: [], pendingToolCalls: [], usage: { input: 0, output: 0, cost: 0 } });
+    expect(second.getUsage()).toEqual({ input: 0, output: 0, cost: 0 });
+    await second.send({ ...input, text: "New discussion" });
+    expect(second.history().file).not.toBe(file);
+    expect(second.getUsage().input).toBe(3);
     expect(previousUsage.cacheRead).toBe(2);
-    expect(second.getUsage()).toMatchObject({ cacheRead: 3, cacheInput: 9 });
+    expect(second.getUsage()).toMatchObject({ cacheRead: 1, cacheInput: 3 });
     expect(second.history().usage).toEqual(second.getUsage());
     expect(await readFile(join(directory, "saved.txt"), "utf8")).toBe("observed local result");
     expect(calls).toBe(2);
+    expect(await readFile(file, "utf8")).toBe(text);
+    second.close();
   });
 
-  it.each(["reset", "endpoint"])("starts a separate chat after %s and retains the old archive", async change => {
+  it.each(["reset", "endpoint", "close"])("starts a separate chat after %s within the same instance and retains the old archive", async change => {
     const { input, directory } = await request(); const storageDirectory = join(directory, "chats");
     let endpoint = model.baseUrl;
     let calls = 0;
@@ -148,14 +151,13 @@ describe("durable private chat", () => {
       return assistant([{ type: "text", text: "Fixture response" }]);
     }) }) });
     const first = create(); await first.send({ ...input, text: "OLD_PRIVATE_CHAT" }); const old = first.history().file!;
-    if (change === "reset") first.reset(); else endpoint = "https://different.invalid/v1";
-    first.close();
-    const second = create(); await second.send({ ...input, text: "New conversation" });
-    expect(second.history().file).not.toBe(old);
+    if (change === "reset") first.reset(); else if (change === "close") first.close(); else endpoint = "https://different.invalid/v1";
+    await first.send({ ...input, text: "New conversation" });
+    expect(first.history().file).not.toBe(old);
     expect(await readFile(old, "utf8")).toContain("OLD_PRIVATE_CHAT");
   });
 
-  it.each(["pending", "corrupt", "identity"])("refuses %s recovery before a model request and preserves the file", async problem => {
+  it.each(["pending", "corrupt", "identity", "pointer"])("ignores an old %s checkpoint or pointer and preserves the archive", async problem => {
     const { input, directory } = await request(); const storageDirectory = join(directory, "chats"); let calls = 0;
     const create = () => new ChatSession({ storageDirectory, resolveModel: async () => ({ model, streamFn: stream(() => { calls++; return assistant([{ type: "text", text: "Fixture" }]); }) }) });
     const first = create(); await first.send(input); const file = first.history().file!; first.close();
@@ -163,8 +165,40 @@ describe("durable private chat", () => {
     if (problem === "pending") data.pendingToolCalls = ["uncertain-side-effect"];
     if (problem === "identity") data.identity.workspace = join(directory, "different-workspace");
     const poisoned = problem === "corrupt" ? "not JSON" : JSON.stringify(data); await writeFile(file, poisoned);
-    await expect(create().send({ ...input, text: "Continue" })).rejects.toThrow(/Checkpoint|checkpoint/);
-    expect(calls).toBe(1); expect(await readFile(file, "utf8")).toBe(poisoned);
+    if (problem === "pointer") await writeFile(join(storageDirectory, "current.json"), "not JSON");
+    const next = create();
+    expect(next.history().messages).toEqual([]);
+    await next.send({ ...input, text: "New session" });
+    expect(next.history().file).not.toBe(file);
+    expect(next.history().pendingToolCalls).toEqual([]);
+    expect(calls).toBe(2); expect(await readFile(file, "utf8")).toBe(poisoned);
+  });
+
+  it("keeps each live instance bound to its own archive when the shared disk pointer changes", async () => {
+    const { input, directory } = await request();
+    const contexts: Context[] = [], ids: (string | undefined)[] = [];
+    const create = () => new ChatSession({ storageDirectory: join(directory, "chats"), createAgent: options => {
+      ids.push(options.sessionId); return new Agent(options);
+    }, resolveModel: async () => ({ model, streamFn: stream(context => {
+      contexts.push(JSON.parse(JSON.stringify(context)) as Context); return assistant([{ type: "text", text: "Session reply" }]);
+    }) }) });
+    const first = create(), second = create();
+    await first.send({ ...input, text: "FIRST_SESSION_ONLY" });
+    const firstFile = first.history().file;
+    expect(second.history().messages).toEqual([]);
+    await second.send({ ...input, text: "SECOND_SESSION_ONLY" });
+    const secondFile = second.history().file!;
+    const secondBytes = await readFile(secondFile, "utf8");
+    expect(secondFile).not.toBe(firstFile);
+    expect(ids[0]).toBeTruthy(); expect(ids[1]).not.toBe(ids[0]);
+    expect(first.history().file).toBe(firstFile);
+    await first.send({ ...input, text: "Continue first session" });
+    expect(JSON.stringify(contexts[1].messages)).not.toContain("FIRST_SESSION_ONLY");
+    expect(JSON.stringify(contexts[2].messages)).toContain("FIRST_SESSION_ONLY");
+    expect(JSON.stringify(contexts[2].messages)).not.toContain("SECOND_SESSION_ONLY");
+    expect(first.history().file).toBe(firstFile);
+    expect(await readFile(secondFile, "utf8")).toBe(secondBytes);
+    first.close(); second.close();
   });
 
   it("durably records the entire pending tool batch before execution", async () => {
@@ -199,7 +233,7 @@ describe("durable private chat", () => {
 });
 
 describe("chat context maintenance integration", () => {
-  it("preserves original user corrections through compaction and restart even if the model summary omits them", async () => {
+  it("preserves corrections during compaction within a session and excludes both corrections and summaries after restart", async () => {
     const { input, directory } = await request();
     const correction = "Later user correction: bob / v3 / NOT_ATTEMPTED; previous alice / v1 withdrawn.";
     let summaries = 0; const seen: Context[] = [];
@@ -217,7 +251,9 @@ describe("chat context maintenance integration", () => {
     expect(containsCorrection(seen.at(-1)!)).toBe(true);
     first.close();
     const second = create(); await second.send({ ...input, text: "Recall the current condition" });
-    expect(containsCorrection(seen.at(-1)!)).toBe(true);
+    expect(containsCorrection(seen.at(-1)!)).toBe(false);
+    expect(seen.at(-1)!.messages).toHaveLength(1);
+    expect(JSON.stringify(seen.at(-1)!.messages)).not.toContain(CONTEXT_SUMMARY_MARKER);
     second.close();
   });
   it.each([1, 2])("reserves the last request after compacting retained chat with a cap of %s", async cap => {
