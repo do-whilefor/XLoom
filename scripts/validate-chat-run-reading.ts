@@ -15,6 +15,7 @@ import type { AgentRunner, LoopEvent, ModelConfig, RuntimeEvent } from "../src/t
 import { wikiStructureFixture } from "../tests/fixtures/wiki-structure.js";
 import { wikiIssues } from "../src/wiki/model.js";
 import { analyzeToolOutcomes } from "./lib/tool-outcomes.js";
+import { analyzeReadingOutcomes } from "./lib/reading-outcomes.js";
 
 const { values } = parseArgs({ options: { live: { type: "boolean" }, output: { type: "string" } }, strict: true });
 if (!values.live) throw new Error("Pass --live to call configured models.");
@@ -157,7 +158,7 @@ try {
   await app.close();
   const nativeConfig = structuredClone(config);
   nativeConfig.goal = "核对本地合成报表观察的原件与更正；未验证下载成功";
-  nativeConfig.context = "仅核对与整理当前合成研究材料。Decide 和 Execute 各自先用原生 Wiki 搜索 BridgeAlias，取得完整来源包后沿 evidence.originalReadPath 精读全部原件与更正。Decide 安排一个 Execute 做同样的原件核对和 WK-flow 的元数据维护（仅 aliases 增加 InspectedBridge，省略 blocks）。不添加新 Fact/Evidence/Finding，核对日志不是新观察。不执行任何下载，不复核旧解释，不结束根目标。Execute 后 Decide 基于现有资料说明剩余缺口并不再安排动作。已有完整来源包不必再打开 index/page/record。用现有 read；不访问外部目标。";
+  nativeConfig.context = "本段专测原生检索接口，仅核对当前合成研究材料。Decide 和 Execute 各自先调用 read，path=xloom://search?mode=wiki&query=BridgeAlias&budgetChars=64000；取得 complete=true 的完整来源包后沿 evidence.originalReadPath 精读全部原件与更正。文件路径直读虽能读取内容，但不满足本段原生接口测试；本段不要打开 Wiki index/pages/record，所需记录由来源包提供。Decide 安排一个 Execute 做同样的原生搜索、原件核对和 WK-flow 元数据维护，并在 Step 中写明上述入口和读取约束（仅 aliases 增加 InspectedBridge，省略 blocks）。不添加新 Fact/Evidence/Finding，核对日志不是新观察。不执行任何下载，不复核旧解释，不结束根目标。Execute 后 Decide 基于现有资料说明剩余缺口并不再安排动作。用现有 read；不访问外部目标。";
   const fixture = wikiStructureFixture(workspace, nativeConfig); fixture.correct(); fixture.store.setStatus("paused", "Synthetic native review replay"); fixture.store.close(); selectTask(workspace, null);
   app = open();
   await phase("run-original-reading", async (entry, start) => {
@@ -167,20 +168,12 @@ try {
     const seen = runtime(start), outputs = parsedOutputs(seen), board = app!.snapshot();
     const originals = outputs.filter(result => result.type === "original_read" && result.integrity === "verified");
     const readCalls = toolStarts(seen).filter(event => event.toolName === "read").map(event => ({ mode: event.mode, path: JSON.parse(event.text).path as string }));
-    const readsByRole = ["decide", "execute"].map(mode => {
-      const delivered = originals.filter(result => seen.some(event => event.mode === mode && event.toolCallId === result.toolCallId));
-      return before.evidence.every(evidence => {
-        let end = 0;
-        const ranges = delivered.filter(result => result.locator.evidenceId === evidence.id && result.locator.sha256 === evidence.sha256)
-          .map(result => result.locator).sort((a, b) => a.byteOffset - b.byteOffset);
-        for (const range of ranges) { if (range.byteOffset > end) break; end = Math.max(end, range.byteOffset + range.byteLength); }
-        return end === evidence.bytes;
-      });
-    });
+    const reading = analyzeReadingOutcomes(seen, before.evidence, app!.storagePaths().task!, workspace);
+    entry.reading = reading;
     const page = board.wikiPages!.find(page => page.id === "WK-flow")!, oldPage = before.wikiPages!.find(page => page.id === "WK-flow")!;
     entry.readCalls = readCalls; entry.board = board; entry.originalRanges = originals.map(result => ({
       mode: seen.find(event => event.toolCallId === result.toolCallId)?.mode, locator: result.locator, reading: result.reading }));
-    entry.checks = { originalReadingByBothRoles: readsByRole.every(Boolean),
+    entry.checks = { nativeSearchByBothRoles: reading.nativeSearchByBothRoles, originalReadingByBothRoles: reading.nativeReadingByBothRoles,
       correctionRead: originals.some(result => result.text.includes("v1 observation withdrawn")),
       metadataCommitted: !!board.wikiPages?.find(page => page.id === "WK-flow")?.aliases?.includes("InspectedBridge"),
       noNewObservations: JSON.stringify([board.evidence, board.facts, board.findings]) === JSON.stringify([before.evidence, before.facts, before.findings]),
