@@ -1,7 +1,60 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { submissionTool } from "../src/runtime/submission.js";
 
 describe("private proposal repair", () => {
+  it("accepts removal through Pi's tool argument validator and rejects ambiguous operations", () => {
+    const { tool } = submissionTool("decide", value => value);
+    const validate = (repair: unknown[]) => validateToolArguments(tool, { type: "toolCall", id: "repair", name: "submit", arguments: { repair } });
+    const repairs = [{ path: "/conclusion", remove: true }, { path: "/steps/0/from", value: [] }, { path: "/nullable", value: null }];
+    expect(validate(repairs)).toEqual({ repair: repairs });
+    for (const repair of [{ path: "/conclusion" }, { path: "/conclusion", remove: true, value: null }, { path: "/conclusion", remove: false }]) {
+      expect(() => validate([repair])).toThrow();
+    }
+  });
+
+  it("removes invalid optional fields and fills required fields without resubmitting the proposal", async () => {
+    const schema = z.object({ summary: z.string(), steps: z.array(z.object({ from: z.array(z.string()) })),
+      conclusion: z.object({ reason: z.string() }).optional() });
+    const proposed = { summary: "Keep this summary", steps: [{}], conclusion: null };
+    const validate = vi.fn((value: unknown) => schema.parse(value));
+    const submit = submissionTool("decide", validate);
+    await expect(submit.tool.execute("bad", { output: proposed })).rejects.toThrow("remove:true");
+    await submit.tool.execute("repair", { repair: [{ path: "/steps/0/from", value: [] }, { path: "/conclusion", remove: true }] });
+    expect(submit.accepted).toBe(true);
+    expect(submit.output).toEqual({ summary: proposed.summary, steps: [{ from: [] }] });
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(proposed).toEqual({ summary: "Keep this summary", steps: [{}], conclusion: null });
+  });
+
+  it("splices removed array entries and uses the resulting indices for later repairs", async () => {
+    const schema = z.object({ summary: z.string(), reviews: z.array(z.object({ reason: z.string() })) });
+    const proposed = { summary: "fixture", reviews: [null, { reason: "retained" }] };
+    const submit = submissionTool("metacog", value => schema.parse(value));
+    await expect(submit.tool.execute("bad", { output: proposed })).rejects.toThrow();
+    await submit.tool.execute("repair", { repair: [{ path: "/reviews/0", remove: true }, { path: "/reviews/0/reason", value: "corrected" }] });
+    expect(submit.output).toEqual({ summary: "fixture", reviews: [{ reason: "corrected" }] });
+    expect(proposed.reviews).toEqual([null, { reason: "retained" }]);
+  });
+
+  it("rejects invalid removal batches atomically and still validates required fields after removal", async () => {
+    const validate = vi.fn((value: unknown) => z.object({ summary: z.string() }).strict().parse(value));
+    const submit = submissionTool("decide", validate);
+    await expect(submit.tool.execute("bad", { output: { summary: "retained", extra: null } })).rejects.toThrow();
+    for (const repair of [
+      [{ path: "/extra", remove: true, value: null }], [{ path: "/extra", remove: false }],
+      [{ path: "/extra", remove: true }, { path: "/missing", remove: true }],
+      [{ path: "/extra", remove: true }, { path: "/__proto__", remove: true }],
+    ]) await expect(submit.tool.execute("invalid", { repair })).rejects.toThrow();
+    expect(validate).toHaveBeenCalledTimes(1);
+    await expect(submit.tool.execute("required", { repair: [{ path: "/summary", remove: true }] })).rejects.toThrow();
+    expect(validate.mock.calls.at(-1)).toEqual([{ extra: null }]);
+    expect(submit.accepted).toBe(false); expect(submit.output).toBeUndefined();
+    await submit.tool.execute("fixed", { repair: [{ path: "/summary", value: "restored" }, { path: "/extra", remove: true }] });
+    expect(submit.output).toEqual({ summary: "restored" });
+  });
+
   it("repairs one rejected reference while preserving the whole proposal and revalidating it", async () => {
     const proposed = { summary: "fixture", reviews: [{ findingId: "V1", pocEvidenceId: "wrong", reason: "original evidence judgment" }],
       updateGoals: [{ id: "G0", factIds: ["F1"] }] };

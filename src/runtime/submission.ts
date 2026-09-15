@@ -2,8 +2,8 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { z } from "zod";
 import type { Mode } from "../types.js";
 
-const repairsSchema = z.array(z.object({ path: z.string().startsWith("/"), value: z.unknown() }).strict()
-  .refine(value => Object.hasOwn(value, "value"), "Repair value is required")).min(1).max(32);
+const repairsSchema = z.array(z.object({ path: z.string().startsWith("/"), value: z.unknown(), remove: z.literal(true).optional() }).strict()
+  .refine(value => Object.hasOwn(value, "value") !== (value.remove === true), "Repair value is required unless remove:true; choose value or remove")).min(1).max(32);
 function repairProposal(previous: Record<string, unknown>, repairs: z.infer<typeof repairsSchema>): Record<string, unknown> {
   const draft = structuredClone(previous);
   for (const repair of repairs) {
@@ -15,7 +15,14 @@ function repairProposal(previous: Record<string, unknown>, repairs: z.infer<type
     for (const [index, key] of keys.entries()) {
       const final = index === keys.length - 1;
       if (Array.isArray(parent) && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= parent.length)) throw new Error("Repair array index must already exist.");
-      if (final) { (parent as Record<string, unknown>)[key] = structuredClone(repair.value); break; }
+      if (final) {
+        if (repair.remove) {
+          if (!Object.hasOwn(parent, key)) throw new Error("Repair removal target must already exist.");
+          if (Array.isArray(parent)) parent.splice(Number(key), 1);
+          else delete parent[key];
+        } else (parent as Record<string, unknown>)[key] = structuredClone(repair.value);
+        break;
+      }
       if (!Object.hasOwn(parent, key)) throw new Error("Repair parent must already exist; set the missing object in one repair or resubmit output.");
       const child: unknown = (parent as Record<string, unknown>)[key];
       if (!child || typeof child !== "object") throw new Error("Repair parent must be an object or array.");
@@ -33,13 +40,13 @@ export function submissionTool(mode: Mode, validate: (output: unknown) => unknow
   let rejected: Record<string, unknown> | undefined;
   const tool: AgentTool = {
     name: "submit", label: "Submit result", executionMode: "sequential",
-    description: "Submit output using the task contract after tools/evidence finish. Validation errors commit nothing and retain the rejected proposal privately in this run. Fix only erroneous fields with repair:[{path:'/reviews/0/pocEvidenceId',value:'exact attached ID'}], or resubmit output; choose one. Repairs set object fields or existing array entries using JSON Pointer and revalidate the whole proposal. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.",
+    description: "Submit output using the task contract after tools/evidence finish. Validation errors commit nothing and retain the rejected proposal privately in this run. Fix only erroneous fields with repair:[{path:'/reviews/0/pocEvidenceId',value:'exact attached ID'}], or resubmit output; choose one. Repairs use JSON Pointer: value sets object fields or existing array entries; remove:true deletes an existing field or array entry (later indices shift). Choose value or remove per repair. The whole proposal is revalidated. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.",
     // Keep the common envelope small. Full evolving contracts and reference
     // validation remain in the shared validator instead of duplicating schemas.
     parameters: { type: "object", properties: { output: { type: "object", properties: {
       summary: { type: "string" }, ...(mode === "execute" ? { result: { type: "string", enum: ["done", "no_progress", "blocked"] } } : {}),
     }, required: ["summary", ...(mode === "execute" ? ["result"] : [])], additionalProperties: true },
-    repair: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { path: { type: "string" }, value: {} }, required: ["path", "value"], additionalProperties: false } },
+    repair: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { path: { type: "string" }, value: {}, remove: { type: "boolean", const: true } }, required: ["path"], oneOf: [{ required: ["value"] }, { required: ["remove"] }], additionalProperties: false } },
     }, additionalProperties: false } as AgentTool["parameters"],
     async execute(_id, args, signal) {
       signal?.throwIfAborted();
@@ -53,7 +60,7 @@ export function submissionTool(mode: Mode, validate: (output: unknown) => unknow
       try { validated = validate(draft); }
       catch (error) {
         rejected = saved;
-        throw new Error(`${error instanceof Error ? error.message : String(error)} Rejected proposal retained in this run. Use submit(repair:[{path:"/field/0/name",value:correctValue}]) to fix only the listed fields, or resubmit output. No fields were changed automatically.`, { cause: error });
+        throw new Error(`${error instanceof Error ? error.message : String(error)} Rejected proposal retained in this run. Use submit(repair:[{path:"/field/0/name",value:correctValue}]) to fix only the listed fields; {path:"/optionalField",remove:true} deletes an invalid optional field. Or resubmit output. No fields were changed automatically.`, { cause: error });
       }
       signal?.throwIfAborted();
       output = validated;

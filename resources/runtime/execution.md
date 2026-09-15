@@ -1,5 +1,18 @@
 # Efficient HTTP work in Execute
 
+## Repairing a rejected submission
+
+All research roles can repair the last rejected `submit` proposal in the current
+run without rewriting it. Use `repair:[{"path":"/steps/0/from","value":[]}]`
+to set a field, or `repair:[{"path":"/conclusion","remove":true}]` to omit an
+invalid optional field. Choose `value` or `remove:true` for each JSON Pointer.
+Removal requires an existing target; removing an array entry shifts later indices.
+Repairs run in order on a copy. An invalid path applies none of the batch. A valid
+batch is fully revalidated and, if rejected, becomes the next repair candidate.
+Removing a required field still fails validation. Nothing commits until acceptance.
+
+## PowerShell process
+
 The `powershell` tool parses the supplied command before executing it in the same
 PowerShell process. Invalid source has no command side effects. Valid source runs
 once, with its original command-mode exit status, environment and working directory;
