@@ -223,7 +223,7 @@ describe("compact built-in prompts", () => {
   it.each(["decide", "metacog"] as const)("retains evidence and Goal completion safeguards for %s", mode => {
     const { userPrompt } = buildRunPrompt(promptFixture(mode));
     for (const rule of [
-      "Copy committed IDs exactly", "Plans add no requirements", "Abandon redundant Steps/children; satisfy proven Goals with factIds",
+      "Copy committed IDs exactly", "Resolve pending Steps and active children before satisfying a Goal with supporting factIds",
       "Never abandon the root Goal", "Only fresh metacog may conclude or satisfy root",
       "pair non-NEED_INPUT conclusion with root satisfied", "omit conclusion while work remains",
       "Findings, counts and budget expiry are not completion",
