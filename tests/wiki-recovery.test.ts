@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { wikiStructureFixture } from "./fixtures/wiki-structure.js";
 import { assertWikiProjectionReady, clearWikiPageCaches, renderWiki, writeWiki } from "../src/wiki/projection.js";
 import { wikiFilename, wikiMarker } from "../src/wiki/format.js";
@@ -15,6 +17,8 @@ function fixture() {
   const result = wikiStructureFixture(root); fixtures.push(result); return result;
 }
 afterEach(() => {
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
   for (const item of fixtures.splice(0)) item.store.close();
   clearWikiPageCaches();
   for (const root of roots.splice(0)) {
@@ -79,6 +83,24 @@ describe("incremental Wiki projection and recovery", () => {
     const result = writeWiki(board, store.dataDir, store.workspace);
     expect(result.removedFiles).toBe(1); expect(existsSync(path)).toBe(false);
     expect(readFileSync(retained, "utf8")).toContain("USER ANNOTATION");
+    expect(() => assertWikiProjectionReady(board, store.dataDir)).not.toThrow();
+  });
+  it("retains the previous manifest until obsolete-page cleanup succeeds", () => {
+    const { store } = fixture(), board = store.snapshot();
+    const path = join(store.dataDir, "wiki/pages", wikiFilename("note", "WK-flow"));
+    const manifest = join(store.dataDir, "wiki/manifest.json"), before = readFileSync(manifest, "utf8");
+    board.wikiPages = board.wikiPages!.filter(page => page.id !== "WK-flow");
+    const original = fs.unlinkSync;
+    const fault = vi.spyOn(fs, "unlinkSync").mockImplementation(file => {
+      if (String(file) === path) throw new Error("Synthetic interrupted cleanup");
+      original(file);
+    });
+    syncBuiltinESMExports();
+    expect(() => writeWiki(board, store.dataDir, store.workspace)).toThrow("interrupted cleanup");
+    expect(readFileSync(manifest, "utf8")).toBe(before);
+    fault.mockRestore(); syncBuiltinESMExports(); clearWikiPageCaches();
+    expect(writeWiki(board, store.dataDir, store.workspace).removedFiles).toBe(1);
+    expect(existsSync(path)).toBe(false);
     expect(() => assertWikiProjectionReady(board, store.dataDir)).not.toThrow();
   });
 });

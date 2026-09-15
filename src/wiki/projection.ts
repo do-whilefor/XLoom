@@ -175,7 +175,7 @@ function writeWikiInScope(board: BoardSnapshot, dataDir: string, workspace: stri
     const manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
     if (manifest.generator === wikiGenerator && Array.isArray(manifest.files)) previous = manifest.files;
   } catch { /* missing/damaged old manifest cannot authorize cleanup */ }
-  for (const [path, body] of files) if (path !== state) publish(path, body);
+  for (const [path, body] of files) if (path !== state && path !== "manifest.json") publish(path, body);
   for (const old of previous) {
     if (typeof old?.path !== "string" || !/^pages\/(?:goal|step|fact|finding|evidence|attempt|capability|chain|note)-[a-f0-9]{64}\.md$/.test(old.path) || files.has(old.path)) continue;
     const file = join(directory, old.path);
@@ -185,6 +185,9 @@ function writeWikiInScope(board: BoardSnapshot, dataDir: string, workspace: stri
     const body = readFileSync(file, "utf8");
     if (body.startsWith(wikiMarker) && digest(body) === old.sha256) { unlinkSync(file); stats.removedFiles++; }
   }
+  // Keep the previous manifest until obsolete-page cleanup succeeds, so an
+  // interrupted cleanup can still be retried after restart.
+  publish("manifest.json", files.get("manifest.json")!);
   publish(state, files.get(state)!);
   return stats;
 }
