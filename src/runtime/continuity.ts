@@ -46,6 +46,10 @@ Keep the summary concise enough to leave room for continued investigation. Prese
 export interface ContextSummary { text: string; usage?: ModelUsage }
 export type ContextSummarizer = (messages: AgentMessage[], model: Model<Api>, signal?: AbortSignal) => Promise<ContextSummary>;
 
+// Some compatible endpoints leak their native tool syntax as ordinary text,
+// even with tools disabled and stopReason=stop. It is not a memory summary.
+const summaryToolMarkup = (text: string) => /(?:^|\n)\s*(?:```[^\n]*\n\s*)?<(?:[|｜]*DSML[|｜]*\s*(?:function_calls|calls|invoke)\b|tool_call\b|function_calls\b)/i.test(text);
+
 /** Uses Pi's public transcript serializer and the caller's request-time auth.
  * onUsage is called even for a failed/aborted summary response. No output cap is added.
  */
@@ -60,6 +64,7 @@ export function createContextSummarizer(streamFn: StreamFn, onUsage: (usage: Mod
     };
     let response: AssistantMessage;
     let consumed: ModelUsage | undefined;
+    let invalidMarkup = false;
     for (let attempt = 0; ; attempt++) {
       response = await (await streamFn(model, context, { signal, sessionId, cacheRetention: "none" })).result();
       onUsage(response.usage);
@@ -69,11 +74,16 @@ export function createContextSummarizer(streamFn: StreamFn, onUsage: (usage: Mod
         for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) consumed.cost[key] += response.usage.cost[key];
       }
       signal?.throwIfAborted();
+      invalidMarkup = summaryToolMarkup(response.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n"));
       // Retry only a classified temporary failure, once, using the same inert
       // transcript. The caller's shared budget must still reserve its last reply.
-      if (attempt === 0 && isTransientModelFailure(response) && canRetry()) continue;
+      if (attempt === 0 && (isTransientModelFailure(response) || response.stopReason === "stop" && invalidMarkup) && canRetry()) {
+        if (invalidMarkup) context.systemPrompt = `${summaryInstructions}\nReturn only plain-text working memory. Do not output tool calls, DSML/XML invocation markup, or continue the transcript.`;
+        continue;
+      }
       break;
     }
+    if (invalidMarkup) throw new Error("Context summary contained tool-call markup instead of working memory; original context was not replaced.");
     if (response.stopReason !== "stop" || response.content.some(part => part.type === "toolCall")) {
       throw new Error(`Context summary did not finish safely (${response.stopReason}).${response.errorMessage ? ` ${response.errorMessage}` : ""}`);
     }

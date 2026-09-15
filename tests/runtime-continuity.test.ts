@@ -213,6 +213,33 @@ describe("summary provider calls", () => {
     expect(counted).toHaveBeenCalledExactlyOnceWith(usage);
   });
 
+  it("repairs leaked tool-call text before allowing it to replace older context", async () => {
+    let calls = 0; const counted = vi.fn();
+    const markup = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"read\">batch-25.txt</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>";
+    const summarize = createContextSummarizer((model, context, options) => {
+      if (++calls === 2) expect(context.systemPrompt).toContain("Do not output tool calls");
+      return stream(assistant([{ type: "text", text: calls === 1 ? markup : "Latest conditions: bob / v3 / NOT_ATTEMPTED. Earlier alice / v1 withdrawn." }]))(model, context, options);
+    }, counted);
+    const result = await summarize(history(), model);
+    expect(result.text).toContain("bob / v3 / NOT_ATTEMPTED");
+    expect(result.text).not.toContain("DSML"); expect(counted).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["<｜｜DSML｜｜ calls>", "<tool_call>", "<function_calls>"])("retains original messages if summary repair still emits %s", async markup => {
+    const counted = vi.fn(), messages = history(), before = structuredClone(messages);
+    const summarize = createContextSummarizer(stream(assistant([{ type: "text", text: markup + "read another file" }])), counted);
+    await expect(prepareContext(messages, model, undefined, summarize)).rejects.toThrow("original context was not replaced");
+    expect(messages).toEqual(before);
+    expect(counted).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not spend a reserved final request repairing summary markup", async () => {
+    const counted = vi.fn();
+    const summarize = createContextSummarizer(stream(assistant([{ type: "text", text: "<｜｜DSML｜｜ calls>" }])), counted, undefined, () => false);
+    await expect(summarize(history(), model)).rejects.toThrow("tool-call markup");
+    expect(counted).toHaveBeenCalledTimes(1);
+  });
+
   it("retries a temporary summary failure once using the same transcript and counts both attempts", async () => {
     let calls = 0; const contexts: unknown[] = [], counted = vi.fn();
     const transient = { ...assistant([], "error"), errorMessage: "503 temporarily unavailable" };
