@@ -38,6 +38,17 @@ describe("live integration recovery checks", () => {
     expect(analyzeToolOutcomes([handoff("one"), failure(), committed("one")]).unrecoveredErrors).toBe(0);
   });
 
+  it("recognizes repaired Pi argument validation while preserving first-pass failure", () => {
+    const error = failure("submit", 'Validation failed for tool "submit":\n  - output: must be object\n\nReceived arguments:\n{"output":"JSON string"}');
+    expect(analyzeToolOutcomes([handoff("one"), error, committed("one")]))
+      .toMatchObject({ firstPass: false, recoveredErrors: 1, unrecoveredErrors: 0 });
+    for (const events of [[handoff("one"), error, accepted], [handoff("one"), error, committed("two")],
+      [handoff("one"), error, handoff("two"), committed("two")]]) {
+      expect(analyzeToolOutcomes(events).unrecoveredErrors).toBe(1);
+    }
+    expect(analyzeToolOutcomes([handoff("one"), failure("submit", 'Validation failed for tool "read": input error'), committed("one")]).unrecoveredErrors).toBe(1);
+  });
+
   it("requires a controller commit, not just the tool's acceptance", () => {
     expect(analyzeToolOutcomes([handoff("one"), failure(), accepted]).unrecoveredErrors).toBe(1);
   });

@@ -1,6 +1,6 @@
 import type { LoopEvent, RuntimeEvent } from "../../src/types.js";
 
-/** Keep first-pass errors visible. Only a retained submit proposal followed by
+/** Keep first-pass errors visible. A submit validation rejection followed by
  * a successful controller commit in the SAME run proves protocol recovery. */
 export function analyzeToolOutcomes(events: readonly LoopEvent[]) {
   let run: { id: string; mode: RuntimeEvent["mode"] } | undefined;
@@ -17,7 +17,8 @@ export function analyzeToolOutcomes(events: readonly LoopEvent[]) {
     const committed = event.result;
     if (run && committed && !committed.kind && committed.mode === run.mode && (!committed.runId || committed.runId === run.id)) {
       for (const error of errors) if (error.runId === run.id && error.mode === run.mode && error.toolName === "submit"
-        && error.message.includes("Rejected proposal retained in this run.")) error.recovered = true;
+        && (error.message.includes("Rejected proposal retained in this run.")
+          || error.message.startsWith('Validation failed for tool "submit":\n'))) error.recovered = true;
       run = undefined;
     }
   }
