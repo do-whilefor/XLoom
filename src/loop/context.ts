@@ -29,6 +29,7 @@ export interface BlackboardContext {
   project: Pick<BoardSnapshot["config"], "title" | "goal" | "scope" | "context">;
   status: BoardSnapshot["status"];
   reason: string;
+  planningMemory?: Omit<NonNullable<BoardSnapshot["planningMemory"]>, "runId"> & { evidenceStatus: "unverified"; notice: string };
   outcome: BoardSnapshot["outcome"];
   completedSteps: number;
   noProgressCount: number;
@@ -339,6 +340,13 @@ export function projectContext(request: RunRequest): BlackboardContext {
     revision: board.revision,
     project: { title: board.config.title, goal: board.config.goal, scope: board.config.scope, context: board.config.context },
     status: board.status, reason: board.reason, outcome: board.outcome,
+    ...(board.planningMemory ? { planningMemory: {
+      mode: board.planningMemory.mode, revision: board.planningMemory.revision,
+      summary: board.planningMemory.summary.slice(0, 4000),
+      truncated: board.planningMemory.truncated || board.planningMemory.summary.length > 4000,
+      evidenceStatus: "unverified" as const,
+      notice: "Latest committed planning summary; may be stale or incomplete. Recheck source conditions before relying on it or repeating work. This is working memory, not verified evidence or Goal completion.",
+    } } : {}),
     completedSteps: board.completedSteps, noProgressCount: board.noProgressCount,
     goals: board.goals.filter(goal => selected.goals.has(goal.id)).map(projectGoal),
     facts: board.facts.filter(fact => selected.facts.has(fact.id)).map(projectFact),

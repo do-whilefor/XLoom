@@ -85,6 +85,9 @@ export interface BoardSnapshot {
   wikiPages?: WikiPage[];
   capabilities?: Capability[];
   chains?: Chain[];
+  /** Latest committed planning summary, independent of operational status.
+   * Bounded private working memory; never evidence or a completion signal. */
+  planningMemory?: { runId: string; mode: "decide" | "metacog"; revision: number; summary: string; truncated: boolean };
 }
 export interface StepProposal { goalId: string; from: string[]; description: string; successSignal: string; evidencePlan: string; priority: number; combination?: Combination; methodIds?: string[]; revisits?: GapRef[] }
 export interface Decision {

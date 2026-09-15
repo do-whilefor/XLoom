@@ -325,6 +325,8 @@ export class BlackboardStore {
         if (delivery.items.length) this.event("materials_announced", { runId, boardRevision: delivery.boardRevision, stamps: delivery.items.map(({ key, signature }) => ({ key, signature })), deferredCount: delivery.deferredCount });
       }
       board.reason = decision.summary;
+      board.planningMemory = { runId, mode: run.mode as "decide" | "metacog", revision: board.revision + 1,
+        summary: decision.summary.slice(0, 4000), truncated: decision.summary.length > 4000 };
       if (decision.conclusion) {
         assert(run.mode === "metacog", "Completion requires a fresh metacognitive review.");
         this.validateConclusion(board, decision.conclusion.outcome);

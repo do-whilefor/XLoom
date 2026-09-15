@@ -63,6 +63,20 @@ function assertReferences(context: BlackboardContext): void {
 }
 
 describe("role-specific blackboard context", () => {
+  it.each(["decide", "execute", "metacog"] as const)("labels %s planning memory as unverified and bounds it independently of status", mode => {
+    const input = request(mode);
+    input.snapshot.reason = "Starting a fresh planning context";
+    input.snapshot.planningMemory = { runId: "PRIVATE_RUN_MEMORY", mode: "decide", revision: 4, summary: "x".repeat(8000), truncated: false };
+    const context = projectContext(input);
+    expect(context.planningMemory).toMatchObject({ summary: "x".repeat(4000), truncated: true, evidenceStatus: "unverified" });
+    expect(context.planningMemory!.notice).toContain("not verified evidence or Goal completion");
+    expect(JSON.stringify(context)).not.toContain("PRIVATE_RUN_MEMORY");
+    expect(context.facts).toEqual([]);
+    expect(context.reason).toBe(input.snapshot.reason);
+    expect(input.snapshot.planningMemory.summary).toHaveLength(8000);
+    delete input.snapshot.planningMemory;
+    expect(projectContext(input).planningMemory).toBeUndefined();
+  });
   it.each(["decide", "execute", "metacog"] as const)("keeps %s projection guidance compact without losing evidence and recovery boundaries", mode => {
     const context = projectContext(request(mode));
     const guidance = context.projection.notice;

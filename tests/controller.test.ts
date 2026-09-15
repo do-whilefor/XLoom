@@ -607,6 +607,24 @@ describe("LoopController synthetic protocol flow", () => {
     expect(test.controller.snapshot().reason).toContain("no executable step");
   });
 
+  it("passes read-only planning memory into fresh contexts after automatic pause and restart", async () => {
+    let resumed = false;
+    const summary = "Compared fixture JSON and searched its originals; no matches under the recorded conditions. Verification remains open.";
+    const test = setup(request => {
+      if (resumed) {
+        expect(request.snapshot.reason).not.toBe(summary);
+        expect(projectContext(request).planningMemory).toMatchObject({ summary, evidenceStatus: "unverified" });
+      }
+      return result({ summary });
+    });
+    await test.controller.start();
+    expect(test.controller.snapshot()).toMatchObject({ status: "paused", facts: [], steps: [], planningMemory: { summary } });
+    resumed = true;
+    await test.controller.start();
+    expect(test.requests.length).toBe(4);
+    expect(test.controller.snapshot().outcome).toBeNull();
+  });
+
   it.each([false, true])("reviews superseded pending plans without executing or cycling (unsupported NEED_INPUT: %s)", async unsupportedNeedInput => {
     const test = setup(request => {
       if (request.mode === "execute") {

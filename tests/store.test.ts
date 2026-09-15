@@ -91,6 +91,28 @@ afterEach(() => {
 });
 
 describe("transactional blackboard", () => {
+  it("retains bounded planning memory across status changes, failed proposals, reopen and task isolation", () => {
+    const store = openStore();
+    const first = runDecision(store, { summary: "Readonly comparison complete. ".repeat(200) });
+    const memory = first.planningMemory!;
+    expect(memory).toMatchObject({ mode: "decide", revision: first.revision, truncated: true });
+    expect(memory.summary).toHaveLength(4000);
+    expect(first.facts).toEqual([]);
+    store.setStatus("paused", "Operational pause");
+    store.setStatus("running", "Starting a fresh planning context");
+    const runId = nextRun(); store.beginRun(runId, "metacog");
+    expect(() => store.applyDecision(runId, { summary: "Must not replace saved memory", steps: [{ goalId: "missing" }] }, usage)).toThrow();
+    store.failRun(runId, "Provider failed");
+    expect(store.snapshot().planningMemory).toEqual(memory);
+    const root = store.workspace; store.close();
+    const reopened = openStore(root);
+    expect(reopened.snapshot().planningMemory).toEqual(memory);
+    const other = new BlackboardStore(root, defaultConfig("Validate local test fixtures"), { taskId: "independent" }); stores.push(other);
+    expect(other.snapshot().planningMemory).toBeUndefined();
+    const second = runDecision(reopened, { summary: "Corrected read-only comparison" }, "metacog");
+    expect(second.planningMemory).toMatchObject({ mode: "metacog", summary: "Corrected read-only comparison", truncated: false });
+    expect(second.planningMemory!.runId).not.toBe(memory.runId);
+  });
   it("initializes one root goal and a readable generated projection", () => {
     const store = openStore();
     expect(store.snapshot()).toMatchObject({ revision: 0, status: "idle", outcome: null, facts: [], usage: { input: 0, output: 0, cost: 0 }, goals: [{ id: "G0", status: "active", parentId: null }] });
