@@ -19,6 +19,7 @@ import { applyKnowledge } from "./knowledge/model.js";
 import { applyGapDecision, applyGapRecords, gapQueue } from "./knowledge/gaps.js";
 import { assessCvss, cvssIssues } from "./scoring/cvss.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
+import type { ExecutionRefs } from "./types.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cost: 0 });
@@ -352,7 +353,7 @@ export class BlackboardStore {
   }
 
   /** Commit durable observations without releasing the current Step or replaying its tools. */
-  applyExecutionCheckpoint(runId: string, checkpointId: string, input: unknown, cumulativeUsage: Usage): BoardSnapshot {
+  applyExecutionCheckpoint(runId: string, checkpointId: string, input: unknown, cumulativeUsage: Usage, refs?: Partial<ExecutionRefs>): BoardSnapshot {
     assert(/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId), "Invalid checkpoint ID.");
     const output: Execution = executionSchema.parse(normalizeExecutionInput(input, this.snapshot()));
     cumulativeUsage = usageSchema.parse(cumulativeUsage);
@@ -360,9 +361,12 @@ export class BlackboardStore {
     const previous = this.db.prepare("SELECT payloadHash FROM execution_checkpoints WHERE runId=? AND checkpointId=?").get(runId, checkpointId);
     if (previous) {
       assert(previous.payloadHash === payloadHash, "Checkpoint ID already committed with different content.");
+      const event = this.db.prepare("SELECT payload FROM events WHERE kind='execution_checkpoint' AND json_extract(payload, '$.runId')=? AND json_extract(payload, '$.checkpointId')=? ORDER BY seq DESC LIMIT 1").get(runId, checkpointId);
+      if (refs && event) Object.assign(refs, JSON.parse(String(event.payload)).refs);
       return this.snapshot();
     }
-    return this.mutate("execution_checkpoint", { runId, checkpointId, output }, board => {
+    const payload = { runId, checkpointId, output, refs: undefined as ExecutionRefs | undefined };
+    const committed = this.mutate("execution_checkpoint", payload, board => {
       const run = this.db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as unknown as StoredRun | undefined;
       assert(run?.status === "running", "Run is not active or was already committed.");
       assert(run.mode === "execute", "Wrong run channel.");
@@ -370,6 +374,7 @@ export class BlackboardStore {
       assert(step?.status === "claimed" && step.runId === runId, "Step claim does not match run.");
       this.accountUsage(board, runId, cumulativeUsage, true);
       const records = this.applyExecutionRecords(board, runId, step, output);
+      payload.refs = records.refs;
       if (records.progress) {
         this.db.prepare("UPDATE run_progress SET progressed=1 WHERE runId=?").run(runId);
         board.noProgressCount = 0;
@@ -378,9 +383,11 @@ export class BlackboardStore {
       applyWikiPages(board, records.wikiPages, ref => ref, ref => this.verifyEvidence(board.evidence.find(item => item.id === ref)!));
       this.db.prepare("INSERT INTO execution_checkpoints VALUES (?,?,?)").run(runId, checkpointId, payloadHash);
     });
+    if (refs) Object.assign(refs, payload.refs);
+    return committed;
   }
 
-  private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): { progress: boolean; wikiPages: WikiPageProposal[] } {
+  private applyExecutionRecords(board: BoardSnapshot, runId: string, step: Step, output: Execution): { progress: boolean; wikiPages: WikiPageProposal[]; refs: ExecutionRefs } {
       const previous = { ...board, facts: [...board.facts], evidence: [...board.evidence], attempts: board.attempts?.map(item => ({ ...item, evidenceIds: [...item.evidenceIds] })) };
       const before = legacyProgressMarkers(board);
       const evidenceMap = new Map<string, string>();
@@ -467,7 +474,8 @@ export class BlackboardStore {
       const wikiPages = (output.wikiPages ?? []).map(page => ({ ...page, blocks: page.blocks?.map(block => ({ ...block,
         sources: block.sources.map(ref => ({ kind: ref.kind, id: ref.kind === "fact" ? factMap.get(ref.id) ?? ref.id : ref.kind === "evidence" ? evidenceMap.get(ref.id) ?? ref.id : ref.id })),
       })) }));
-      return { progress: output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker)), wikiPages };
+      return { progress: output.attempts?.length ? attemptProgress : [...legacyProgressMarkers(board)].some(marker => !before.has(marker)), wikiPages,
+        refs: { facts: Object.fromEntries(factMap), evidence: Object.fromEntries(evidenceMap) } };
   }
 
   private ingestEvidence(runId: string, stepId: string, source: string, description: string): Evidence {

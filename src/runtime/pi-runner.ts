@@ -24,6 +24,7 @@ import { validateKnowledgeSubmission } from "../knowledge/model.js";
 import { validateCvssExecution } from "../scoring/cvss.js";
 import { createChromeSession, type ChromeSession } from "./chrome.js";
 import { scheduledTools } from "./execution.js";
+import { submissionTool } from "./submission.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -199,6 +200,24 @@ export class PiRunner implements AgentRunner {
       forward = createRuntimeForwarder(request.mode, emit, redact, secrets);
       if (selected.costKnown === false) emit({ type: "notice", mode: request.mode, text: "Endpoint pricing is unknown; cost is an estimate and an optional monetary budget cannot be enforced accurately." });
       const stage = request.mode === "execute" && request.onCheckpoint ? stageWriter(createWriteTool(request.workspace), request, usage, redact) : undefined;
+      let normalizationChanges: string[] = [];
+      function validateText(text: string): unknown { return validateFinalJson(redact(text), parsed => {
+        if (request.mode === "execute") {
+          const validated = executionSchema.safeParse(normalizeExecutionInput(parsed, stage?.snapshot ?? request.snapshot));
+          if (!validated.success) throw new Error(formatValidationError(validated.error));
+          validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
+          validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);
+          validateCvssExecution(stage?.snapshot ?? request.snapshot, validated.data);
+          return validated.data;
+        }
+        const normalized = normalizeDecisionInput(parsed, request.snapshot);
+        const validated = decisionSchema.safeParse(normalized.value);
+        if (!validated.success) throw new Error(formatValidationError(validated.error));
+        validateDecisionReferences(request.snapshot, validated.data);
+        normalizationChanges = normalized.changes;
+        return validated.data;
+      }); }
+      const submission = submissionTool(request.mode, output => validateText(JSON.stringify(output)));
       const readTool = createWorkspaceReadTool(request.workspace, request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,
         request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
           materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
@@ -210,6 +229,7 @@ export class PiRunner implements AgentRunner {
           config: request.snapshot.config.chrome, signal: request.signal });
         tools.push(chrome.tool);
       }
+      tools.push(submission.tool);
       const checkpointFile = join(request.runDir, "continuation.json");
       const identity = { role: request.mode, provider: selected.model.provider, model: selected.model.id, api: selected.model.api,
         baseUrl: selected.model.baseUrl, workspace: request.workspace, taskId: request.id, stepId: request.step?.id ?? null };
@@ -244,15 +264,17 @@ export class PiRunner implements AgentRunner {
         sessionId: request.id,
         beforeToolCall: async () => {
           if (checkpointError) return { block: true, reason: "Private checkpoint could not be saved; tool was not executed.", terminate: true };
+          if (submission.accepted) return { block: true, reason: "Final result accepted; remaining tools were not executed.", terminate: true };
           if (stage?.yielded) return { block: true, reason: "Execute has yielded to Decide; remaining tools were not executed.", terminate: true };
           request.signal.throwIfAborted();
           return undefined;
         },
         shouldStopAfterTurn: async context => {
-          const stopped = await budget.shouldStopAfterTurn(context);
+          const stopped = await budget.shouldStopAfterTurn(submission.accepted
+            ? { ...context, message: { ...context.message, content: [] } } : context);
           const exhausted = request.snapshot.config.limits.maxTurnsPerRun !== null && modelRequests >= request.snapshot.config.limits.maxTurnsPerRun;
-          if (exhausted && context.message.content.some(part => part.type === "toolCall")) requestLimitReached = true;
-          return stopped || exhausted || !!stage?.yielded;
+          if (exhausted && !submission.accepted && context.message.content.some(part => part.type === "toolCall")) requestLimitReached = true;
+          return stopped || exhausted || !!stage?.yielded || submission.accepted;
         },
         prepareNextTurnWithContext: async context => {
           request.signal.throwIfAborted();
@@ -285,8 +307,9 @@ export class PiRunner implements AgentRunner {
           await persist();
         }
         // Log completed messages and tool events. Partial transcript copies would grow quadratically.
-        if (event.type !== "message_update" && event.type !== "message_start" && event.type !== "agent_end") {
-          await appendFile(join(request.runDir, "events.jsonl"), `${redact(JSON.stringify(event))}\n`);
+        if (event.type !== "message_update" && event.type !== "agent_end") {
+          const logged = event.type === "message_start" ? { type: event.type, role: event.message.role } : event;
+          await appendFile(join(request.runDir, "events.jsonl"), `${redact(JSON.stringify({ at: Date.now(), ...logged }))}\n`);
         }
       });
       const onAbort = () => agent?.abort();
@@ -306,7 +329,7 @@ export class PiRunner implements AgentRunner {
         // A provider's per-response boundary is not a task or retry-count budget.
         // Keep requesting the remainder until it stops, fails, or the user cancels
         // (or an explicitly configured budget is exhausted).
-        while (!stage?.yielded && !checkpointError) {
+        while (!stage?.yielded && !checkpointError && !submission.accepted) {
           request.signal.throwIfAborted();
           if (budget.error) throw new Error(budget.error);
           if (isTransientModelFailure(finalMessage) && !retriedTransient && canRequest()) {
@@ -373,25 +396,9 @@ export class PiRunner implements AgentRunner {
         return result;
       }
       if (!finalMessage) throw new Error("Agent returned no final assistant message.");
-      if (finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
-      let normalizationChanges: string[] = [];
-      const validateText = (text: string) => validateFinalJson(redact(text), parsed => {
-        if (request.mode === "execute") {
-          const validated = executionSchema.safeParse(normalizeExecutionInput(parsed, stage?.snapshot ?? request.snapshot));
-          if (!validated.success) throw new Error(formatValidationError(validated.error));
-          validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
-          validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);
-          validateCvssExecution(stage?.snapshot ?? request.snapshot, validated.data);
-          return validated.data;
-        }
-        const normalized = normalizeDecisionInput(parsed, request.snapshot);
-        const validated = decisionSchema.safeParse(normalized.value);
-        if (!validated.success) throw new Error(formatValidationError(validated.error));
-        validateDecisionReferences(request.snapshot, validated.data);
-        normalizationChanges = normalized.changes;
-        return validated.data;
-      });
+      if (!submission.accepted && finalMessage.stopReason !== "stop") throw new Error(finalMessage.errorMessage ?? `Agent stopped without a complete result: ${finalMessage.stopReason}`);
       const validate = () => {
+        if (submission.accepted) return submission.output;
         try { return validateText(responseText ?? protocolText(finalMessage)); }
         catch (error) {
           // Some providers restart with a full object despite a suffix request.

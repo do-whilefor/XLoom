@@ -11,7 +11,7 @@
 
 Xloom 是一个本地运行、面向授权安全研究的双 Agent 研究 Loop。
 
-默认以普通聊天打开。Chat 和 Execute 都可使用 `read / write / edit / powershell / chrome` 五个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，仅有 `read`；Execute 深入调查当前步骤，并可先提交关键观察再继续或交回规划。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
+默认以普通聊天打开。Chat 和 Execute 都可使用 `read / write / edit / powershell / chrome` 五个工具。输入 `/run 目标` 切换到双 Agent 红队任务：两个角色不共享聊天历史，只通过结构化黑板协作。Decide 负责计划、读取证据与审查，通过 `read` 读取资料、`submit` 提交提案；Execute 深入调查当前步骤，并可先提交关键观察再继续或交回规划。元认知是 Decide 的一次全新上下文调用，不是第三个 Agent。
 
 `chrome` 按需复用用户已登录的 Chrome，连接跨回复和应用重启保留；用 `/chrome disconnect` 手动断开，`/chrome connect` 允许重连。详见[连接与验证说明](docs/chrome.md)。
 
@@ -36,7 +36,7 @@ Xloom 是一个本地运行、面向授权安全研究的双 Agent 研究 Loop�
 
 `decide`、`execute`、`metacog` 是调用模式，不是三个 Agent。每个新 run 创建新的 Pi Agent，消息数组从空开始；不同 run / 角色之间不共享 `messages`。
 
-- **Decide / 元认知**：仅挂载 `read`，负责规划、读取证据、验证交接条件与审查。元认知映射到 Decide 的模型，在同一套黑板上的全新上下文复核。
+- **Decide / 元认知**：使用 `read` 读取资料及 `submit` 提交提案，负责规划、读取证据、验证交接条件与审查。元认知映射到 Decide 的模型，在同一套黑板上的全新上下文复核。
 - **Execute**：使用五个工具完成调查与状态变更，新增的权威事实 / 证据由 Execute 提交。
 
 一次典型闭环：
@@ -176,11 +176,12 @@ Execute 的批量 HTTP 操作可复用内置的进程内客户端，逐请求保
 
 项目配置不接受明文 Key。Pi 的模型运行时与登录服务均显式使用 Xloom 用户目录中的 `auth.json`、`models.json` 和模型缓存，支持环境认证、API Key 与 OAuth 登录 / 刷新。默认用户目录首次使用时只导入一次已有 Pi 配置，不覆盖已有 Xloom 文件，不删除 Pi 原件，登出后也不会再次导入旧认证。设置 `XLOOM_HOME` 时默认隔离，不自动读取旧 Pi 认证；需要导入时执行 `xloom migrate --pi-dir "旧 Pi agent 目录的绝对路径"`。默认不设置运行时间、回合数或 token 硬上限，用户可随时 `/pause` 或 `/stop`。
 
-## 明确的边界
-
 思考默认选择该模型在 Pi 目录中支持的最高档位（配置 `thinking: "max"`，或省略）；例如仅支持 `high` 时实际使用 `high`。显式 `off` 仍关闭思考。自定义内联端点默认启用推理能力；不支持推理的端点设置 `reasoning: false`，已知模型优先保留目录能力。`reasoning` 表示能力，`thinking` 表示本次设置，两者独立。该设置也用于 Chat 和上下文压缩。最高档位可能增加响应时间，不代表供应商支持无限推理预算。
 
-这是上下文隔离，不是操作系统沙箱。普通聊天和 Execute 的原生文件及 PowerShell 工具拥有当前用户权限，Decide / 元认知仅挂载 `read`。提示词禁止读取其他 run 的聊天 / 日志和凭据，但不声称能用提示词阻止越权读文件。
+## 明确的边界
+
+
+这是上下文隔离，不是操作系统沙箱。普通聊天和 Execute 的原生文件及 PowerShell 工具拥有当前用户权限，Decide / 元认知使用 `read` 读取资料及 `submit` 提交提案。提示词禁止读取其他 run 的聊天 / 日志和凭据，但不声称能用提示词阻止越权读文件。
 
 引用、文件哈希与 JSON 校验只能保证结构和证据完整性，**不能独立证明请求确实发生或漏洞成立**。真实性、可复现性、实际影响和缺失条件的判断仍依赖模型对原始证据的审查及用户复核。
 

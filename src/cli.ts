@@ -33,7 +33,7 @@ TUI: plain text chats; /run GOAL starts a separate two-agent task
      Ctrl+O toggles details; click an activity summary to expand and its content to collapse
 User input defines authorization. No extra authorization confirmation or hooks.
 Chat and Execute have read/write/edit/powershell/chrome for the running browser.
-Decide and metacog have read only.
+Decide and metacog have read for inspection. Research roles also have submit for structured proposals.
 Tools run with the current user's OS permissions.
 `;
 

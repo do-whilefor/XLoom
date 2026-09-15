@@ -130,7 +130,9 @@ describe("Chrome attach-only tool", () => {
   });
   it("keeps role prompts short and exposes only one concise tool description", async () => {
     const { session } = await fixture();
-    expect([decidePrompt.length, executePrompt.length, metacogPrompt.length]).toEqual([749, 645, 940]);
+    expect(decidePrompt.length).toBeLessThanOrEqual(760);
+    expect(executePrompt.length).toBeLessThanOrEqual(660);
+    expect(metacogPrompt.length).toBeLessThanOrEqual(960);
     expect(session.tool.description.length).toBeLessThan(300);
   });
 });

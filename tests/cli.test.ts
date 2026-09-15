@@ -123,7 +123,8 @@ describe("command-line entry points", () => {
     expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell");
     expect(result.stdout).toContain("Chat and Execute have read/write/edit/powershell/chrome");
     expect(result.stdout).toContain("chrome [status|disconnect|connect]");
-    expect(result.stdout).toContain("Decide and metacog have read only");
+    expect(result.stdout).toContain("Decide and metacog have read for inspection");
+    expect(result.stdout).toContain("submit for structured proposals");
     expect(result.stdout).toContain("--headless");
     expect(result.stdout).toContain("Ctrl+O");
     expect(result.stdout).toContain("/exit");

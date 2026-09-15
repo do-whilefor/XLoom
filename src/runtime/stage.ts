@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { createWriteTool } from "@earendil-works/pi-coding-agent";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { executionSchema, formatValidationError } from "../schema.js";
-import type { RunRequest, Usage } from "../types.js";
+import type { RunRequest, Usage, ExecutionRefs } from "../types.js";
 import { evidencePath } from "../paths.js";
 import { normalizeExecutionInput } from "../loop/execution-input.js";
 
@@ -75,20 +75,28 @@ export function stageWriter(tool: ReturnType<typeof createWriteTool>, request: R
         if (await readFile(stagePath(request), "utf8") !== source) {
           throw new Error("Checkpoint file changed after write; this proposal was not committed. Inspect the file before submitting again with write.");
         }
-        const board = await request.onCheckpoint(submission.id, submission.execution, { ...usage });
+        const refs: Partial<ExecutionRefs> = {};
+        const board = await request.onCheckpoint(submission.id, submission.execution, { ...usage }, refs);
         snapshot = board;
         yielded = submission.yieldToDecide ?? false;
         summary = submission.execution.summary;
+        // Store supplies authoritative alias mappings, including deduplication and
+        // idempotent replay. Old/custom callbacks without receipts keep compatibility.
+        const incremental = refs.facts !== undefined && refs.evidence !== undefined;
+        const factIds = new Set(Object.values(refs.facts ?? {})), evidenceIds = new Set(Object.values(refs.evidence ?? {}));
+        const keys = new Set(submission.execution.findings?.map(item => item.key.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US")));
+        const wikiIds = new Set(submission.execution.wikiPages?.map(item => item.id));
         return { ...result, content: [{ type: "text" as const, text: JSON.stringify({
           checkpoint: submission.id, committed: true, revision: board.revision, yielded,
+          ...(incremental ? { incremental: true, refs } : {}),
           // Return committed public identifiers so the next batch can refer to
           // already-submitted evidence instead of inventing or resubmitting IDs.
-          facts: board.facts.map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
-          evidence: board.evidence.map(item => ({ id: item.id, path: evidencePath(item, dirname(dirname(request.runDir)), request.workspace), description: item.description })),
-          findings: board.findings.map(({ id, key, target }) => ({ id, key, target })),
-          ...(board.wikiPages?.length ? { wikiPages: board.wikiPages.map(({ id, revision }) => ({ id, revision })) } : {}),
+          facts: board.facts.filter(item => !incremental || factIds.has(item.id)).map(({ id, description, evidenceIds, supersedes }) => ({ id, description, evidenceIds, supersedes })),
+          evidence: board.evidence.filter(item => !incremental || evidenceIds.has(item.id)).map(item => ({ id: item.id, path: evidencePath(item, dirname(dirname(request.runDir)), request.workspace), description: item.description })),
+          findings: board.findings.filter(item => !incremental || keys.has(item.key)).map(({ id, key, target }) => ({ id, key, target })),
+          ...(board.wikiPages?.length ? { wikiPages: board.wikiPages.filter(item => !incremental || wikiIds.has(item.id)).map(({ id, revision }) => ({ id, revision })) } : {}),
           ...(request.wikiProjectionError ? { wikiProjection: { status: "unavailable", reason: request.wikiProjectionError } } : {}),
-          instruction: yielded ? "Return control to Decide; do not execute further tools." : "Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
+          instruction: yielded ? "Return control to Decide; do not execute further tools." : "This receipt covers the submitted batch; older records remain on the blackboard. Continue this Step if useful. Final output should contain only new, uncommitted records; use these committed IDs for references.",
         }) }] };
       },
     },

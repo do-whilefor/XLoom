@@ -39,6 +39,23 @@ async function request(mode: RunRequest["mode"] = "decide"): Promise<RunRequest>
 }
 
 describe("checkpoint write validation boundaries", () => {
+  it("keeps a checkpoint receipt bounded by its batch instead of the task's history", async () => {
+    const input = await request("execute");
+    input.snapshot.facts = Array.from({ length: 200 }, (_, i) => ({ id: `old-${i}`, description: "Long unrelated historical observation ".repeat(20), stepId: null, evidenceIds: [] }));
+    input.onCheckpoint = async (_id, _output, _usage, refs) => {
+      Object.assign(refs!, { facts: { local: "F-new" }, evidence: {} });
+      return { ...input.snapshot, facts: [...input.snapshot.facts, { id: "F-new", description: "New observation", stepId: null, evidenceIds: [] }] };
+    };
+    const writer = stageWriter(createWriteTool(input.workspace), input, { input: 0, output: 0, cost: 0 });
+    const result = await writer.tool.execute("batch", { path: stagePath(input), content: { id: "batch", execution: { summary: "New", result: "no_progress" } } });
+    const text = result.content.filter(p => p.type === "text").map(p => p.text).join("");
+    const receipt = JSON.parse(text);
+    expect(text.length).toBeLessThan(1000);
+    expect(receipt).toMatchObject({ incremental: true, refs: { facts: { local: "F-new" }, evidence: {} }, facts: [{ id: "F-new" }] });
+    expect(receipt.facts).toHaveLength(1); expect(text).not.toContain("old-199");
+    expect(writer.snapshot.facts).toHaveLength(201);
+  });
+
   it("preserves BOM and correctly escaped string bytes when submitting valid JSON", async () => {
     const input = await request("execute");
     input.onCheckpoint = vi.fn(async () => input.snapshot);
@@ -48,7 +65,7 @@ describe("checkpoint write validation boundaries", () => {
     const writer = stageWriter(createWriteTool(input.workspace), input, usage);
     await writer.tool.execute("valid", { path: "run/artifacts/checkpoint.json", content: source });
     expect(await readFile(stagePath(input), "utf8")).toBe(source);
-    expect(input.onCheckpoint).toHaveBeenCalledExactlyOnceWith("valid", execution, usage);
+    expect(input.onCheckpoint).toHaveBeenCalledExactlyOnceWith("valid", execution, usage, {});
   });
 
   it("leaves non-checkpoint writes as arbitrary file content", async () => {
@@ -111,6 +128,55 @@ function stream(response: string | ((context: Context) => AssistantMessage), see
 }
 
 describe("Pi runtime isolation", () => {
+  it.each(["decide", "metacog", "execute"] as const)("accepts a structured %s proposal in one response and logs actual event times", async mode => {
+    const input = await request(mode);
+    let calls = 0;
+    const output = { summary: 'Preserve quotes " and newlines\nwithout a JSON envelope repair.', ...(mode === "execute" ? { result: "no_progress" } : {}) };
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      expect(++calls).toBe(1);
+      return message([{ type: "toolCall", id: "final", name: "submit", arguments: { output } }], "toolUse");
+    }) }) }).run(input);
+    expect(result.output).toEqual(output); expect(calls).toBe(1);
+    const logs = (await readFile(join(input.runDir, "events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(logs.every(event => Number.isFinite(event.at))).toBe(true);
+    expect(logs.some(event => event.type === "message_start" && event.role === "assistant")).toBe(true);
+    expect(logs.filter(event => event.type.startsWith("tool_execution_")).map(event => event.type)).toEqual(["tool_execution_start", "tool_execution_end"]);
+  });
+
+  it("rejects invalid structured references before accepting a corrected proposal", async () => {
+    const input = await request(); let calls = 0;
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      calls++;
+      if (calls === 2) expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "submit", isError: true });
+      return message([{ type: "toolCall", id: `final-${calls}`, name: "submit", arguments: { output: calls === 1
+        ? { summary: "Bad reference", updateGoals: [{ id: "unknown", status: "satisfied", factIds: ["invented"], reason: "invalid" }] }
+        : { summary: "Corrected without inventing facts" } } }], "toolUse");
+    }) }) }).run(input);
+    expect(calls).toBe(2); expect(result.output).toEqual({ summary: "Corrected without inventing facts" });
+  });
+
+  it("stops remaining mutation tools after submission while retaining prior completed tools", async () => {
+    const input = await request("execute"); let calls = 0;
+    await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
+      expect(++calls).toBe(1);
+      return message([
+        { type: "toolCall", id: "before", name: "write", arguments: { path: "before.txt", content: "completed" } },
+        { type: "toolCall", id: "final", name: "submit", arguments: { output: { summary: "Retain partial work", result: "no_progress" } } },
+        { type: "toolCall", id: "after", name: "write", arguments: { path: "after.txt", content: "must not run" } },
+      ], "toolUse");
+    }) }) }).run(input);
+    expect(await readFile(join(input.workspace, "before.txt"), "utf8")).toBe("completed");
+    await expect(readFile(join(input.workspace, "after.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("accepts a completed structured result at a token boundary without requesting another turn", async () => {
+    const input = await request(); input.snapshot.config.limits.maxTokens = 1;
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => message([
+      { type: "toolCall", id: "final", name: "submit", arguments: { output: { summary: "Complete proposal" } } },
+    ], "toolUse")) }) }).run(input);
+    expect(result.output).toEqual({ summary: "Complete proposal" });
+  });
+
   it("accepts misplaced combination fields and unused Step IDs in one request while preserving conditions", async () => {
     const input = await request();
     input.snapshot.goals = [{ id: "G0", description: "Fixture", parentId: null, status: "active", factIds: [] }];
@@ -173,7 +239,7 @@ describe("Pi runtime isolation", () => {
     for (const mode of ["decide", "execute", "metacog"] as const) await runner.run(await request(mode));
     expect(selected.map((config) => config.model)).toEqual(["decide", "execute", "decide"]);
     expect(options.map((entry) => entry.initialState?.messages)).toEqual([[], [], []]);
-    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read"], ["read", "write", "edit", "powershell", "chrome"], ["read"]]);
+    expect(options.map((entry) => entry.initialState?.tools?.map((tool) => tool.name))).toEqual([["read", "submit"], ["read", "write", "edit", "powershell", "chrome", "submit"], ["read", "submit"]]);
     expect(options.map(entry => entry.initialState?.tools?.find(tool => tool.name === "read")?.description.includes("artifact://"))).toEqual([false, true, false]);
     expect(options.every((entry) => entry.toolExecution === "parallel" && entry.beforeToolCall && !entry.afterToolCall)).toBe(true);
     expect(options.flatMap(entry => entry.initialState?.tools ?? []).every(tool => tool.executionMode === (tool.name === "read" ? "parallel" : "sequential"))).toBe(true);
@@ -653,7 +719,7 @@ describe("Pi runtime isolation", () => {
     const output = { summary: "Continued fixture reasoning finished", ...(mode === "execute" ? { result: "no_progress" } : {}) };
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
       calls++;
-      expect(context.tools?.map(tool => tool.name)).toEqual(mode === "execute" ? ["read", "write", "edit", "powershell", "chrome"] : ["read"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(mode === "execute" ? ["read", "write", "edit", "powershell", "chrome", "submit"] : ["read", "submit"]);
       if (calls > 1) expect(context.messages.at(-1)?.role).toBe("user");
       return message(calls <= 5 ? [{ type: "thinking", thinking: `Unfinished fixture consideration ${calls}` }]
         : [{ type: "text", text: JSON.stringify(output) }], calls <= 5 ? "length" : "stop");

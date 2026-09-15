@@ -238,7 +238,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
       expect(input.knowledge?.authoringGuide).toContain("authoring.md");
       if (run.channel !== "offline-execute") {
         if (!input.blackboard.completedSteps) return json(plan());
-        expect(context.tools?.map(tool => tool.name)).toEqual(["read"]);
+        expect(context.tools?.map(tool => tool.name)).toEqual(["read", "submit"]);
         expect(JSON.stringify(input)).not.toContain(privateTurn);
         expect(input.knowledge?.discovery.items.find(item => item.consumerId === "C-download")?.plan?.capabilityIds).toEqual(["C-export", "C-download"]);
         expect(input.knowledge?.chains[0]?.reviewIssues).toEqual([]);
@@ -283,7 +283,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
         ] });
         return json({ summary: "Related material inspected; no new evidence or conclusion submitted" });
       }
-      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
+      expect(context.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome", "submit"]);
       if (input.assignedStep?.description === inspect) {
         expect(input.blackboard.findings.map(finding => finding.key)).toEqual(["focus"]);
         const focus = input.blackboard.findings[0]!;
@@ -386,7 +386,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     for (const run of test.seen) {
       expect(run.contexts[0]?.messages).toHaveLength(1);
       expect(run.contexts[0]?.tools?.map(tool => tool.name)).toEqual(
-        run.channel === "offline-execute" ? ["read", "write", "edit", "powershell", "chrome"] : ["read"]);
+        run.channel === "offline-execute" ? ["read", "write", "edit", "powershell", "chrome", "submit"] : ["read", "submit"]);
     }
     for (const run of test.store.runs()) {
       const saved = JSON.parse(readFileSync(join(test.store.dataDir, "runs", run.id, "input.json"), "utf8"));
@@ -467,7 +467,7 @@ describe("real Pi inner loop with the two-Agent outer loop", () => {
     for (const run of test.seen) {
       expect(run.contexts[0]?.messages).toHaveLength(1);
       expect(run.contexts[0]?.messages[0]?.role).toBe("user");
-      expect(run.contexts[0]?.tools?.map(tool => tool.name) ?? []).toEqual(run.channel === "offline-execute" ? ["read", "write", "edit", "powershell", "chrome"] : ["read"]);
+      expect(run.contexts[0]?.tools?.map(tool => tool.name) ?? []).toEqual(run.channel === "offline-execute" ? ["read", "write", "edit", "powershell", "chrome", "submit"] : ["read", "submit"]);
       expect(JSON.stringify(run.contexts[0])).not.toContain(privateTurn);
       expect(JSON.stringify(run.contexts[0])).not.toContain("fixture-write");
     }

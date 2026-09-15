@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { BlackboardStore } from "../src/store.js";
 import type { AttemptProposal, Decision, Execution, Usage } from "../src/types.js";
+import type { ExecutionRefs } from "../src/types.js";
 
 const roots: string[] = [];
 const stores: BlackboardStore[] = [];
@@ -51,6 +52,26 @@ afterEach(() => {
 });
 
 describe("durable execution checkpoints", () => {
+  it("returns durable alias mappings for deduplicated records and idempotent deliveries", () => {
+    const store = open(), { runId, artifacts } = claim(store);
+    const result = output(artifacts), first: Partial<ExecutionRefs> = {};
+    const board = store.applyExecutionCheckpoint(runId, "first-refs", result, usage, first);
+    expect(first).toEqual({ facts: { f: board.facts[0].id }, evidence: { e: board.evidence[0].id } });
+    const renamed: Execution = { ...result, evidence: result.evidence!.map(e => ({ ...e, ref: "same-bytes" })),
+      facts: result.facts!.map(f => ({ ...f, ref: "same-fact", evidenceRefs: ["same-bytes"] })), attempts: [] };
+    const deduplicated: Partial<ExecutionRefs> = {};
+    store.applyExecutionCheckpoint(runId, "second-refs", renamed, total, deduplicated);
+    expect(deduplicated).toEqual({ facts: { "same-fact": board.facts[0].id }, evidence: { "same-bytes": board.evidence[0].id } });
+    const replay: Partial<ExecutionRefs> = {};
+    store.applyExecutionCheckpoint(runId, "first-refs", result, usage, replay);
+    expect(replay).toEqual(first);
+    expect(store.snapshot().facts).toHaveLength(1); expect(store.snapshot().evidence).toHaveLength(1);
+    const rejected: Partial<ExecutionRefs> = {};
+    expect(() => store.applyExecutionCheckpoint(runId, "invalid", { summary: "invalid", result: "done",
+      facts: [{ ref: "bad", description: "Unsupported", evidenceRefs: ["missing"] }] }, total, rejected)).toThrow();
+    expect(rejected).toEqual({});
+  });
+
   it("commits observations while keeping the Step claimed, then counts final usage only once", () => {
     const store = open();
     const { runId, artifacts, step } = claim(store);

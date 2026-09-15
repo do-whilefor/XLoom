@@ -110,6 +110,7 @@ export interface Execution {
   facts?: { ref: string; description: string; evidenceRefs: string[]; supersedes?: string }[];
   findings?: { key: string; title: string; target?: string; status: "lead" | "technical_hit"; factRefs: string[]; evidenceRefs: string[]; next: string; impact?: Impact; pocEvidenceRef?: string; cvss?: CvssProposal }[];
 }
+export interface ExecutionRefs { facts: Record<string, string>; evidence: Record<string, string> }
 export interface RunRequest {
   id: string; mode: Mode; snapshot: BoardSnapshot; workspace: string; runDir: string; step?: Step;
   /** Public, task-local view assembled by the outer loop; never another Agent's chat. */
@@ -120,7 +121,7 @@ export interface RunRequest {
   materials?: MaterialDelivery;
   materialBaseline?: Record<string, string>;
   materialReads?: { key: string; signature: string }[];
-  onCheckpoint?: (checkpointId: string, output: unknown, cumulativeUsage: Usage) => Promise<BoardSnapshot> | BoardSnapshot;
+  onCheckpoint?: (checkpointId: string, output: unknown, cumulativeUsage: Usage, refs?: Partial<ExecutionRefs>) => Promise<BoardSnapshot> | BoardSnapshot;
   signal: AbortSignal; onEvent: (event: RuntimeEvent) => void;
 }
 export interface RunResult { output: unknown; usage: Usage; yielded?: boolean }

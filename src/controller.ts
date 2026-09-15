@@ -114,9 +114,9 @@ export class LoopController {
         const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
           wikiProjectionError: this.store.wikiProjectionError ?? undefined,
           signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
-        if (mode === "execute") request.onCheckpoint = (checkpointId, output, cumulativeUsage) => {
+        if (mode === "execute") request.onCheckpoint = (checkpointId, output, cumulativeUsage, refs) => {
           cancellation.signal.throwIfAborted();
-          const committed = this.store.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage);
+          const committed = this.store.applyExecutionCheckpoint(runId, checkpointId, output, cumulativeUsage, refs);
           request.wikiProjectionError = this.store.wikiProjectionError ?? undefined;
           this.board();
           if (!publishedCheckpoints.has(checkpointId)) {
