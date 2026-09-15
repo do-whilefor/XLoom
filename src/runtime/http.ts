@@ -20,7 +20,11 @@ const requestSchema = z.object({
   bodyBase64: z.string().refine(value => Buffer.from(value, "base64").toString("base64") === value, "Use canonical base64").optional(),
   timeoutSeconds: z.number().int().min(1).max(600).default(30),
 }).strict().refine(value => value.body === undefined || value.bodyBase64 === undefined, "Choose body or bodyBase64");
-const batchSchema = z.object({ requests: z.array(requestSchema).min(1).max(16), previewBytes: z.number().int().min(0).max(8000).default(2000) }).strict();
+const batchSchema = z.object({ requests: z.array(requestSchema).min(1).max(16), previewBytes: z.number().int().min(0).max(8000).default(2000),
+  concurrency: z.number().int().min(1).max(4).default(1), independent: z.boolean().default(false),
+}).strict().refine(batch => batch.concurrency === 1 || (batch.independent && batch.requests.every(request =>
+  ["GET", "HEAD"].includes(request.method.toUpperCase()) && request.body === undefined && request.bodyBase64 === undefined)),
+"Concurrent batches require independent=true and only body-free GET/HEAD requests; dependent or mutating work stays sequential");
 type HttpInput = z.infer<typeof requestSchema>;
 
 interface Observation {
@@ -83,7 +87,7 @@ async function observe(input: HttpInput, signal: AbortSignal): Promise<Observati
 export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): AgentTool {
   return {
     ...tool,
-    description: `${tool.description} For HTTP use http:{requests:[{url,method?,headers?,body?,bodyBase64?,timeoutSeconds?}],previewBytes?} instead of command. Requests run in order; responses and exact body bytes are saved automatically. Returned evidence refs/paths can be submitted unchanged. No redirects, cookie sharing or retries. Body previews default to 2000 bytes; read the evidence file for full data.`,
+    description: `${tool.description} For HTTP use http:{requests:[{url,method?,headers?,body?,bodyBase64?,timeoutSeconds?}],previewBytes?,independent?,concurrency?} instead of command. Batch known requests in one call; default sequential, independent=true allows up to 4 concurrent body-free GET/HEAD requests. Exact requests/responses are saved automatically; submit returned evidence refs/paths unchanged. No redirects, cookie sharing or retries. Body previews default to 2000 bytes; read evidence for full data.`,
     parameters: { type: "object", properties: {
       ...(tool.parameters as unknown as { properties: Record<string, unknown> }).properties,
       http: { type: "object", properties: {
@@ -91,6 +95,7 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
           url: { type: "string" }, method: { type: "string" }, headers: { type: "object", additionalProperties: { type: "string" } },
           body: { type: "string" }, bodyBase64: { type: "string" }, timeoutSeconds: { type: "integer", minimum: 1, maximum: 600 },
         }, required: ["url"], additionalProperties: false } }, previewBytes: { type: "integer", minimum: 0, maximum: 8000 },
+        independent: { type: "boolean" }, concurrency: { type: "integer", minimum: 1, maximum: 4 },
       }, required: ["requests"], additionalProperties: false },
     }, additionalProperties: false } as AgentTool["parameters"],
     async execute(id, args, signal, onUpdate) {
@@ -103,10 +108,11 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
       const control = AbortSignal.any([...(signal ? [signal] : []), ...(input.timeout === undefined ? [] : [AbortSignal.timeout(Math.ceil(input.timeout * 1000))])]);
       const directory = join(artifactsDirectory, "http");
       await mkdir(directory, { recursive: true });
-      const results = [];
-      for (const [index, request] of input.http.requests.entries()) {
-        control.throwIfAborted();
+      const results: Awaited<ReturnType<typeof perform>>[] = [];
+      let next = 0, completed = 0, stopped = false;
+      async function perform(index: number, request: HttpInput) {
         const observation = await observe(request, control);
+        if (!observation.complete) stopped = true;
         const ref = `http-${randomUUID()}`;
         const path = join(directory, `${ref}.json`);
         const data = Buffer.from(JSON.stringify(observation, null, 2));
@@ -119,12 +125,25 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
           truncated: body.length > input.http.previewBytes, error: observation.error,
           evidence: { ref, path, description: `${request.method.toUpperCase()} ${request.url}: ${observation.complete ? observation.response?.status : "incomplete transport observation"}` },
           sha256: createHash("sha256").update(data).digest("hex"), bytes: data.length };
-        results.push(result);
-        onUpdate?.({ content: [{ type: "text", text: JSON.stringify({ completed: index + 1, total: input.http.requests.length, result }) }], details: {} });
+        completed++;
+        onUpdate?.({ content: [{ type: "text", text: JSON.stringify({ completed, total: input.http.requests.length, result }) }], details: {} });
         // Keep the saved partial observation visible; do not schedule further work
         // after a transport failure or cancellation whose side effects are unknown.
-        if (!observation.complete) break;
+        return result;
       }
+      const workers = await Promise.allSettled(Array.from({ length: Math.min(input.http.concurrency, input.http.requests.length) }, async () => {
+        while (!stopped && !control.aborted && next < input.http.requests.length) {
+          const index = next++;
+          try { results.push(await perform(index, input.http.requests[index])); }
+          catch (error) { stopped = true; throw error; }
+        }
+      }));
+      // Drain in-flight observations before returning/throwing. A failed request
+      // prevents queued work, but does not erase other already-started reads.
+      const failed = workers.find(worker => worker.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+      if (!results.length) control.throwIfAborted();
+      results.sort((a, b) => a.index - b.index);
       return { content: [{ type: "text", text: JSON.stringify({ results, notStarted: input.http.requests.length - results.length,
         notice: "Application-level HTTP observations; submission and independent review are still required. Incomplete requests were not retried." }) }], details: {} };
     },

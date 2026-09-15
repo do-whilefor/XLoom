@@ -16,25 +16,65 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "xloom-native-http-")); roots.push(root);
   const received: { path: string; method: string; body: Buffer; headers: Record<string, unknown> }[] = [];
+  const completed: string[] = [];
+  let active = 0, peak = 0;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
     received.push({ path: request.url!, method: request.method!, body: Buffer.concat(chunks), headers: request.headers });
     if (request.url === "/slow") return;
+    if (request.url === "/reset") { request.socket.destroy(); return; }
+    if (request.url?.startsWith("/parallel/")) {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, Number(request.url!.split("/").at(-1)) % 2 ? 60 : 30));
+      active--;
+    }
     if (request.url === "/write-failure") await rm(join(root, "http"), { recursive: true, force: true });
     if (request.url === "/large") { response.end(Buffer.alloc(16 * 1024 * 1024 + 1, 65)); return; }
     response.writeHead(request.url === "/redirect" ? 302 : request.url === "/denied" ? 403 : 200,
       { "Set-Cookie": "identity=other", ...(request.url === "/redirect" ? { Location: "/must-not-follow" } : {}) });
     response.end(Buffer.from([0, 255, 65]));
+    completed.push(request.url!);
   });
   servers.push(server); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const exec = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "shell result" }], details: {} });
   const tool = withHttpEvidence({ name: "powershell", label: "powershell", description: "shell", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" } } }, execute: exec } as unknown as AgentTool, root);
   const call = async (args: unknown, signal?: AbortSignal) => JSON.parse((await tool.execute("fixture", args, signal)).content.filter(x => x.type === "text").map(x => x.text).join(""));
-  return { root, url, received, exec, tool, call };
+  return { root, url, received, exec, tool, call, completed, peak: () => peak };
 }
 
 describe("automatic HTTP evidence", () => {
+  it("bounds explicitly independent read batches and returns receipts in request order", async () => {
+    const f = await fixture();
+    const output = await f.call({ http: { independent: true, concurrency: 4,
+      requests: Array.from({ length: 11 }, (_, i) => ({ url: `${f.url}/parallel/${i}` })) } });
+    expect(f.peak()).toBe(4);
+    expect(output.results.map((x: { index: number }) => x.index)).toEqual(Array.from({ length: 11 }, (_, i) => i));
+    expect(await readdir(join(f.root, "http"))).toHaveLength(11);
+  });
+
+  it("keeps sequential batches ordered and rejects unsafe concurrency before any request", async () => {
+    const f = await fixture();
+    for (const http of [
+      { concurrency: 2, requests: [{ url: f.url }] },
+      { concurrency: 2, independent: true, requests: [{ url: f.url }, { url: f.url, method: "POST" }] },
+      { concurrency: 2, independent: true, requests: [{ url: f.url, body: "data" }] },
+    ]) await expect(f.call({ http })).rejects.toThrow("Concurrent batches require");
+    expect(f.received).toHaveLength(0);
+    await f.call({ http: { requests: [1, 2, 3].map(i => ({ url: `${f.url}/parallel/${i}`, method: "POST" })) } });
+    expect(f.peak()).toBe(1); expect(f.completed).toEqual(["/parallel/1", "/parallel/2", "/parallel/3"]);
+  });
+
+  it("drains in-flight read evidence after failure and leaves later requests unstarted", async () => {
+    const f = await fixture();
+    const output = await f.call({ http: { independent: true, concurrency: 2, requests: [
+      { url: `${f.url}/reset` }, { url: `${f.url}/parallel/1` }, { url: `${f.url}/never` },
+    ] } });
+    expect(output.results.map((x: { complete: boolean }) => x.complete)).toEqual([false, true]);
+    expect(output.notStarted).toBe(1); expect(f.received.map(x => x.path).sort()).toEqual(["/parallel/1", "/reset"]);
+    expect(await readdir(join(f.root, "http"))).toHaveLength(2);
+  });
+
   it("records exact sent/received bytes, hashes and ordered HTTP errors without invoking a shell", async () => {
     const f = await fixture();
     const body = Buffer.from([0, 255, 65]);

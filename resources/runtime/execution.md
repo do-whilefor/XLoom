@@ -30,6 +30,15 @@ network work. Evidence write failures stop execution after the affected request.
 Inspect any uncertain side effects before manually retrying. Tunnels, protocol
 upgrades, larger transfers and algorithmic loops can use command mode.
 
+Bundle requests whose inputs are already known into one call. For independent,
+body-free GET/HEAD probes, set `independent: true` and `concurrency` from 2 to 4
+inside `http`. Every other batch remains sequential; concurrent POST requests,
+request bodies or missing independence declarations are rejected before I/O.
+Receipts retain request order even when responses finish in a different order.
+On failure no queued requests start; in-flight reads finish and retain their
+evidence. A GET method alone cannot prove the target has no side effects: declare
+independence only after checking the operation's meaning.
+
 ## Scripted HTTP loops
 
 Use the bundled PowerShell helper for repeated HTTP requests. Dot-source its absolute `httpHelper` path once and create one client per script. Run the script once through `powershell`; keep the request loop inside that process. Python's in-process HTTP clients are also suitable when installed. Do not spawn curl/PowerShell for each request in a large loop.
