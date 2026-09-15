@@ -25,6 +25,8 @@ export interface RetrievalIndex {
   documents: RetrievalDocument[];
   lengths: number[];
   postings: Record<string, [number, number][]>;
+  /** Derived model search expressions, never authoritative document content. */
+  semanticHints?: Record<string, string[]>;
 }
 
 /** Unicode width, identifier components and Chinese bigrams; no embedding/model call. */

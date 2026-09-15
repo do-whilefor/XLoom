@@ -47,6 +47,10 @@ export function withIndexCache<T>(dataDir: string, workspace: string, work: (db:
     mkdirSync(root, { recursive: true });
     const path = join(root, "retrieval.sqlite"), fresh = !existsSync(path);
     if (!fresh && (lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile())) throw new Error("Cache file is unavailable or linked");
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      const sidecar = `${path}${suffix}`;
+      if (existsSync(sidecar) && (lstatSync(sidecar).isSymbolicLink() || !lstatSync(sidecar).isFile())) throw new Error("Cache sidecar is unavailable or linked");
+    }
     const scope = wikiDigest([realpathSync(dataDir), realpathSync(workspace)]);
     if (!fresh) {
       // Inspect identity read-only before allowing any writes to an existing file.

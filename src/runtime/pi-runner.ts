@@ -26,6 +26,7 @@ import { createChromeSession, type ChromeSession } from "./chrome.js";
 import { scheduledTools } from "./execution.js";
 import { submissionTool } from "./submission.js";
 import { disposeHttpTool, withHttpEvidence } from "./http.js";
+import { createRetrievalModel } from "./retrieval-model.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -224,6 +225,11 @@ export class PiRunner implements AgentRunner {
       const submission = submissionTool(request.mode, output => validateText(JSON.stringify(output)));
       const readTool = createWorkspaceReadTool(request.workspace, request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,
         request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
+          semantic: createRetrievalModel(selected, (...args) => mainStream(...args), consumed => {
+            const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
+            usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
+            emit({ type: "usage", mode: request.mode, text: "", usage: added });
+          }, request.id, () => canRequest() && !finalRequest(), redact),
           materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
           onAnnounced: items => { if (request.materials) (request.materialReads ??= []).push(...items); } } : undefined);
       if (request.mode === "execute") executionTools = executeTools(request.workspace, join(request.runDir, "artifacts"));

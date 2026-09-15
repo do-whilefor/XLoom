@@ -74,10 +74,11 @@ export function readVerifiedArchive(evidence: Evidence, dataDir: string, workspa
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false, queryGroups?: QueryGroup[]) {
+export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace: string, query: string, limit = 6, refresh = false, queryGroups?: QueryGroup[], preferredEvidence?: string[]) {
   if (!query.trim() || query.length > 4000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("Use a nonempty query up to 4000 characters and limit 1–20.");
   const groups = compileQueryGroups(query, queryGroups);
   const tokens = [...new Set(groups.flatMap(group => group.alternatives.flatMap(item => item.tokens)))];
+  const poolLimit = preferredEvidence ? 20 : limit;
   if (!tokens.length) throw new Error("Query has no searchable terms");
   return withIndexCache(dataDir, workspace, (db, index) => {
     type Hit = { locator: OriginalLocator; readPath: string; contextReadPath: string; snippet: string; score: number; matchedTerms: string[]; matches?: { groupId: string; expression: string; coverage: string }[] };
@@ -162,13 +163,13 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
               + (queryGroups ? 100 * retainedTerms.length / best.tokens.length : 0);
             candidates[groupIndex]!.push({ locator, readPath: originalReadPath(locator), contextReadPath: originalReadPath({ ...locator, contextBytes: 1024 }), snippet, matchedTerms: retainedTerms, score,
               ...(queryGroups ? { matches: [{ groupId: group.id, expression: best.expression, coverage: retainedTerms.length === best.tokens.length ? "full_expression" : "partial_expression" }] } : {}) });
-            candidates[groupIndex]!.sort(order); if (candidates[groupIndex]!.length > limit) candidates[groupIndex]!.length = limit;
+            candidates[groupIndex]!.sort(order); if (candidates[groupIndex]!.length > poolLimit) candidates[groupIndex]!.length = poolLimit;
           });
         });
         index.verifiedOriginals++; matchedWindows += matches;
         candidates.forEach((items, i) => {
           laneMatches[i] = laneMatches[i]! + counts[i]!;
-          lanes[i]!.push(...items); lanes[i]!.sort(order); if (lanes[i]!.length > limit) lanes[i]!.length = limit;
+          lanes[i]!.push(...items); lanes[i]!.sort(order); if (lanes[i]!.length > poolLimit) lanes[i]!.length = poolLimit;
         });
       } catch (error) { issues.push({ evidenceId: evidence.id, reason: (error as Error).message }); }
     }
@@ -187,6 +188,10 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
         old.matches = [...new Map([...old.matches ?? [], ...hit.matches ?? []].map(match => [match.groupId, match])).values()];
         old.matchedTerms = [...new Set([...old.matchedTerms, ...hit.matchedTerms])];
       }
+    }
+    if (preferredEvidence) {
+      const preference = new Map(preferredEvidence.map((id, i) => [id, i]));
+      for (const lane of lanes) lane.sort((a, b) => (preference.get(a.locator.evidenceId) ?? Infinity) - (preference.get(b.locator.evidenceId) ?? Infinity));
     }
     const valid = interleaveCandidates(lanes.map(lane => lane.filter(hit => !unavailable.has(hit.locator.evidenceId)).map(hit => merged.get(hitKey(hit))!)), hitKey).slice(0, limit);
     // Publish only after all archive scanning/verification. No writer lock is

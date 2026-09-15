@@ -5,6 +5,7 @@ import { createReadTool, detectSupportedImageMimeTypeFromFile } from "@earendil-
 import { createTaskReader, type TaskReadContext } from "../wiki/read.js";
 import { retrievalFeedback } from "../wiki/feedback.js";
 import { assertWikiProjectionReady } from "../wiki/projection.js";
+import { createSemanticTaskReader } from "../wiki/semantic.js";
 
 const maxDirectoryEntries = 200;
 const maxDirectoryBytes = 16 * 1024;
@@ -113,15 +114,17 @@ export function createWorkspaceReadTool(workspace: string, artifactsDirectory?: 
   } });
   const execute = tool.execute;
   const readTask = task && createTaskReader(workspace, task);
+  const readSemantic = task && readTask && createSemanticTaskReader(workspace, task, readTask);
   tool.description = "Read text/images or list immediate directory entries. Files: 2000 lines/50KB. Directories: 200 entries/16KB; no recursion. Use 1-indexed offset/limit to page lines or entries. Verify exact paths; planned files may not exist.";
   if (artifactsDirectory) tool.description += " For this run's artifacts, prefer artifact://<exact relative filename>; artifact:// lists them. This prefix is read-only; writes and evidence submissions use filesystem paths.";
   if (readTask) tool.description += " Read xloom://materials/record/question/search/original/discover paths from task context. search?mode=wiki|originals|combined&query=<encoded query>; discover?consumerId=<ID>. compare?left=<Evidence ID>&right=<Evidence ID>&fields=<encoded JSON dot-path array> compares verified JSON originals; differences are not verdicts. URI parameters control retrieval; offset/limit here apply to filesystem reads only. Wiki files are derived. Follow evidence.originalReadPath and nextReadPath for archive bytes; reading tracks remaining bytes. Delivery is not review.";
+  if (task?.semantic) tool.description += " Add strategy=semantic to search/question for model query expansion and source reranking; plain searches stay lexical. Fallback is reported.";
   tool.execute = async (id, params, signal, onUpdate) => {
     checkAbort(signal);
     if (params.path.startsWith("xloom://")) {
       if (!readTask) throw new Error("Task original retrieval is unavailable outside a research task");
       if (params.offset !== undefined || params.limit !== undefined) throw new Error("Use the xloom URI parameters for retrieval, not filesystem offset/limit");
-      const result = readTask(params.path); checkAbort(signal);
+      const result = await readSemantic!(params.path, signal); checkAbort(signal);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { nativeRetrieval: true, retrievalFeedback: retrievalFeedback(result) } };
     }
     if (artifactsDirectory && params.path.startsWith(artifactPrefix)) {

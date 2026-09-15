@@ -2,7 +2,7 @@
 
 Xloom 在现有研究任务内生成 Wiki，不启动 Webounty 会话、Python 引擎、额外
 Agent、执行工具或 hook。现已包含阅读导航、有来源的作者解释、来源变化提示、
-任务内词法 RAG、原文检索、增量缓存、跨轮资料交接、本地整理／审计及原生能力/链路记录；CVSS 与[观察比较器](observation-comparison.md)也已原生接入。能力组合见 [原生能力与链路](knowledge.md)。
+任务内词法与模型辅助 RAG、原文检索、增量缓存、跨轮资料交接、本地整理／审计及原生能力/链路记录；CVSS 与[观察比较器](observation-comparison.md)也已原生接入。能力组合见 [原生能力与链路](knowledge.md)。
 
 ## 存储与阅读
 

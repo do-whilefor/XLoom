@@ -258,6 +258,14 @@ describe("incremental source projections", () => {
     expect(result.index).toMatchObject({ storage: "memory", added: 1 }); expect(result.hits).toHaveLength(1);
     expect(result.index.fallbackReason).toContain("linked");
   });
+  it.each(["-wal", "-shm", "-journal"])("preserves a non-file SQLite %s sidecar and falls back", suffix => {
+    const { board, root } = fixture(); searchOriginals(board, root, root, "downloadGrant");
+    const directory = join(root, "cache", `retrieval.sqlite${suffix}`); mkdirSync(directory);
+    const file = join(directory, "preserve.txt"); writeFileSync(file, "USER CONTENT");
+    const result = searchOriginals(board, root, root, "downloadGrant");
+    expect(result.index.storage).toBe("memory"); expect(result.complete).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe("USER CONTENT");
+  });
   it.each(["original", "metadata"])("treats damaged %s cache rows as cache failure, not missing source evidence", namespace => {
     const { board, root } = fixture();
     searchOriginals(board, root, root, "downloadGrant"); incrementalRetrievalIndex(board, root, root);

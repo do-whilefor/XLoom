@@ -2,8 +2,11 @@ import type { BoardSnapshot } from "../types.js";
 import { discoverKnowledge } from "../knowledge/discovery.js";
 import { retrieveWiki } from "./retrieval.js";
 import { searchOriginals } from "./originals.js";
-import { refKey, type RetrievalRef } from "./catalog.js";
+import { refKey, type RetrievalIndex, type RetrievalRef } from "./catalog.js";
 import { wikiGenerator } from "./format.js";
+import type { QueryGroup } from "./search-groups.js";
+
+export interface SearchEnhancement { queryGroups?: QueryGroup[]; preferredRefs?: RetrievalRef[]; preferredOriginals?: string[]; index?: RetrievalIndex; semantic?: object }
 
 // Reserve space for createTaskReader's progress diagnostics. Budgets measure compact JSON.
 function limits(limit = 3, budgetChars = 16000) {
@@ -27,19 +30,21 @@ function exhausted(type: string, revision: number, budget: number, refs: Retriev
 
 /** Explicitly selected search modes; original hits carry their current provenance even without a recorded gap. */
 export function searchTask(board: BoardSnapshot, dataDir: string, workspace: string, query: string,
-  options: { mode: string; limit?: number; budgetChars?: number; refresh?: boolean }) {
+  options: { mode: string; limit?: number; budgetChars?: number; refresh?: boolean } & SearchEnhancement) {
   if (!["wiki", "originals", "combined"].includes(options.mode)) throw new Error("Search mode must be wiki, originals or combined");
   if (!query.trim() || query.length > 2048) throw new Error("Search query must contain 1–2048 characters");
-  const { limit, budget } = limits(options.limit, options.budgetChars);
+  const { limit, budget: available } = limits(options.limit, options.budgetChars);
+  const budget = available - (options.semantic ? size(options.semantic) + 80 : 0);
   const base = { generator: wikiGenerator, type: "task_search", evidence: false, boardRevision: board.revision, mode: options.mode, query,
     answerSupport: "not_assessed", notice: "Task-local lexical search. Wiki judgments and source windows are ranked separately. Top-k omissions are reported, not absence. Read originals and preserve source conditions/corrections; retrieval never reviews or resolves a gap." };
-  const originals = options.mode === "wiki" ? undefined : searchOriginals(board, dataDir, workspace, query, limit, options.refresh);
+  const originals = options.mode === "wiki" ? undefined : searchOriginals(board, dataDir, workspace, query, limit, options.refresh, options.queryGroups, options.preferredOriginals);
   const remaining = budget - size({ ...base, originals }) - 1500;
   if (remaining < 1) return exhausted(base.type, board.revision, budget, originals?.hits.map(hit => ({ kind: "evidence", id: hit.locator.evidenceId })));
   const anchors = unique(originals?.hits.flatMap(hit => [{ kind: "evidence" as const, id: hit.locator.evidenceId },
     ...board.facts.filter(fact => fact.evidenceIds.includes(hit.locator.evidenceId)).map(fact => ({ kind: "fact" as const, id: fact.id }))]) ?? []);
   const wiki = retrieveWiki(board, dataDir, workspace, options.mode === "originals" ? "" : query,
-    { anchors, limit: anchors.length + limit, budgetChars: remaining, refresh: options.refresh });
+    { anchors, limit: anchors.length + limit, budgetChars: remaining, refresh: options.refresh,
+      ...(options.mode !== "originals" ? { queryGroups: options.queryGroups, preferredRefs: options.preferredRefs } : {}) }, options.index);
   const result = { ...base, wiki, ...(originals ? { originals } : {}), complete: sourceComplete(wiki) && (originals?.complete ?? true) };
   // Original windows cannot be delivered without their full current source/correction packages.
   if (wiki.budgetDeferredCount || size(result) > budget) return exhausted(base.type, board.revision, budget, [...wiki.deferred, ...anchors, ...wiki.hits.map(hit => hit.ref)]);

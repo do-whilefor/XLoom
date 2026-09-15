@@ -5,7 +5,8 @@ import { retrieveQuestion } from "./questions.js";
 import { planningMaterials } from "./materials.js";
 import { retrieveWiki } from "./retrieval.js";
 import { refKey, retrievalDocuments, type RetrievalRef } from "./catalog.js";
-import { readDiscovery, searchTask } from "./query.js";
+import { readDiscovery, searchTask, type SearchEnhancement } from "./query.js";
+import type { SemanticModel } from "./semantic.js";
 import { createReadingTracker } from "./reading.js";
 import { compareEvidence } from "../observations/read.js";
 import { createSourcePager } from "./source-pages.js";
@@ -13,6 +14,7 @@ import { createSourcePager } from "./source-pages.js";
 export interface TaskReadContext {
   dataDir: string; snapshot: () => BoardSnapshot; materialBaseline?: Record<string, string>;
   onAnnounced?: (items: { key: string; signature: string }[]) => void;
+  semantic?: SemanticModel;
 }
 /** Native read destinations, scoped to the supplied task snapshot. No shell,
  * network, alternate session, or implicit research-state mutation. */
@@ -28,7 +30,8 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
   const progress = <T extends { complete?: boolean }>(url: URL, result: T, board: BoardSnapshot, budget: number) => {
     // Track unsuccessful reads too: repeating an unchanged, undersized request
     // cannot deliver new material. Cache counters are not material changes.
-    const signature = wikiDigest(JSON.parse(JSON.stringify(result, (key, value) => key === "index" && value?.storage ? undefined : value)));
+    const signature = wikiDigest(JSON.parse(JSON.stringify(result, (key, value) => key === "index" && value?.storage ? undefined
+      : key === "semantic" && value?.status ? { status: value.status } : value)));
     const key = `${url.hostname}?${[...url.searchParams].filter(([key]) => key !== "refresh").sort(([a], [b]) => a.localeCompare(b)).map(pair => JSON.stringify(pair)).join("&")}`;
     const repeated = seen.get(key) === signature;
     seen.set(key, signature);
@@ -37,7 +40,7 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     const hinted = { ...result, retrievalProgress };
     return trackReading(JSON.stringify(hinted).length <= budget ? hinted : result, board, budget);
   };
-  return (path: string) => {
+  return (path: string, enhancement: SearchEnhancement = {}) => {
     const url = new URL(path), p = url.searchParams;
     if (url.protocol !== "xloom:" || url.username || url.password || url.port || url.hash || url.pathname && url.pathname !== "/") throw new Error("Invalid xloom read path");
     const allowed = url.hostname === "question" ? ["stepId", "gapId", "query", "limit", "budgetChars", "refresh"]
@@ -104,13 +107,13 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     }
     if (url.hostname === "original") return trackReading(readOriginal(board, context.dataDir, workspace, { evidenceId: required("evidenceId"), sha256: required("sha256"), byteOffset: number("byteOffset") ?? 0, byteLength: number("byteLength"), contextBytes: number("contextBytes") }), board);
     const result = url.hostname === "question" ? retrieveQuestion(board, context.dataDir, workspace, { stepId: required("stepId"), gapId: required("gapId") },
-      { query: p.get("query") ?? undefined, limit: number("limit"), budgetChars: number("budgetChars"), refresh })
+      { query: p.get("query") ?? undefined, limit: number("limit"), budgetChars: number("budgetChars"), refresh, ...enhancement })
       : url.hostname === "discover" ? readDiscovery(board, context.dataDir, workspace,
         { consumerId: p.has("consumerId") ? required("consumerId") : undefined, limit: number("limit"), maxAlternatives: number("maxAlternatives"), budgetChars: number("budgetChars") })
       : p.has("mode") || p.has("budgetChars") ? searchTask(board, context.dataDir, workspace, required("query"),
-        { mode: p.has("mode") ? required("mode") : "originals", limit: number("limit"), budgetChars: number("budgetChars"), refresh })
+        { mode: p.has("mode") ? required("mode") : "originals", limit: number("limit"), budgetChars: number("budgetChars"), refresh, ...enhancement })
       : searchOriginals(board, context.dataDir, workspace, required("query"), number("limit"), refresh);
     const budget = number("budgetChars") ?? (url.hostname === "search" && !p.has("mode") ? Infinity : 16000);
-    return progress(url, result, board, budget);
+    return progress(url, enhancement.semantic ? { ...result, semantic: enhancement.semantic } : result, board, budget);
   };
 }
