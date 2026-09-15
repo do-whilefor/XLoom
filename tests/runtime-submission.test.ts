@@ -2,9 +2,44 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { submissionTool } from "../src/runtime/submission.js";
-import { decisionSchema } from "../src/schema.js";
+import { decisionSchema, executionSchema } from "../src/schema.js";
 
 describe("private proposal repair", () => {
+  it.each(["decide", "metacog", "execute"] as const)("retains missing required %s fields for local repair", async mode => {
+    const submit = submissionTool(mode, value => (mode === "execute" ? executionSchema : decisionSchema).parse(value));
+    const output = mode === "execute" ? { summary: "Retain this execution" } : { steps: [] };
+    const args = validateToolArguments(submit.tool, { type: "toolCall", id: "missing", name: "submit", arguments: { output } });
+    expect(args).toEqual({ output });
+    await expect(submit.tool.execute("missing", args)).rejects.toThrow("Rejected proposal retained");
+    expect(submit.accepted).toBe(false);
+    const repair = mode === "execute" ? { path: "/result", value: "no_progress" } : { path: "/summary", value: "Repaired planning" };
+    await submit.tool.execute("repair", { repair: [repair] });
+    expect(submit.output).toEqual(mode === "execute" ? { ...output, result: "no_progress" } : { ...output, summary: "Repaired planning" });
+  });
+
+  it.each([42, true, null])("preserves invalid summary %j without Pi coercion or removal", async summary => {
+    const submit = submissionTool("decide", value => decisionSchema.parse(value));
+    const output = { summary };
+    const args = validateToolArguments(submit.tool, { type: "toolCall", id: "invalid", name: "submit", arguments: { output } });
+    expect(args).toEqual({ output });
+    await expect(submit.tool.execute("invalid", args)).rejects.toThrow("Rejected proposal retained");
+    expect(submit.accepted).toBe(false);
+    await submit.tool.execute("repair", { repair: [{ path: "/summary", value: "Actual summary" }] });
+    expect(submit.output).toEqual({ summary: "Actual summary" });
+  });
+
+  it("repairs the newest invalid execution instead of an older rejected proposal", async () => {
+    const submit = submissionTool("execute", value => executionSchema.parse(value));
+    const call = async (id: string, arguments_: Record<string, unknown>) => submit.tool.execute(id,
+      validateToolArguments(submit.tool, { type: "toolCall", id, name: "submit", arguments: arguments_ }));
+    await expect(call("old", { output: { summary: "OUTDATED", result: "no_progress", extra: true } })).rejects.toThrow();
+    const newest = { summary: "LATEST observed result", result: "invalid", extra: true };
+    await expect(call("new", { output: newest })).rejects.toThrow();
+    await call("repair", { repair: [{ path: "/result", value: "blocked" }, { path: "/extra", remove: true }] });
+    expect(submit.output).toEqual({ summary: newest.summary, result: "blocked" });
+    expect(newest).toEqual({ summary: "LATEST observed result", result: "invalid", extra: true });
+  });
+
   it("describes the envelope while keeping null optional fields strictly repairable", async () => {
     const submit = submissionTool("decide", value => decisionSchema.parse(value));
     expect(submit.tool.description).toContain('{"output":{...task result...}}');

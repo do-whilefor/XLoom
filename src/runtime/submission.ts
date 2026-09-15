@@ -56,12 +56,13 @@ export function submissionTool(mode: Mode, validate: (output: unknown) => unknow
   const tool: AgentTool = {
     name: "submit", label: "Submit result", executionMode: "sequential",
     description: 'Submit {"output":{...task result...}} after tools finish; summary/result belong inside output. Omit unused optional fields (including conclusion); do not send null. Errors commit nothing and retain the rejected proposal privately. Resubmit output or use {"repair":[{"path":"/field","value":"corrected"}]}; choose one. JSON Pointer repairs: value sets fields/existing array entries; remove:true deletes an existing field/entry (later indices shift). Choose value or remove per repair. The whole proposal is revalidated. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.',
-    // Annotate the Step contract without moving its validation into Pi: an
-    // early rejection would bypass the private proposal retained for repair.
-    // Avoid nested type coercion; the shared validator owns the original values.
+    // Describe task fields without Pi validation/coercion: early rejection
+    // leaves an older repair target in place, while coercion loses original
+    // values. The shared validator checks every field inside execute.
     parameters: { type: "object", properties: { output: { type: "object", description: "Required result envelope for a new proposal; omit only when sending repair. Omit unused optional fields, never null.", properties: {
-      summary: { type: "string" }, ...(mode === "execute" ? { result: { type: "string", enum: ["done", "no_progress", "blocked"] } } : { steps: stepContract }),
-    }, required: ["summary", ...(mode === "execute" ? ["result"] : [])], additionalProperties: true },
+      summary: { description: "Required nonempty string." },
+      ...(mode === "execute" ? { result: { description: "Required string: done, no_progress, or blocked." } } : { steps: stepContract }),
+    }, additionalProperties: true },
     repair: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { path: { type: "string" }, value: {}, remove: { type: "boolean", const: true } }, required: ["path"], oneOf: [{ required: ["value"] }, { required: ["remove"] }], additionalProperties: false } },
     }, additionalProperties: false } as AgentTool["parameters"],
     async execute(_id, args, signal) {

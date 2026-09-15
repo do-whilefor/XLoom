@@ -155,6 +155,28 @@ describe("Pi runtime isolation", () => {
     expect(calls).toBe(2); expect(result.output).toEqual({ summary: "Corrected without inventing facts" });
   });
 
+  it("repairs the newest rejected proposal through Pi without committing an older summary", async () => {
+    const input = await request("execute"); let calls = 0;
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.config.chrome = { enabled: false };
+    const proposals = [
+      { output: { summary: "OUTDATED", result: "no_progress", extra: true } },
+      { output: { summary: "LATEST actual observations", result: "invalid", extra: true } },
+      { repair: [{ path: "/result", value: "blocked" }, { path: "/extra", remove: true }] },
+    ];
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      if (calls) {
+        expect(context.messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "submit", isError: true });
+        expect(JSON.stringify(context.messages.at(-1))).toContain("Rejected proposal retained");
+      }
+      expect(calls).toBeLessThan(proposals.length);
+      return message([{ type: "toolCall", id: `proposal-${calls}`, name: "submit", arguments: proposals[calls++] }], "toolUse");
+    }) }) }).run(input);
+    expect(calls).toBe(3);
+    expect(result.output).toEqual({ summary: "LATEST actual observations", result: "blocked" });
+    expect(JSON.parse(await readFile(join(input.runDir, "output.json"), "utf8")).output).toEqual(result.output);
+  });
+
   it("stops remaining mutation tools after submission while retaining prior completed tools", async () => {
     const input = await request("execute"); let calls = 0;
     await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => {
