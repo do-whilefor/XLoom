@@ -2,12 +2,29 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, Message, Model, Usage as ModelUsage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Message, Model, Usage as ModelUsage } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { calculateContextTokens, estimateTokens, serializeConversation, shouldCompact } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { Usage } from "../types.js";
 
 export const CONTEXT_SUMMARY_MARKER = "[XLOOM PRIVATE CONTEXT SUMMARY — UNVERIFIED]";
+
+/** Use the same complete-context estimate and safety reserve as Pi's provider
+ * adapter. Do not send requests that Pi would clamp to a single output token. */
+export function requireContextCapacity(model: Model<Api>, context: Context, guidance = "Reduce the input or read large material from files in smaller pages."): void {
+  if (Number.isFinite(model.contextWindow) && model.contextWindow > 0
+    && clampMaxTokensToContext(model, context, Number.MAX_SAFE_INTEGER) <= 1) {
+    throw new Error(`Model context capacity exhausted (${model.contextWindow} tokens). ${guidance}`);
+  }
+}
+
+export function requireLengthProgress(message: AssistantMessage | undefined): void {
+  if (message?.stopReason === "length" && !message.content.some(part => part.type === "toolCall"
+    || (part.type === "text" ? part.text.trim() : part.thinking.trim()))) {
+    throw new Error("Model returned an empty length response; automatic continuation stopped because no progress was made. Completed results are retained. Reduce the input or check the model's context/output settings before retrying.");
+  }
+}
 
 /** Retry only provider/network failures; deterministic configuration, auth,
  * context-capacity and cancellation failures require a different intervention.

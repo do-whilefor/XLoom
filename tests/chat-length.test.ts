@@ -60,6 +60,14 @@ async function harness(produce: (context: Context, call: number) => AssistantMes
 }
 
 describe("chat continuation after provider output limits", () => {
+  it.each(([[], [{ type: "text", text: " " }], [{ type: "thinking", thinking: "" }]] as AssistantMessage["content"][]).map(content => ({ content })))(
+    "stops empty length output without spending unlimited requests (%j)", async ({ content }) => {
+      const test = await harness(() => message(content, "length"));
+      test.input.limits.maxTurnsPerRun = null;
+      await expect(test.run()).rejects.toThrow("empty length response");
+      expect(test.seen).toHaveLength(1);
+      expect(test.events.filter(event => event.type === "usage")).toHaveLength(1);
+    });
   it.each(["thinking", "text"] as const)("retains a %s-only length response and streams only the remaining reply", async kind => {
     const first = kind === "thinking" ? message([{ type: "thinking", thinking: "Private fixture reasoning remains unfinished." }], "length") : text("The fixture has ", "length");
     const test = await harness((context, call) => {

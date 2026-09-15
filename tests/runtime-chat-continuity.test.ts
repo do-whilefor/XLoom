@@ -11,7 +11,7 @@ import type { RuntimeEvent } from "../src/types.js";
 
 const model: Model<"openai-completions"> = {
   id: "mock", name: "mock", api: "openai-completions", provider: "test", baseUrl: "https://example.invalid/v1",
-  reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 2400, maxTokens: 1000,
+  reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 24000, maxTokens: 1000,
 };
 const usage: Usage = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, totalTokens: 4,
   cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0, total: 0.02 } };
@@ -44,6 +44,41 @@ async function request() {
 const isSummary = (context: Context) => context.systemPrompt?.startsWith("Summarize the older conversation as private working memory.") ?? false;
 
 describe("durable private chat", () => {
+  it.each([false, true])("rejects oversized input before changing chat or making a request (existing=%s)", async existing => {
+    const { input, directory } = await request();
+    let calls = 0;
+    const session = new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model,
+      streamFn: stream(() => { calls++; return assistant([{ type: "text", text: "Useful prior reply" }]); }) }) });
+    if (existing) await session.send(input);
+    const before = session.history();
+    const bytes = before.file ? await readFile(before.file, "utf8") : undefined;
+    await expect(session.send({ ...input, text: "a".repeat(715000) })).rejects.toThrow("This message was not added");
+    expect(calls).toBe(existing ? 1 : 0);
+    expect(session.history()).toEqual(before);
+    if (before.file) expect(await readFile(before.file, "utf8")).toBe(bytes);
+    await session.send({ ...input, text: "A short follow-up" });
+    expect(calls).toBe(existing ? 2 : 1);
+  });
+
+  it("refuses an old oversized first-message archive without modifying it, and reset restores chat", async () => {
+    const { input, directory } = await request();
+    let calls = 0;
+    const create = () => new ChatSession({ storageDirectory: join(directory, "chats"), resolveModel: async () => ({ model,
+      streamFn: stream(() => { calls++; return assistant([{ type: "text", text: "Fixture" }]); }) }) });
+    const first = create(); await first.send(input);
+    const file = first.history().file!; first.close();
+    const checkpoint = JSON.parse(await readFile(file, "utf8"));
+    checkpoint.messages[0].content = "f".repeat(715000);
+    const poisoned = JSON.stringify(checkpoint); await writeFile(file, poisoned);
+    const second = create();
+    await expect(second.send({ ...input, text: "Continue" })).rejects.toThrow("use /history to inspect it and /new");
+    expect(calls).toBe(1);
+    expect(await readFile(file, "utf8")).toBe(poisoned);
+    second.reset(); await second.send({ ...input, text: "New small input" });
+    expect(calls).toBe(2);
+    expect(second.history().file).not.toBe(file);
+    expect(await readFile(file, "utf8")).toBe(poisoned);
+  });
   it("restores completed tool results after restart without replay, strips private thinking and credentials, and retains cumulative usage", async () => {
     const { input, directory } = await request();
     const storageDirectory = join(directory, "chats");
@@ -135,7 +170,7 @@ describe("chat context maintenance integration", () => {
     const { input } = await request();
     let checking = false, summaries = 0, calls = 0;
     const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(context => {
-      if (!checking) return assistant([{ type: "text", text: "retained observation ".repeat(200) }]);
+      if (!checking) return assistant([{ type: "text", text: "retained observation ".repeat(2000) }]);
       calls++;
       if (isSummary(context)) { summaries++; return assistant([{ type: "text", text: "Earlier observations retained." }]); }
       expect(context.tools).toEqual([]);
@@ -154,7 +189,7 @@ describe("chat context maintenance integration", () => {
 
   it("compacts a continuing tool loop, meters each summary once and retains private history for the next send", async () => {
     const { input, events, directory } = await request();
-    await writeFile(join(directory, "fixture.txt"), "synthetic observation ".repeat(110));
+    await writeFile(join(directory, "fixture.txt"), "synthetic observation ".repeat(1100));
     let requests = 0;
     let summaries = 0;
     const contexts: Context[] = [];
@@ -189,7 +224,7 @@ describe("chat context maintenance integration", () => {
     const { input, directory } = await request();
     const abort = new AbortController();
     input.signal = abort.signal;
-    await writeFile(join(directory, "fixture.txt"), "synthetic evidence ".repeat(160));
+    await writeFile(join(directory, "fixture.txt"), "synthetic evidence ".repeat(1600));
     let requests = 0;
     let summaries = 0;
     const session = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(context => {
@@ -211,7 +246,7 @@ describe("chat context maintenance integration", () => {
   it("does not issue a normal model request after summary usage exhausts an explicit token budget", async () => {
     const { input, directory } = await request();
     input.limits.maxTokens = 100;
-    await writeFile(join(directory, "fixture.txt"), "synthetic evidence ".repeat(160));
+    await writeFile(join(directory, "fixture.txt"), "synthetic evidence ".repeat(1600));
     let requests = 0;
     let summaries = 0;
     const summaryUsage = { ...usage, input: 150, totalTokens: 153 };

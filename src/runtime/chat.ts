@@ -6,7 +6,7 @@ import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.j
 import { createRuntimeForwarder, executeTools, RuntimeRunError } from "./pi-runner.js";
 import { createRunBudget } from "./run-budget.js";
 import { redactCredentials } from "./redaction.js";
-import { createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint } from "./continuity.js";
+import { createContextSummarizer, isTransientModelFailure, loadCheckpoint, prepareContext, recoverableMessages, saveCheckpoint, requireContextCapacity, requireLengthProgress } from "./continuity.js";
 import { ChatArchive } from "./chat-archive.js";
 import { join } from "node:path";
 import { projectDirectory } from "../paths.js";
@@ -103,6 +103,10 @@ export class ChatSession {
       liveSecrets = selected.secrets ?? [];
       rememberSecrets();
       signal.throwIfAborted();
+      const inputMessage = { role: "user" as const, content: [{ type: "text" as const, text: redact(request.text) }], timestamp: Date.now() };
+      // Reject an individually unfit message before selecting/mutating an archive.
+      requireContextCapacity(selected.model, { systemPrompt: chatPrompt, messages: [inputMessage], tools: executeTools(request.workspace) },
+        "This message was not added to chat. Put large material in a file or split the input, then retry.");
       const emit = (event: RuntimeEvent) => request.onEvent({ ...event, text: redact(event.text) });
       const budget = createRunBudget(request.limits, usage, { input: 0, output: 0, cost: 0 }, "chat", signal);
       let modelRequests = 0;
@@ -117,6 +121,7 @@ export class ChatSession {
       };
       const mainStream: StreamFn = (model, context, options) => {
         requireRequest();
+        requireContextCapacity(model, context, "Completed chat history is retained. Use /history to inspect it and /new to start a fresh chat if it cannot be compacted; read large material from files.");
         modelRequests++;
         return selected.streamFn(model, context, options);
       };
@@ -152,6 +157,9 @@ export class ChatSession {
         baseUsage = restored.usage;
         emit({ type: "notice", mode: "chat", text: "已恢复当前聊天上下文；/history 查看保存内容，/new 开始新聊天。工具不会因恢复而重放。" });
       }
+      const priorMessages = this.agent?.state.messages ?? restored?.messages ?? [];
+      if (priorMessages.length) requireContextCapacity(selected.model, { messages: [priorMessages[0] as import("@earendil-works/pi-ai").Message] },
+        "The retained first message is too large to compact. The archive is unchanged: use /history to inspect it and /new to start a fresh chat, then read the material from a file.");
       const pending = new Set<string>();
       const persist = async () => {
         if (!archived || !agent) return;
@@ -220,15 +228,24 @@ export class ChatSession {
       signal.addEventListener("abort", onAbort, { once: true });
       detachAbort = () => signal.removeEventListener("abort", onAbort);
       signal.throwIfAborted();
-      agent.state.messages = await compactMessages(agent.state.messages);
       if (finalRequest()) {
         agent.state.tools = [];
         agent.state.systemPrompt += "\nThis is the final allowed model request. Report only completed results; no tools are available.";
       }
-      await agent.prompt(redact(request.text));
+      // Include the incoming message in compaction. Commit the projection only
+      // after it fits, so a rejected input cannot poison an existing conversation.
+      const candidate = await compactMessages([...agent.state.messages, inputMessage]);
+      requireContextCapacity(selected.model, { systemPrompt: agent.state.systemPrompt, tools: agent.state.tools,
+        messages: candidate as import("@earendil-works/pi-ai").Message[] },
+        "This message was not added to chat. Split the input or use /history and /new if the retained context cannot be compacted.");
+      agent.state.messages = candidate.slice(0, -1);
+      // Compaction itself may have consumed the penultimate allowed request.
+      if (finalRequest()) agent.state.tools = [];
+      await agent.prompt(inputMessage);
       signal.throwIfAborted();
       let recoveredTransient = false;
       while (!agent.state.pendingToolCalls.size) {
+        requireLengthProgress(finalMessage);
         const truncated = finalMessage?.stopReason === "length";
         const transient = !recoveredTransient && isTransientModelFailure(finalMessage);
         if (!truncated && !transient) break;

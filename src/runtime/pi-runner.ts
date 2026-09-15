@@ -11,7 +11,7 @@ import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.j
 import { createRunBudget } from "./run-budget.js";
 import { createCheckedPowerShellTool } from "./powershell.js";
 import { decisionSchema, executionSchema, formatValidationError } from "../schema.js";
-import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure } from "./continuity.js";
+import { createContextSummarizer, prepareContext, saveCheckpoint, loadCheckpoint, isTransientModelFailure, requireContextCapacity, requireLengthProgress } from "./continuity.js";
 import { stageWriter } from "./stage.js";
 import { validateDecisionReferences } from "../loop/references.js";
 import { decisionRepairGuidance, normalizeDecisionInput } from "../loop/decision-input.js";
@@ -255,6 +255,7 @@ export class PiRunner implements AgentRunner {
       const mainStream: StreamFn = (...args) => {
         request.signal.throwIfAborted();
         if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");
+        requireContextCapacity(args[0], args[1]);
         modelRequests++;
         return selected.streamFn(...args);
       };
@@ -353,6 +354,7 @@ export class PiRunner implements AgentRunner {
             continue;
           }
           if (finalMessage?.stopReason !== "length") break;
+          requireLengthProgress(finalMessage);
           if (!canRequest()) throw new Error("Cannot continue a provider length response: an explicitly configured invocation budget is exhausted. Completed results are retained.");
           if (pending.size || agent!.state.pendingToolCalls.size) throw new Error("Cannot continue a length response with unfinished tool calls; inspect their state before resuming.");
           const fragment = protocolText(finalMessage);

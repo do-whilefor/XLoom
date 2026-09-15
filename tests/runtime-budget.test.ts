@@ -101,8 +101,8 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
       }
       if (!context.tools?.length) return answer(kind);
       return message([{ type: "toolCall", id: `read-${call}`, name: "read", arguments: { path: "source.txt" } }], "toolUse");
-    }, { maxTurnsPerRun: 8 }, { ...model, contextWindow: 2400 });
-    await writeFile(join(test.workspace, "source.txt"), "synthetic observation ".repeat(110));
+    }, { maxTurnsPerRun: 8 }, { ...model, contextWindow: 64000 });
+    await writeFile(join(test.workspace, "source.txt"), "synthetic observation ".repeat(2000));
     const usage = await test.run();
     expect(summaries).toBeGreaterThan(0);
     expect(test.seen).toHaveLength(8);

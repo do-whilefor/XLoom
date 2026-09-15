@@ -712,6 +712,25 @@ describe("Pi runtime isolation", () => {
     await expect(runner.run(input)).rejects.toThrow("length");
   });
 
+  it.each(["decide", "execute", "metacog"] as const)("stops empty %s length output with no request cap", async mode => {
+    const input = await request(mode);
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => { calls++; return message([], "length"); }) }) });
+    await expect(runner.run(input)).rejects.toThrow("empty length response");
+    expect(calls).toBe(1);
+    expect(JSON.parse(await readFile(join(input.runDir, "continuation.json"), "utf8")).usage.input).toBe(13);
+    await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a Run whose system/tools leave no model response capacity before calling the provider", async () => {
+    const input = await request("execute"); let calls = 0;
+    const runner = new PiRunner({ resolveModel: async () => ({ model: { ...model, contextWindow: 4096 },
+      streamFn: stream(() => { calls++; return message([{ type: "text", text: "unused" }]); }) }) });
+    await expect(runner.run(input)).rejects.toThrow("context capacity exhausted");
+    expect(calls).toBe(0);
+  });
+
   it.each(["decide", "metacog", "execute"] as const)("continues multiple thinking-only %s length responses without adding a retry or output cap", async mode => {
     const input = await request(mode);
     input.snapshot.config.limits.maxTurnsPerRun = null;
@@ -767,17 +786,17 @@ describe("Pi runtime isolation", () => {
     input.snapshot.config.limits.maxTokens = null;
     const events: RuntimeEvent[] = [];
     input.onEvent = event => events.push(event);
-    const fragments = ['{"summary":"' + "a".repeat(1_000), "b".repeat(1_000), "c".repeat(1_000), '","result":"no_progress"}'];
+    const fragments = ['{"summary":"' + "a".repeat(2_000), "b".repeat(2_000), "c".repeat(2_000), '","result":"no_progress"}'];
     let mainCalls = 0;
     let summaryCalls = 0;
-    const runner = new PiRunner({ resolveModel: async () => ({ model: { ...model, contextWindow: 4_000 }, streamFn: stream(context => {
+    const runner = new PiRunner({ resolveModel: async () => ({ model: { ...model, contextWindow: 36_000 }, streamFn: stream(context => {
       if (context.systemPrompt?.startsWith("Summarize the older conversation")) {
         summaryCalls++;
         return message([{ type: "text", text: "Synthetic fixture was written once; use its completed read. No additional observations." }]);
       }
       mainCalls++;
       if (mainCalls === 1) return message([{ type: "toolCall", id: "fixture-write", name: "write",
-        arguments: { path: "large-fixture.txt", content: "synthetic fixture ".repeat(300) } }], "toolUse");
+        arguments: { path: "large-fixture.txt", content: "synthetic fixture ".repeat(2800) } }], "toolUse");
       if (mainCalls === 2) return message([{ type: "toolCall", id: "fixture-read", name: "read", arguments: { path: "large-fixture.txt" } }], "toolUse");
       if (mainCalls > 3) {
         expect(context.tools).toEqual([]);
@@ -787,7 +806,7 @@ describe("Pi runtime isolation", () => {
       return message([{ type: "text", text: fragments[mainCalls - 3] }], mainCalls < 6 ? "length" : "stop");
     }) }) });
     const result = await runner.run(input);
-    expect(result.output).toEqual({ summary: "a".repeat(1_000) + "b".repeat(1_000) + "c".repeat(1_000), result: "no_progress" });
+    expect(result.output).toEqual({ summary: "a".repeat(2_000) + "b".repeat(2_000) + "c".repeat(2_000), result: "no_progress" });
     expect(summaryCalls).toBeGreaterThan(0);
     expect(events.some(event => event.type === "notice" && event.text.includes("Private context compacted"))).toBe(true);
     expect(events.filter(event => event.type === "tool_start")).toHaveLength(2);
