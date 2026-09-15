@@ -26,7 +26,7 @@ const globalSettingsSchema = projectConfigSchema.pick({ version: true, models: t
 export function workspaceDefaults(goal: string, scope = goal): ProjectConfig {
   const file = path.join(xloomHome(), "settings.json");
   if (!existsSync(file)) return defaultConfig(goal, scope);
-  const settings = globalSettingsSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+  const settings = globalSettingsSchema.safeParse(readConfigJson(file));
   if (!settings.success) throw new Error(`Invalid Xloom global settings: ${file}`);
   return projectConfigSchema.parse({ ...defaultConfig(goal, scope), ...settings.data, goal, scope });
 }
@@ -40,20 +40,22 @@ export function ensureGlobalSettings(config: ProjectConfig): void {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 }
 
-export function loadConfig(path: string): ProjectConfig {
+function readConfigJson(path: string): unknown {
   let source: string;
   try {
     source = readFileSync(path, "utf8");
   } catch (error) {
     throw new Error(`Cannot read xloom configuration at ${path}`, { cause: error });
   }
-  let value: unknown;
   try {
-    value = JSON.parse(source.replace(/^\uFEFF/, ""));
+    return JSON.parse(source.replace(/^\uFEFF/, ""));
   } catch {
     throw new Error(`Invalid JSON in xloom configuration at ${path}`);
   }
-  const parsed = projectConfigSchema.safeParse(value);
+}
+
+export function loadConfig(path: string): ProjectConfig {
+  const parsed = projectConfigSchema.safeParse(readConfigJson(path));
   if (!parsed.success) {
     throw new Error(`Invalid xloom configuration at ${path}: ${formatValidationError(parsed.error)}`);
   }

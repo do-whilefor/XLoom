@@ -88,6 +88,24 @@ afterEach(() => {
 });
 
 describe("command-line entry points", () => {
+  it("initializes a workspace from BOM-prefixed global defaults", () => {
+    const root = workspace(), dataHome = path.join(root, "home");
+    mkdirSync(dataHome);
+    const { version, models, limits } = defaultConfig("unrelated goal");
+    const settings = `\uFEFF${JSON.stringify({ version, models, limits })}`;
+    const globalFile = path.join(dataHome, "settings.json");
+    writeFileSync(globalFile, settings);
+    const result = spawnSync(process.execPath, [tsxFile, cliFile, "init", "--goal", "BOM fixture"], {
+      cwd: root, encoding: "utf8", timeout: 20000, windowsHide: true,
+      env: { ...process.env, XLOOM_HOME: dataHome, PI_OFFLINE: "1" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const file = result.stdout.match(/^Created (.+)\r?$/m)?.[1].trim();
+    expect(file).toBeTruthy();
+    expect(loadConfig(file!)).toMatchObject({ goal: "BOM fixture", models, limits });
+    expect(readFileSync(globalFile, "utf8")).toBe(settings);
+  });
+
   it("controls Chrome without TTY, model credentials, a configured task or browser startup", () => {
     const root = workspace();
     const status = () => JSON.parse(cli(["chrome"], root).stdout);

@@ -106,6 +106,27 @@ describe("user storage and workspace identity", () => {
     atomicJson(path.join(projectDirectory(root), "project.json"), { version: 1, id: "wrong", workspace: root });
     expect(() => ensureProject(root)).toThrow("registry mismatch");
   });
+
+  it.each(["", "\uFEFF"])("loads global defaults with optional UTF-8 BOM (%j) without rewriting settings", prefix => {
+    vi.stubEnv("XLOOM_HOME", fixture());
+    const config = defaultConfig("another task");
+    const { version, models, limits } = config;
+    const file = path.join(xloomHome(), "settings.json");
+    const source = prefix + JSON.stringify({ version, models, limits });
+    writeFileSync(file, source);
+    expect(workspaceDefaults("测试目标")).toMatchObject({ goal: "测试目标", scope: "测试目标", models, limits });
+    expect(readFileSync(file, "utf8")).toBe(source);
+  });
+
+  it("identifies malformed global configuration without exposing its contents", () => {
+    vi.stubEnv("XLOOM_HOME", fixture());
+    const file = path.join(xloomHome(), "settings.json");
+    writeFileSync(file, '\uFEFF{"private-setting-value"');
+    expect(() => workspaceDefaults("test")).toThrow(`Invalid JSON in xloom configuration at ${file}`);
+    expect(() => workspaceDefaults("test")).not.toThrow("private-setting-value");
+    writeFileSync(file, '\uFEFF{"unexpected":"private-setting-value"}');
+    expect(() => workspaceDefaults("test")).toThrow(`Invalid Xloom global settings: ${file}`);
+  });
 });
 
 describe("verified legacy data migration", () => {
