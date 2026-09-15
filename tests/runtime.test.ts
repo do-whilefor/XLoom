@@ -129,6 +129,68 @@ function stream(response: string | ((context: Context) => AssistantMessage), see
 }
 
 describe("Pi runtime isolation", () => {
+  it.each(["submit", "text"])("repairs evidence-only completion through %s without replaying file tools", async route => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.config.chrome = { enabled: false };
+    const artifact = join(input.runDir, "artifacts", "observation.txt");
+    const output = { summary: "Observed fixture response", result: "done", evidence: [{ ref: "e1", path: artifact, description: "Original local fixture" }] };
+    const facts = [{ ref: "f1", description: "Actual fixture value is 314", evidenceRefs: ["e1"] }];
+    const events: RuntimeEvent[] = []; input.onEvent = event => events.push(event);
+    let calls = 0;
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(context => {
+      calls++;
+      if (calls === 1) return message([{ type: "toolCall", id: "original", name: "write", arguments: { path: artifact, content: "value=314" } }], "toolUse");
+      if (calls === 2) return route === "submit"
+        ? message([{ type: "toolCall", id: "incomplete", name: "submit", arguments: { output } }], "toolUse")
+        : message([{ type: "text", text: JSON.stringify(output) }]);
+      expect(calls).toBe(3);
+      expect(JSON.stringify(context.messages.at(-1))).toContain("Evidence files alone do not establish completion");
+      if (route === "submit") return message([{ type: "toolCall", id: "repair", name: "submit", arguments: { repair: [{ path: "/facts", value: facts }] } }], "toolUse");
+      expect(context.tools).toEqual([]);
+      return message([{ type: "text", text: JSON.stringify({ ...output, facts }) }]);
+    }) }) }).run(input);
+    expect(calls).toBe(3);
+    expect(result.output).toEqual({ ...output, facts });
+    expect(await readFile(artifact, "utf8")).toBe("value=314");
+    expect(events.filter(event => event.type === "tool_start" && event.toolName === "write")).toHaveLength(1);
+  });
+
+  it("allows evidence-only partial results without forcing the model to invent facts", async () => {
+    const input = await request("execute");
+    const output = { summary: "Raw observation requires interpretation", result: "no_progress", evidence: [{ ref: "e1", path: join(input.runDir, "artifacts", "raw.txt"), description: "Pending interpretation" }] };
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(JSON.stringify(output)) }) }).run(input);
+    expect(result.output).toEqual(output);
+  });
+
+  it("accepts sourced Wiki work without requiring new facts", async () => {
+    const input = await request("execute");
+    const output = { summary: "Maintain sourced Wiki", result: "done",
+      evidence: [{ ref: "e1", path: join(input.runDir, "artifacts", "raw.txt"), description: "Local fixture" }],
+      wikiPages: [{ id: "WK-fixture", title: "Fixture", blocks: [{ id: "B-source", title: "Source",
+        text: "Uninterpreted fixture observation", sources: [{ kind: "evidence", id: "e1" }] }] }] };
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(JSON.stringify(output)) }) }).run(input);
+    expect(result.output).toEqual(output);
+  });
+
+  it("accepts extra evidence after a committed checkpoint without requiring duplicate facts", async () => {
+    const input = await request("execute");
+    input.snapshot.config.limits.maxTurnsPerRun = null;
+    input.snapshot.config.chrome = { enabled: false };
+    const checkpoint = { id: "first", execution: { summary: "Observation committed", result: "done",
+      facts: [{ ref: "f1", description: "Fixture observed", evidenceRefs: ["E-previous"] }] } };
+    input.onCheckpoint = vi.fn(async () => ({ ...input.snapshot, revision: 2,
+      facts: [{ id: "F-committed", description: "Fixture observed", evidenceIds: ["E-previous"], stepId: input.step!.id }] }));
+    const output = { summary: "Additional raw attachment; facts already committed", result: "done",
+      evidence: [{ ref: "e2", path: join(input.runDir, "artifacts", "extra.txt"), description: "Additional fixture" }] };
+    let calls = 0;
+    const result = await new PiRunner({ resolveModel: async () => ({ model, streamFn: stream(() => ++calls === 1
+      ? message([{ type: "toolCall", id: "checkpoint", name: "write", arguments: { path: stagePath(input), content: checkpoint } }], "toolUse")
+      : message([{ type: "text", text: JSON.stringify(output) }])) }) }).run(input);
+    expect(input.onCheckpoint).toHaveBeenCalledOnce();
+    expect(calls).toBe(2); expect(result.output).toEqual(output);
+  });
+
   it.each(["decide", "metacog", "execute"] as const)("accepts a structured %s proposal in one response and logs actual event times", async mode => {
     const input = await request(mode);
     let calls = 0;

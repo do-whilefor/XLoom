@@ -211,6 +211,12 @@ export class PiRunner implements AgentRunner {
           validateWikiReferences(stage?.snapshot ?? request.snapshot, validated.data);
           validateKnowledgeSubmission(stage?.snapshot ?? request.snapshot, validated.data, request.step?.id);
           validateCvssExecution(stage?.snapshot ?? request.snapshot, validated.data);
+          const output = validated.data;
+          if (output.result === "done" && output.evidence?.length && !stage?.summary
+            && ![output.facts, output.attempts, output.findings, output.wikiPages, output.capabilities,
+              output.chains, output.gaps, output.gapLinks].some(records => records?.length)) {
+            throw new Error("Evidence files alone do not establish completion. Use the existing observations to submit the missing facts or other research records, without replaying tools. If no supported record can be added, set result to no_progress or blocked; do not invent facts. Already committed checkpoint records must not be repeated.");
+          }
           return validated.data;
         }
         const normalized = normalizeDecisionInput(parsed, request.snapshot);

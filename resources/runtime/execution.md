@@ -11,6 +11,12 @@ Repairs run in order on a copy. An invalid path applies none of the batch. A val
 batch is fully revalidated and, if rejected, becomes the next repair candidate.
 Removing a required field still fails validation. Nothing commits until acceptance.
 
+A final `done` proposal with only evidence attachments and no prior checkpoint is
+returned for repair: add supported facts or other research records from the already
+observed results, or use `no_progress`/`blocked`. Do not rerun target operations or
+invent facts to satisfy validation. Wiki-only work and records already committed
+by checkpoints do not require duplicate facts in the final response.
+
 ## PowerShell process
 
 The `powershell` tool parses the supplied command before executing it in the same
