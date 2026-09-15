@@ -14,6 +14,7 @@ import { selectTask } from "../src/workspace.js";
 import type { AgentRunner, LoopEvent, ModelConfig, RuntimeEvent } from "../src/types.js";
 import { wikiStructureFixture } from "../tests/fixtures/wiki-structure.js";
 import { wikiIssues } from "../src/wiki/model.js";
+import { analyzeToolOutcomes } from "./lib/tool-outcomes.js";
 
 const { values } = parseArgs({ options: { live: { type: "boolean" }, output: { type: "string" } }, strict: true });
 if (!values.live) throw new Error("Pass --live to call configured models.");
@@ -60,10 +61,16 @@ const finalChat = () => app!.chatHistory()!.messages.filter(message => message.r
 async function phase(id: string, body: (entry: Record<string, any>, eventStart: number) => Promise<void>) {
   phaseId = id; const entry: Record<string, any> = { id, checks: {} }, start = events.length, requestStart = requests, started = Date.now(); phases.push(entry);
   const timeout = setTimeout(() => { entry.watchdogTriggered = true; app?.pause(); }, 900000);
-  try { await body(entry, start); assert(Object.values(entry.checks).every(Boolean), `Failed checks: ${JSON.stringify(entry.checks)}`); entry.status = "passed"; }
+  try {
+    await body(entry, start);
+    entry.toolOutcomes = analyzeToolOutcomes(events.slice(start));
+    if (id.startsWith("run-")) entry.checks.noUnrecoveredToolErrors = entry.toolOutcomes.unrecoveredErrors === 0;
+    assert(Object.values(entry.checks).every(Boolean), `Failed checks: ${JSON.stringify(entry.checks)}`); entry.status = "passed";
+  }
   catch (error) { entry.status = "failed"; entry.failure = error instanceof Error ? error.message : String(error); throw error; }
   finally {
-    clearTimeout(timeout); Object.assign(entry, { requests: requests - requestStart, durationMs: Date.now() - started, events: events.slice(start), session: app?.getSessionInfo() });
+    clearTimeout(timeout); Object.assign(entry, { requests: requests - requestStart, durationMs: Date.now() - started, events: events.slice(start), session: app?.getSessionInfo(),
+      toolOutcomes: analyzeToolOutcomes(events.slice(start)) });
     // Preserve a report after every phase, even if a later phase is interrupted.
     save();
   }
@@ -96,6 +103,14 @@ try {
       sameArchive: app!.chatHistory()!.file === oldChat, noReplay: toolStarts(runtime(start)).length === 0,
       noResearchState: app!.snapshot().facts.length === 0 };
   });
+  await phase("chat-native-exit-diagnostics", async (entry, start) => {
+    activeRole = "chat";
+    await app!.chat("隔离目录中的工具回归：只调用一次 powershell，原样执行 node -e 'process.exit(7)'; Write-Output 'NEXT_OK' 。不要改写，不要重试或补救，然后如实报告工具的错误与输出。这是故意制造的非零退出。不要使用其他工具。");
+    const seen = runtime(start), calls = toolStarts(seen), results = seen.filter(event => event.type === "tool_end");
+    entry.reply = finalChat(); entry.checks = { once: calls.length === 1 && calls[0].toolName === "powershell",
+      failureVisible: results.length === 1 && results[0].isError === true && results[0].text.includes("last native exit code=7") && results[0].text.includes("NEXT_OK"),
+      chatRecovered: app!.getSessionInfo().status === "idle" && !app!.getSessionInfo().busy };
+  });
   await phase("chat-cancel-and-recover", async entry => {
     activeRole = "chat";
     let cancelled = false;
@@ -126,7 +141,7 @@ try {
     entry.board = board; entry.checks = { completed: board.status === "completed" && board.outcome === "NOT_REPRODUCED", roles: ["decide", "execute", "metacog"].every(role => roles.includes(role as any)),
       persistedEvidence: board.evidence.length > 0 && board.facts.length > 0, observedDenied: JSON.stringify(board.facts).includes("DENIED"),
       archivedInput: board.evidence.some(evidence => readFileSync(join(app!.storagePaths().task!, evidence.path), "utf8").includes(sourceMarker)),
-      noPrivateLeak: !JSON.stringify(board).includes(privateMarker), noToolErrors: !seen.some(event => event.type === "tool_end" && event.isError) };
+      noPrivateLeak: !JSON.stringify(board).includes(privateMarker) };
     completedTask = app!.listTasks().find(task => task.directory === app!.storagePaths().task)!.id;
     entry.nativeOriginalReads = results.filter(result => result.type === "original_read").length;
   });
@@ -163,7 +178,7 @@ try {
       preservedReview: JSON.stringify(page.blocks) === JSON.stringify(oldPage.blocks)
         && JSON.stringify(wikiIssues(board, page)) === JSON.stringify(wikiIssues(before, oldPage)),
       noPrematureCompletion: board.goals[0]!.status === "active" && board.outcome === null,
-      noResearchError: board.status === "paused", noToolErrors: !seen.some(event => event.type === "tool_end" && event.isError),
+      noResearchError: board.status === "paused",
       noRedundantWikiFiles: !readCalls.some(call => /[/\\]wiki[/\\](?:pages[/\\]|index\.md)/.test(call.path)) };
   });
   await phase("idle-run-restart", async entry => {
