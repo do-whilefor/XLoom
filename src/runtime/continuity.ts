@@ -7,6 +7,7 @@ import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-option
 import { calculateContextTokens, estimateTokens, serializeConversation, shouldCompact } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { Usage } from "../types.js";
+import { usageSchema } from "../schema.js";
 
 export const CONTEXT_SUMMARY_MARKER = "[XLOOM PRIVATE CONTEXT SUMMARY — UNVERIFIED]";
 
@@ -263,7 +264,7 @@ const identitySchema = z.object({ role: z.enum(["decide", "execute", "metacog", 
   model: z.string().min(1), api: z.string().min(1), baseUrl: z.string(), workspace: z.string().min(1),
   taskId: z.string().min(1), stepId: z.string().nullable() }).strict();
 export const checkpointSchema = z.object({ version: z.literal(1), identity: identitySchema, messages: z.array(messageSchema),
-  pendingToolCalls: z.array(z.string().min(1)), usage: z.object({ input: nonnegative, output: nonnegative, cost: nonnegative }).strict(),
+  pendingToolCalls: z.array(z.string().min(1)), usage: usageSchema,
   savedAt: z.string().datetime() }).strict();
 
 function canonicalIdentity(identity: CheckpointIdentity): CheckpointIdentity {

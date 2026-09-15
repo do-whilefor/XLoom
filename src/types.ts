@@ -68,7 +68,13 @@ export interface Finding {
   observationReview?: Omit<ObservationChange, "kind"> & { kinds: ObservationChange["kind"][] };
 }
 export interface Hint { id: string; content: string; createdAt: string }
-export interface Usage { input: number; output: number; cost: number }
+export interface Usage {
+  /** All input tokens, including cache reads and cache writes. */
+  input: number; output: number; cost: number;
+  cacheRead?: number;
+  /** Input covered by cache accounting; older saved usage may lack that detail. */
+  cacheInput?: number;
+}
 export interface AttemptProposal {
   /** Stable hypothesis identifier, reused across repeated tests. */
   hypothesis: string; scope: string; identity: string; stateVersion: string; baseline: string; changedVariable: string;

@@ -363,7 +363,7 @@ describe("Pi runtime isolation", () => {
     const input = await request();
     const runner = new PiRunner({ resolveModel: async () => ({ model, streamFn: stream('{"summary":"credential-secret"}'), secrets: ["credential-secret"] }) });
     const result = await runner.run(input);
-    expect(result.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(result.usage).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
     expect(result.output).toEqual({ summary: "[MODEL_CREDENTIAL_REDACTED]" });
     expect(await readFile(join(input.runDir, "events.jsonl"), "utf8")).not.toContain("credential-secret");
     expect(await readFile(join(input.runDir, "output.json"), "utf8")).toContain("MODEL_CREDENTIAL_REDACTED");
@@ -391,7 +391,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const result = await runner.run(input);
     expect(result.output).toMatchObject({ result: "no_progress" });
-    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06, cacheRead: 6, cacheInput: 39 });
     expect(await readFile(join(input.workspace, "observed.txt"), "utf8")).toBe("observed once");
     expect(calls).toBe(3);
   });
@@ -437,7 +437,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const result = await runner.run(input);
     expect(result.output).toEqual(plan("F-observation", "S-3b514130-6a6"));
-    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06, cacheRead: 6, cacheInput: 39 });
     expect(calls).toBe(3);
     expect(events.filter(event => event.type === "tool_start")).toHaveLength(1);
     expect(events.filter(event => event.type === "notice" && event.text.includes("tool-free repair"))).toHaveLength(1);
@@ -489,7 +489,7 @@ describe("Pi runtime isolation", () => {
       const failure = await runner.run(input).catch(error => error);
       expect(failure).toBeInstanceOf(RuntimeRunError);
       expect(failure.message).toContain("reviews[5].pocEvidenceId");
-      expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+      expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04, cacheRead: 4, cacheInput: 26 });
       await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
     }
     expect(seen).toHaveLength(2);
@@ -543,7 +543,7 @@ describe("Pi runtime isolation", () => {
       return message([{ type: "text", text: '{"summary":"Retained prior observation","result":"no_progress"}' }]);
     }) }) });
     const result = await runner.run(input);
-    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06, cacheRead: 6, cacheInput: 39 });
     expect(events.filter(event => event.type === "tool_start")).toHaveLength(1);
     expect(await readFile(join(input.workspace, "once.txt"), "utf8")).toBe("one write");
     const checkpoint = JSON.parse(await readFile(join(input.runDir, "continuation.json"), "utf8"));
@@ -562,7 +562,7 @@ describe("Pi runtime isolation", () => {
     const failure = await runner.run(input).catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
     expect(failure.message).toContain(errorMessage);
-    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04, cacheRead: 4, cacheInput: 26 });
     expect(calls).toBe(2);
     await expect(readFile(join(input.runDir, "output.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -671,6 +671,8 @@ describe("Pi runtime isolation", () => {
     expect(sawSummary).toBe(true);
     expect(events.filter(event => event.type === "tool_start")).toHaveLength(12);
     expect(result.usage.input).toBe((calls + summaries) * 13);
+    expect(result.usage.cacheRead).toBe((calls + summaries) * 2);
+    expect(result.usage.cacheInput).toBe(result.usage.input);
     expect(events.filter(event => event.type === "usage")).toHaveLength(calls + summaries);
   });
 
@@ -706,7 +708,7 @@ describe("Pi runtime isolation", () => {
     expect(starts.map(event => event.blockId?.split(":").slice(-2))).toEqual([["1", "0"], ["2", "0"]]);
     expect(observed.filter(event => event.type === "thinking").map(event => event.text)).toEqual(["First message returned thought.", "Second message returned thought."]);
     expect(observed.filter(event => event.type === "thinking_end").map(event => event.blockId)).toEqual(starts.map(event => event.blockId));
-    expect(result).toEqual({ output: { summary: "ordered result" }, usage: { input: 26, output: 8, cost: 0.04 } });
+    expect(result).toEqual({ output: { summary: "ordered result" }, usage: { input: 26, output: 8, cost: 0.04, cacheRead: 4, cacheInput: 26 } });
   });
 
   it("redacts credentials split across text streaming chunks", async () => {
@@ -789,7 +791,7 @@ describe("Pi runtime isolation", () => {
     const result = await runner.run(input);
     expect(result.output).toEqual(output);
     expect(calls).toBe(5);
-    expect(result.usage).toEqual({ input: 65, output: 20, cost: 0.1 });
+    expect(result.usage).toEqual({ input: 65, output: 20, cost: 0.1, cacheRead: 10, cacheInput: 65 });
     expect(JSON.parse(await readFile(join(input.runDir, "output.json"), "utf8")).output).toEqual(output);
   });
 
@@ -864,7 +866,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const result = await runner.run(input);
     expect(result.output).toEqual({ summary: "Corrected fixture" });
-    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08 });
+    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08, cacheRead: 8, cacheInput: 52 });
     expect(calls).toBe(4);
   });
 
@@ -908,7 +910,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const failure = await runner.run(input).catch(error => error);
     expect(failure.message).toBe("User cancelled continuation");
-    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04 });
+    expect(failure.usage).toEqual({ input: 26, output: 8, cost: 0.04, cacheRead: 4, cacheInput: 26 });
     expect(calls).toBe(2);
   });
 
@@ -923,7 +925,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const result = await runner.run(input);
     expect(result.output).toEqual({ summary: "Resumed fixture review" });
-    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08 });
+    expect(result.usage).toEqual({ input: 52, output: 16, cost: 0.08, cacheRead: 8, cacheInput: 52 });
     expect(calls).toBe(4);
   });
 
@@ -941,7 +943,7 @@ describe("Pi runtime isolation", () => {
     }) }) });
     const result = await runner.run(input);
     expect(result.output).toEqual({ summary: "Retained validated suffix" });
-    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(result.usage).toEqual({ input: 39, output: 12, cost: 0.06, cacheRead: 6, cacheInput: 39 });
     expect(calls).toBe(3);
   });
 
@@ -1108,7 +1110,8 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
   const answer = kind === "chat" ? "The local fixture is verified." : '{"summary":"The local fixture is verified."}';
   const sumUsage = (events: RuntimeEvent[]) => events.filter(event => event.type === "usage").reduce((total, event) => ({
     input: total.input + event.usage!.input, output: total.output + event.usage!.output, cost: total.cost + event.usage!.cost,
-  }), { input: 0, output: 0, cost: 0 });
+    cacheRead: total.cacheRead + event.usage!.cacheRead!, cacheInput: total.cacheInput + event.usage!.cacheInput!,
+  }), { input: 0, output: 0, cost: 0, cacheRead: 0, cacheInput: 0 });
 
   it("identifies one message across interleaved text, thoughts and narration without reusing IDs across rounds", async () => {
     let calls = 0;
@@ -1155,8 +1158,8 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     const completed = await test.completed;
     expect(test.events.filter(event => event.type === "narration")).toEqual([{ type: "narration", mode: kind, messageId: expect.any(String), text: narration }]);
     expect(test.events.filter(event => event.type === "usage")).toEqual([
-      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02 } },
-      { type: "usage", mode: kind, text: "", usage: { input: 27, output: 6, cost: 0.05 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 27, output: 6, cost: 0.05, cacheRead: 3, cacheInput: 27 } },
     ]);
     expect(sumUsage(test.events)).toEqual("usage" in completed ? completed.usage : completed);
     expect(test.events.filter(event => event.type === "tool_start")).toHaveLength(2);
@@ -1233,8 +1236,8 @@ describe.each(["chat", "decide"] as const)("completed-message narration and repo
     const failure = await test.completed.catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
     expect(test.events.filter(event => event.type === "usage")).toEqual([
-      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02 } },
-      { type: "usage", mode: kind, text: "", usage: { input: 12, output: 1, cost: 0.03 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 } },
+      { type: "usage", mode: kind, text: "", usage: { input: 12, output: 1, cost: 0.03, cacheRead: 2, cacheInput: 12 } },
     ]);
     expect(sumUsage(test.events)).toEqual(failure.usage);
     expect(test.events.filter(event => event.type === "narration")).toEqual([]);
@@ -1438,8 +1441,8 @@ describe("private Pi chat session", () => {
       resolveModel: async () => { resolves++; return { model, streamFn: stream("A natural language reply, not JSON.", seen) }; },
       createAgent: options => { agents.push(options); return new Agent(options); },
     });
-    expect(await session.send(input)).toEqual({ input: 13, output: 4, cost: 0.02 });
-    expect(await session.send({ ...input, text: "second message" })).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(await session.send(input)).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
+    expect(await session.send({ ...input, text: "second message" })).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
     expect(resolves).toBe(2);
     expect(agents).toHaveLength(1);
     expect(agents[0].initialState?.tools?.map(tool => tool.name)).toEqual(["read", "write", "edit", "powershell", "chrome"]);
@@ -1467,7 +1470,7 @@ describe("private Pi chat session", () => {
       expect(JSON.stringify(context.messages.at(-1))).toContain("chat-only fixture");
       return message([{ type: "text", text: "The fixture is written and verified." }]);
     }) }) });
-    expect(await session.send(input)).toEqual({ input: 39, output: 12, cost: 0.06 });
+    expect(await session.send(input)).toEqual({ input: 39, output: 12, cost: 0.06, cacheRead: 6, cacheInput: 39 });
     expect(await readFile(join(input.workspace, "chat-fixture.txt"), "utf8")).toBe("chat-only fixture");
     expect(events.filter(event => event.type === "tool_end").map(event => [event.mode, event.toolName])).toEqual([["chat", "write"], ["chat", "read"]]);
     await expect(readFile(join(input.workspace, "state", "blackboard.md"))).rejects.toThrow();
@@ -1534,7 +1537,7 @@ describe("private Pi chat session", () => {
     if (kind === "timeout") expect(failure.message).toContain("timed out");
     expect(didAbort).toBe(true);
     session.reset();
-    expect(await session.send({ ...input, signal: new AbortController().signal, limits: { ...input.limits, stepTimeoutSeconds: 60 } })).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(await session.send({ ...input, signal: new AbortController().signal, limits: { ...input.limits, stepTimeoutSeconds: 60 } })).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
   });
 
   it("keeps an unlimited chat reply active beyond three minutes without a timeout and still accepts cancellation", async () => {
@@ -1567,7 +1570,7 @@ describe("private Pi chat session", () => {
       const failure = await active;
       expect(failure).toBeInstanceOf(RuntimeRunError);
       expect(failure.message).toContain("User paused the long reply");
-      expect(failure.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+      expect(failure.usage).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
       expect(providerSignal?.aborted).toBe(true);
     } finally {
       control.abort();
@@ -1605,7 +1608,7 @@ describe("private Pi chat session", () => {
     const error = await session.send(input).catch(error => error);
     expect(error).toBeInstanceOf(RuntimeRunError);
     expect(error.message).toContain("budget reached");
-    expect(error.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(error.usage).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
     expect(calls).toBe(1);
   });
 
@@ -1643,6 +1646,6 @@ describe("private Pi chat session", () => {
     const failed = new ChatSession({ resolveModel: async () => ({ model, streamFn: stream(() => ({ ...message([], "error"), errorMessage: "Provider rejected chat-explicit-test-key" })) }) });
     const providerError = await failed.send(input).catch(error => error);
     expect(providerError.message).toBe("Provider rejected [MODEL_CREDENTIAL_REDACTED]");
-    expect(providerError.usage).toEqual({ input: 13, output: 4, cost: 0.02 });
+    expect(providerError.usage).toEqual({ input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 });
   });
 });

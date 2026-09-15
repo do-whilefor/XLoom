@@ -9,6 +9,7 @@ import { ChatSession, type ChatRequest } from "./runtime/chat.js";
 import { PiRunner } from "./runtime/pi-runner.js";
 import { SettingsService, type ModelDisplayInfo } from "./runtime/settings.js";
 import { projectConfigSchema, usageSchema } from "./schema.js";
+import { addUsage } from "./usage.js";
 import { currentTaskId, listTasks, readSavedBoard, selectTask, taskDirectory, WorkspaceLock } from "./workspace.js";
 import { ensureProject, projectDirectory, xloomHome } from "./paths.js";
 import type { AgentRole, AgentRunner, BoardSnapshot, LoopEvent, ModelConfig, ProjectConfig, Usage } from "./types.js";
@@ -131,7 +132,7 @@ export class AppController {
   private addChatUsage(value: unknown): void {
     if (this.chatSession.getUsage) { this.chatUsage = this.chatSession.getUsage(); return; }
     const result = usageSchema.safeParse(value);
-    if (result.success) { this.chatUsage.input += result.data.input; this.chatUsage.output += result.data.output; this.chatUsage.cost += result.data.cost; }
+    if (result.success) addUsage(this.chatUsage, result.data);
   }
   chat(text: string): Promise<void> {
     if (!text.trim()) return Promise.resolve();

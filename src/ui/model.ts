@@ -7,6 +7,8 @@ import { cvssIssues } from "../scoring/cvss.js";
 import { progressNotice, protocolFailure } from "./diagnostics.js";
 import { materialFeedback } from "../wiki/feedback.js";
 import type { MaterialDelivery } from "../wiki/materials.js";
+import { addUsage, cacheInput } from "../usage.js";
+import { usageSchema } from "../schema.js";
 
 export type ModelRole = "all" | "chat" | "decide" | "execute";
 export type SettingsCommand = "model" | "apikey" | "login" | "logout";
@@ -56,6 +58,7 @@ export const HELP = [
   "Alt+↑/↓ 多行光标移动 · Ctrl+P/N 也可切换历史输入",
   "Ctrl+C：有内容先清空；空输入框 2 秒内连续按两次退出（不会先暂停）",
   "选中即复制；Ctrl+Shift+C / Ctrl+Insert 复制，Ctrl+C 不再用于复制",
+  "底部 token：I 输入（含缓存）· O 输出 · C 缓存命中 · H 命中率；* 表示仅统计有缓存明细的输入，— 表示未知",
   "Ctrl+Shift+C / Ctrl+Insert 复制选择或输入 · Ctrl+V / Shift+Insert / 右键粘贴",
   "应用剪贴板粘贴不会自动提交；终端原生粘贴需支持括号粘贴协议",
   "滚轮 / PageUp / PageDown 滚动会话 · End 回到底部并恢复跟随 · Ctrl+Shift+F 搜索",
@@ -79,17 +82,28 @@ export function fitLines(value: string, width: number): string[] {
   return wrapTextWithAnsi(clean, width).map((line) => truncateToWidth(line, width, ""));
 }
 
-export function statusLine(board: BoardSnapshot, session?: SessionInfo, pendingTokens = 0, width = Infinity): string {
+export function statusLine(board: BoardSnapshot, session?: SessionInfo, pending: Usage = { input: 0, output: 0, cost: 0 }, width = Infinity): string {
   const chat = session?.mode === "chat";
-  const usage = chat ? session.usage : board.usage;
-  const tokens = `${((usage?.input ?? 0) + (usage?.output ?? 0) + pendingTokens).toLocaleString("en-US")} tokens`;
+  const usage = addUsage({ ...(chat ? session.usage : board.usage) ?? { input: 0, output: 0, cost: 0 } }, pending);
+  const coverage = cacheInput(usage), partial = coverage > 0 && coverage < usage.input ? "*" : "";
+  const count = (value: number, small: boolean) => value.toLocaleString("en-US", small ? { notation: "compact", maximumFractionDigits: 1 } : {});
+  const tokens = (small: boolean) => [
+    `I${small ? "" : " "}${count(usage.input, small)}`,
+    `O${small ? "" : " "}${count(usage.output, small)}`,
+    `C${small ? "" : " "}${coverage === 0 && usage.input > 0 ? "—" : count(usage.cacheRead ?? 0, small) + partial}`,
+    `H${small ? "" : " "}${coverage > 0 ? `${(100 * (usage.cacheRead ?? 0) / coverage).toFixed(small ? 0 : 1)}%${partial}` : "—"}`,
+  ].join(small ? " " : " · ");
   const status = chat ? session.status ?? (session.busy ? "running" : "idle") : board.status;
-  const full = chat ? `chat · ${status} · ${compact(session.model, 120)} · ${tokens}`
-    : `${session ? "run · " : ""}${status} · r${board.revision} · step ${board.completedSteps} · ${tokens}${board.outcome ? ` · ${board.outcome}` : ""}`;
+  const full = chat ? `chat · ${status} · ${compact(session.model, 120)} · ${tokens(false)}`
+    : `${session ? "run · " : ""}${status} · r${board.revision} · step ${board.completedSteps} · ${tokens(false)}${board.outcome ? ` · ${board.outcome}` : ""}`;
   // Model names and revision metadata must not push token accounting off-screen.
   if (visibleWidth(full) <= width) return full;
-  const short = `${session ? `${session.mode} · ` : ""}${status} · ${tokens}`;
-  return visibleWidth(short) <= width ? short : tokens;
+  for (const small of [false, true]) {
+    const short = `${session ? `${session.mode} · ` : ""}${status} · ${tokens(small)}`;
+    if (visibleWidth(short) <= width) return short;
+    if (visibleWidth(tokens(small)) <= width) return tokens(small);
+  }
+  return truncateToWidth(tokens(true), Math.max(0, width), "");
 }
 
 export function formatBoard(board: BoardSnapshot): string {
@@ -159,12 +173,13 @@ export class EventFeed {
   private pricingNoticeShown = false;
   private work?: FeedEntry;
   private stream?: FeedEntry;
-  private pendingTokens = 0;
+  private pendingUsage: Usage = { input: 0, output: 0, cost: 0 };
   constructor(private readonly maxEntries = 160, private readonly maxText = 3200, private readonly now = Date.now) {}
   get pricingUnknown(): boolean { return this.pricingNoticeShown; }
   get working(): boolean { return this.work !== undefined; }
-  get uncommittedTokens(): number { return this.pendingTokens; }
-  usageCommitted(): void { this.pendingTokens = 0; }
+  get uncommittedTokens(): number { return this.pendingUsage.input + this.pendingUsage.output; }
+  get uncommittedUsage(): Usage { return { ...this.pendingUsage }; }
+  usageCommitted(): void { this.pendingUsage = { input: 0, output: 0, cost: 0 }; }
 
   beginWork(): void {
     if (this.work) return;
@@ -263,14 +278,10 @@ export class EventFeed {
   runtime(event: RuntimeEvent): void {
     const label = roleLabel(event.mode);
     if (event.type === "usage") {
-      const input = event.usage?.input;
-      const output = event.usage?.output;
-      if (typeof input === "number" && typeof output === "number" && Number.isFinite(input) && Number.isFinite(output) && input >= 0 && output >= 0) {
-        const tokens = input + output;
-        if (Number.isFinite(tokens)) {
-          this.pendingTokens += tokens;
-          if (this.work) this.work.tokens = (this.work.tokens ?? 0) + tokens;
-        }
+      const parsed = usageSchema.safeParse(event.usage);
+      if (parsed.success) {
+        addUsage(this.pendingUsage, parsed.data);
+        if (this.work) this.work.tokens = (this.work.tokens ?? 0) + parsed.data.input + parsed.data.output;
       }
     } else if (event.type === "narration") {
       this.endThinking();

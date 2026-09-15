@@ -38,6 +38,14 @@ function setup(options: AppOptions = {}, describeModel?: NonNullable<AppOptions[
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
 describe("saved task navigation", () => {
+  it("retains cache usage when an injected chat implementation returns per-reply totals", async () => {
+    const chat = { send: async () => ({ input: 100, output: 10, cost: 0, cacheRead: 75, cacheInput: 100 }), reset() {} };
+    const { app } = setup({ chat });
+    await app.chat("First local fixture reply");
+    await app.chat("Second local fixture reply");
+    expect(app.getSessionInfo().usage).toEqual({ input: 200, output: 20, cost: 0, cacheRead: 150, cacheInput: 200 });
+  });
+
   it("passes Chrome configuration into Chat and keeps explicit disconnect state across reset and application close", async () => {
     const test = setup(); test.config.chrome = { enabled: false, channel: "beta" };
     await test.app.close();

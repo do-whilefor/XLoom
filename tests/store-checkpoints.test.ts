@@ -52,6 +52,29 @@ afterEach(() => {
 });
 
 describe("durable execution checkpoints", () => {
+  it("persists cache counts once across checkpoints, failure and reopen alongside old usage", () => {
+    const store = open();
+    store.setStatus("running", "Historical usage fixture");
+    store.beginRun("legacy-usage", "decide");
+    store.applyDecision("legacy-usage", { summary: "Old usage has no cache breakdown" }, usage);
+    const { runId, artifacts } = claim(store), result = output(artifacts);
+    const first = { input: 100, output: 10, cost: 0.1, cacheRead: 60, cacheInput: 100 };
+    const final = { input: 200, output: 20, cost: 0.2, cacheRead: 140, cacheInput: 200 };
+    const checkpoint = store.applyExecutionCheckpoint(runId, "cache-first", result, first);
+    expect(checkpoint.usage).toMatchObject({ input: 110, output: 15, cacheRead: 60, cacheInput: 100 });
+    expect(store.applyExecutionCheckpoint(runId, "cache-first", result, first)).toEqual(checkpoint);
+    expect(() => store.applyExecutionCheckpoint(runId, "cache-decreasing", result, { ...final, cacheRead: 50 })).toThrow(/cache usage must be cumulative/);
+    expect(store.snapshot()).toEqual(checkpoint);
+    store.applyExecutionCheckpoint(runId, "cache-final", result, final);
+    // An interrupted call can return an older partial counter; never subtract a durable checkpoint.
+    store.failRun(runId, "Synthetic interruption", first);
+    const expected = store.snapshot().usage;
+    expect(expected).toMatchObject({ input: 210, output: 25, cacheRead: 140, cacheInput: 200 });
+    const root = store.workspace;
+    store.close();
+    expect(open(root).snapshot().usage).toEqual(expected);
+  });
+
   it("returns durable alias mappings for deduplicated records and idempotent deliveries", () => {
     const store = open(), { runId, artifacts } = claim(store);
     const result = output(artifacts), first: Partial<ExecutionRefs> = {};

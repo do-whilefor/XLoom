@@ -20,6 +20,7 @@ import { applyGapDecision, applyGapRecords, gapQueue } from "./knowledge/gaps.js
 import { assessCvss, cvssIssues } from "./scoring/cvss.js";
 import type { BoardSnapshot, Decision, Evidence, Execution, Mode, OuterLoopTrigger, Outcome, ProjectConfig, RunStatus, Step, Usage } from "./types.js";
 import type { ExecutionRefs } from "./types.js";
+import { addUsage, cacheInput } from "./usage.js";
 
 export const marker = "<!-- xloom generated blackboard; SQLite is authoritative -->";
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cost: 0 });
@@ -219,10 +220,20 @@ export class BlackboardStore {
     if (strict) assert(cumulativeUsage.input >= current.usage.input && cumulativeUsage.output >= current.usage.output && cumulativeUsage.cost + Number.EPSILON >= current.usage.cost,
       "Checkpoint usage must be cumulative and nondecreasing.");
     const accounted: Usage = { input: 0, output: 0, cost: 0 };
+    const delta: Usage = { input: 0, output: 0, cost: 0 };
     for (const field of ["input", "output", "cost"] as const) {
       accounted[field] = Math.max(current.usage[field], cumulativeUsage[field]);
-      board.usage[field] += accounted[field] - current.usage[field];
+      delta[field] = accounted[field] - current.usage[field];
     }
+    if (current.usage.cacheRead !== undefined || cumulativeUsage.cacheRead !== undefined) {
+      if (strict) assert((cumulativeUsage.cacheRead ?? 0) >= (current.usage.cacheRead ?? 0)
+        && cacheInput(cumulativeUsage) >= cacheInput(current.usage), "Checkpoint cache usage must be cumulative and nondecreasing.");
+      accounted.cacheRead = Math.max(current.usage.cacheRead ?? 0, cumulativeUsage.cacheRead ?? 0);
+      accounted.cacheInput = Math.max(cacheInput(current.usage), cacheInput(cumulativeUsage));
+      delta.cacheRead = accounted.cacheRead - (current.usage.cacheRead ?? 0);
+      delta.cacheInput = accounted.cacheInput - cacheInput(current.usage);
+    }
+    addUsage(board.usage, delta);
     this.db.prepare("INSERT INTO run_progress (runId,usage,progressed) VALUES (?,?,?) ON CONFLICT(runId) DO UPDATE SET usage=excluded.usage")
       .run(runId, JSON.stringify(accounted), Number(current.progressed));
   }

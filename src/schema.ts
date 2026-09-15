@@ -67,7 +67,11 @@ export const usageSchema = z.object({
   input: z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   output: z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   cost: z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER),
-}).strict();
+  cacheRead: z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  cacheInput: z.number().finite().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict().refine(value => (value.cacheInput === undefined || value.cacheRead !== undefined)
+  && (value.cacheRead ?? 0) <= (value.cacheInput ?? value.input)
+  && (value.cacheInput ?? 0) <= value.input, "Cache read tokens must be within their measured input coverage.");
 
 export const combinationSchema = z.object({
   requires: refs.min(1),

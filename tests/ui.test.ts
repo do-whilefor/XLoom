@@ -105,7 +105,7 @@ describe("TUI formatting", () => {
     board.evidence[0] = { ...board.evidence[0]!, path: "evidence/archive.bin", pathBase: "task" };
     expect(formatBoard(board)).toContain("e1 [任务目录] evidence/archive.bin");
     expect(text).toContain("next: 验证影响");
-    expect(statusLine(board)).toContain("180 tokens");
+    expect(statusLine(board)).toContain("I 100 · O 80");
     expect(statusLine(board)).toContain("step 1");
     expect(statusLine(board)).not.toMatch(/step \d+\//);
   });
@@ -291,8 +291,8 @@ describe("response timeline model", () => {
     expect(formatRunError(new Error("Request timed out."))).not.toMatch(/API Key|密钥|180|已修复/);
     expect(formatRunError(new Error("Chat response timed out; tool side effects may remain."))).toContain("本地时间限制");
     expect(formatRunError(new Error("other failure"))).toBe("other failure");
-    expect(statusLine(snapshot(), undefined, 20)).toContain("200 tokens");
-    expect(statusLine(snapshot(), undefined, 20)).not.toMatch(/\$|费用/);
+    expect(statusLine(snapshot(), undefined, { input: 15, output: 5, cost: 0 })).toContain("I 115 · O 85");
+    expect(statusLine(snapshot(), undefined, { input: 15, output: 5, cost: 0 })).not.toMatch(/\$|费用/);
   });
 
   it("moves only actual pre-tool narration ahead of its thought summary without duplication", () => {
@@ -346,23 +346,39 @@ describe("response timeline model", () => {
   });
 
   it("keeps token accounting visible when long model names or narrow terminals hide metadata", () => {
-    const info = { mode: "chat" as const, busy: true, model: "provider/" + "long-model-name".repeat(10), usage: { input: 11000, output: 2000, cost: 4 } };
-    expect(statusLine(snapshot(), info, 45, 45)).toBe("chat · running · 13,045 tokens");
-    expect(statusLine(snapshot(), info, 45, 15)).toBe("13,045 tokens");
-    expect(statusLine(snapshot(), undefined, 20, 30)).toBe("idle · 200 tokens");
-    expect(statusLine(snapshot(), info, 45)).toContain("long-model-name");
+    const info = { mode: "chat" as const, busy: true, model: "provider/" + "long-model-name".repeat(10), usage: { input: 11000, output: 2000, cost: 4, cacheRead: 8800 } };
+    const pending = { input: 40, output: 5, cost: 0, cacheRead: 32 };
+    expect(statusLine(snapshot(), info, pending, 48)).toBe("I 11,040 · O 2,005 · C 8,832 · H 80.0%");
+    expect(statusLine(snapshot(), info, pending, 26)).toBe("I11K O2K C8.8K H80%");
+    expect(statusLine(snapshot(), undefined, { input: 15, output: 5, cost: 0 }, 30)).toBe("I 115 · O 85 · C — · H —");
+    expect(statusLine(snapshot(), info, pending)).toContain("long-model-name");
+    for (const width of [0, 1, 12, 20, 40, 80]) expect(visibleWidth(statusLine(snapshot(), info, pending, width))).toBeLessThanOrEqual(width);
+  });
+
+  it("distinguishes unavailable historical cache counts, partial coverage and measured misses", () => {
+    const board = snapshot();
+    expect(statusLine(board)).toContain("I 100 · O 80 · C — · H —");
+    expect(statusLine(board, undefined, { input: 0, output: 0, cost: 0, cacheRead: 0, cacheInput: 0 })).toContain("C — · H —");
+    const pending = { input: 200, output: 10, cost: 0, cacheRead: 150, cacheInput: 200 };
+    expect(statusLine(board, undefined, pending)).toContain("I 300 · O 90 · C 150* · H 75.0%*");
+    board.usage = { input: 200, output: 10, cost: 0, cacheRead: 0, cacheInput: 200 };
+    expect(statusLine(board)).toContain("C 0 · H 0.0%");
+    board.usage = { input: 0, output: 0, cost: 0 };
+    expect(statusLine(board)).toContain("I 0 · O 0 · C 0 · H —");
   });
 
   it("counts reported usage live without creating tool entries or double-counting committed usage", () => {
     const feed = new EventFeed();
     feed.beginWork();
-    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 100, output: 25, cost: 1 } });
-    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 120, output: 30, cost: 2 } });
+    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 100, output: 25, cost: 1, cacheRead: 80 } });
+    feed.runtime({ type: "usage", mode: "chat", text: "", usage: { input: 120, output: 30, cost: 2, cacheRead: 100 } });
     expect(feed.uncommittedTokens).toBe(275);
+    expect(feed.uncommittedUsage).toEqual({ input: 220, output: 55, cost: 3, cacheRead: 180, cacheInput: 220 });
     expect(feed.entries).toHaveLength(1);
     expect(feed.entries[0]!.tokens).toBe(275);
     feed.usageCommitted();
     expect(feed.uncommittedTokens).toBe(0);
+    expect(feed.uncommittedUsage).toEqual({ input: 0, output: 0, cost: 0 });
     expect(feed.entries[0]!.tokens).toBe(275);
     feed.finishWork("done");
     feed.beginWork();

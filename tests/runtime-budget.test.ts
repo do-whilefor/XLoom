@@ -13,8 +13,8 @@ const model: Model<"openai-completions"> = {
   reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 1000,
 };
 const directories: string[] = [];
-const once: Usage = { input: 13, output: 4, cost: 0.02 };
-const twice: Usage = { input: 26, output: 8, cost: 0.04 };
+const once: Usage = { input: 13, output: 4, cost: 0.02, cacheRead: 2, cacheInput: 13 };
+const twice: Usage = { input: 26, output: 8, cost: 0.04, cacheRead: 4, cacheInput: 26 };
 const fixture = "Synthetic local fixture; no external target or network request.";
 
 afterEach(async () => {
@@ -120,7 +120,7 @@ describe.each(["chat", "execute", "decide"] as const)("reserved reporting turn i
       return call <= 14 ? fixtureTool(kind, `fixture-${call}.txt`, fixture, `fixture-${call}`) : answer(kind);
     }, { maxTurnsPerRun: null, maxTokens: null, maxCost: null });
     test.input.snapshot.usage = { input: 1_000_000_000, output: 1_000_000_000, cost: 0 };
-    expect(await test.run()).toEqual({ input: once.input * 15, output: once.output * 15, cost: expect.closeTo(once.cost * 15) });
+    expect(await test.run()).toEqual({ input: once.input * 15, output: once.output * 15, cost: expect.closeTo(once.cost * 15), cacheRead: 30, cacheInput: 195 });
     expect(test.seen).toHaveLength(15);
     expect(test.events.filter(event => event.type === "tool_end" && !event.isError)).toHaveLength(14);
     expect(await readFile(observedFixture(kind, test.workspace, "fixture-14.txt"), "utf8")).toBe(fixture);

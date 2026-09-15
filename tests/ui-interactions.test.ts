@@ -81,7 +81,7 @@ describe("TUI layout and input history", () => {
     expect(screen).toContain("test/test");
     expect(screen).toContain(fixtureWorkspace);
     expect(screen).toContain("idle");
-    expect(screen).toContain("180 tokens");
+    expect(screen).toContain("I 100 · O 80");
     expect(screen).toContain("step 1");
     expect(screen).not.toMatch(/step \d+\//);
     expect(screen).not.toContain("双 Agent");
@@ -287,7 +287,7 @@ describe("TUI slash candidates and compact transcript", () => {
     const screen = plainText(app.terminal.output);
     expect(screen).not.toContain("当前端点未提供定价");
     expect(screen).not.toMatch(/费用|\$/);
-    expect(screen).toContain("180 tokens");
+    expect(screen).toContain("I 100 · O 80");
     expect(screen).toContain("File not found");
     app.terminal.input("\x0f");
     app.terminal.output = "";

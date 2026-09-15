@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Agent, type AgentMessage, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ModelConfig, ProjectConfig, RuntimeEvent, Usage } from "../types.js";
+import { addUsage, modelUsage } from "../usage.js";
 import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.js";
 import { createRuntimeForwarder, executeTools, RuntimeRunError } from "./pi-runner.js";
 import { createRunBudget } from "./run-budget.js";
@@ -127,11 +128,8 @@ export class ChatSession {
       };
       forward = createRuntimeForwarder("chat", emit, redact, rememberSecrets, true);
       const summarize = createContextSummarizer(mainStream, providerUsage => {
-        const summaryUsage = { input: providerUsage.input + providerUsage.cacheRead + providerUsage.cacheWrite,
-          output: providerUsage.output, cost: providerUsage.cost.total };
-        usage.input += summaryUsage.input;
-        usage.output += summaryUsage.output;
-        usage.cost += summaryUsage.cost;
+        const summaryUsage = modelUsage(providerUsage);
+        addUsage(usage, summaryUsage);
         emit({ type: "usage", mode: "chat", text: "", usage: summaryUsage });
       }, undefined, () => canRequest() && !finalRequest());
       const compactMessages = async (messages: AgentMessage[]) => {
@@ -168,7 +166,7 @@ export class ChatSession {
           // Recheck paths before writes as tools can change local files.
           this.archive!.inspect();
           await saveCheckpoint(archived.file, { identity: checkpointIdentity, messages: agent.state.messages, pendingToolCalls: [...pending],
-            usage: { input: baseUsage.input + usage.input, output: baseUsage.output + usage.output, cost: baseUsage.cost + usage.cost } }, redact);
+            usage: addUsage({ ...baseUsage }, usage) }, redact);
         } catch (error) { checkpointError = error instanceof Error ? error : new Error(String(error)); this.persistenceError = checkpointError; throw checkpointError; }
       };
       // Report the configured request ID verbatim; catalog names and endpoint
@@ -214,9 +212,7 @@ export class ChatSession {
       unsubscribe = agent.subscribe(async event => {
         if (event.type === "message_end" && event.message.role === "assistant") {
           finalMessage = event.message;
-          usage.input += event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
-          usage.output += event.message.usage.output;
-          usage.cost += event.message.usage.cost.total;
+          addUsage(usage, modelUsage(event.message.usage));
         }
         forward!.handle(event);
         if (event.type === "message_end") {
@@ -292,7 +288,7 @@ export class ChatSession {
       try { await agent?.waitForIdle(); }
       finally {
         forward?.finish(); unsubscribe?.();
-        this.totalUsage = { input: baseUsage.input + usage.input, output: baseUsage.output + usage.output, cost: baseUsage.cost + usage.cost };
+        this.totalUsage = addUsage({ ...baseUsage }, usage);
         this.active = undefined;
         await chrome?.close();
       }

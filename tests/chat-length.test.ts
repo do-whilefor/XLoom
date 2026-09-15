@@ -80,7 +80,7 @@ describe("chat continuation after provider output limits", () => {
       expect(context.messages.at(-1)).toMatchObject({ role: "user", content: [{ type: "text", text: expect.stringContaining("output only the remaining content") }] });
       return text(kind === "thinking" ? "The fixture is synthetic." : "synthetic data.");
     });
-    expect(await test.run()).toEqual({ input: 6, output: 2, cost: 0.04 });
+    expect(await test.run()).toEqual({ input: 6, output: 2, cost: 0.04, cacheRead: 2, cacheInput: 6 });
     expect(test.seen).toHaveLength(2);
     expect(test.events.filter(event => event.type === "text").map(event => event.text).join(""))
       .toBe(kind === "thinking" ? "The fixture is synthetic." : "The fixture has synthetic data.");
@@ -93,7 +93,7 @@ describe("chat continuation after provider output limits", () => {
       for (const part of parts.slice(0, call - 1)) expect(JSON.stringify(context.messages)).toContain(part);
       return text(parts[call - 1], call <= 4 ? "length" : "stop");
     });
-    expect(await test.run()).toEqual({ input: 15, output: 5, cost: 0.1 });
+    expect(await test.run()).toEqual({ input: 15, output: 5, cost: 0.1, cacheRead: 5, cacheInput: 15 });
     expect(test.seen).toHaveLength(5);
     expect(test.events.filter(event => event.type === "text").map(event => event.text).join("")).toBe(parts.join(""));
     expect(test.events.filter(event => event.type === "usage")).toHaveLength(5);
@@ -106,7 +106,7 @@ describe("chat continuation after provider output limits", () => {
       expect(context.messages.find(item => item.role === "toolResult")).toMatchObject({ toolCallId: "write-once", isError: false });
       return text(call === 2 ? "The fixture " : call === 3 ? "was written " : "once.", call < 4 ? "length" : "stop");
     });
-    expect(await test.run()).toEqual({ input: 12, output: 4, cost: 0.08 });
+    expect(await test.run()).toEqual({ input: 12, output: 4, cost: 0.08, cacheRead: 4, cacheInput: 12 });
     expect(test.events.filter(event => event.type === "tool_start" && event.toolName === "write")).toHaveLength(1);
     expect(test.events.filter(event => event.type === "tool_end" && event.toolName === "write")).toHaveLength(1);
     expect(await readFile(join(test.workspace, "fixture.txt"), "utf8")).toBe("completed fixture");
@@ -133,7 +133,7 @@ describe("chat continuation after provider output limits", () => {
     const failure = await test.run().catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
     expect(failure.message).toContain("budget reached");
-    expect(failure.usage).toEqual({ input: 3, output: 1, cost: 0.02 });
+    expect(failure.usage).toEqual({ input: 3, output: 1, cost: 0.02, cacheRead: 1, cacheInput: 3 });
     expect(test.seen).toHaveLength(1);
   });
 
@@ -157,7 +157,7 @@ describe("chat continuation after provider output limits", () => {
     const failure = await test.run().catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
     expect(failure.message).toContain("user cancelled continuation");
-    expect(failure.usage).toEqual({ input: 3, output: 1, cost: 0.02 });
+    expect(failure.usage).toEqual({ input: 3, output: 1, cost: 0.02, cacheRead: 1, cacheInput: 3 });
     expect(test.seen).toHaveLength(1);
   });
 
@@ -169,7 +169,7 @@ describe("chat continuation after provider output limits", () => {
       expect(context.messages.some(item => item.role === "assistant" && item.stopReason === "error")).toBe(false);
       return text(call === 3 ? " second" : " finished.", call === 3 ? "length" : "stop");
     });
-    expect(await test.run()).toEqual({ input: 12, output: 4, cost: 0.08 });
+    expect(await test.run()).toEqual({ input: 12, output: 4, cost: 0.08, cacheRead: 4, cacheInput: 12 });
     expect(test.seen).toHaveLength(4);
     expect(test.events.filter(event => event.type === "text").map(event => event.text).join("")).toBe("First second finished.");
     expect(test.events.filter(event => event.type === "notice" && event.text.includes("Continuing once"))).toHaveLength(1);
@@ -180,7 +180,7 @@ describe("chat continuation after provider output limits", () => {
     const failure = await test.run().catch(error => error);
     expect(failure).toBeInstanceOf(RuntimeRunError);
     expect(failure.message).toContain("503");
-    expect(failure.usage).toEqual({ input: 9, output: 3, cost: 0.06 });
+    expect(failure.usage).toEqual({ input: 9, output: 3, cost: 0.06, cacheRead: 3, cacheInput: 9 });
     expect(test.seen).toHaveLength(3);
   });
 });

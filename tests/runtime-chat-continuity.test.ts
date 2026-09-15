@@ -132,6 +132,9 @@ describe("durable private chat", () => {
     await second.send({ ...input, text: "Continue the discussion" });
     expect(second.history().file).toBe(file);
     expect(second.getUsage().input).toBe(previousUsage.input + 3);
+    expect(previousUsage.cacheRead).toBe(2);
+    expect(second.getUsage()).toMatchObject({ cacheRead: 3, cacheInput: 9 });
+    expect(second.history().usage).toEqual(second.getUsage());
     expect(await readFile(join(directory, "saved.txt"), "utf8")).toBe("observed local result");
     expect(calls).toBe(2);
   });
@@ -315,6 +318,8 @@ describe("chat context maintenance integration", () => {
     expect(failure.message).toContain("budget reached");
     expect(summaries).toBe(1);
     expect(failure.usage.input).toBe(requests * 3 + 152);
+    expect(failure.usage.cacheRead).toBe(requests + summaries);
+    expect(failure.usage.cacheInput).toBe(failure.usage.input);
   });
 });
 

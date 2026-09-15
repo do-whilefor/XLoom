@@ -6,6 +6,7 @@ import { createWriteTool } from "@earendil-works/pi-coding-agent";
 import { createWorkspaceEditTool } from "./edit.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
+import { addUsage, modelUsage } from "../usage.js";
 import { buildRunPrompt } from "./prompts.js";
 import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.js";
 import { createRunBudget } from "./run-budget.js";
@@ -155,10 +156,7 @@ export function createRuntimeForwarder(mode: RuntimeEvent["mode"], emit: (event:
           && narration && !isProtocolText(narration)) {
           emit({ type: "narration", mode, messageId: messageId(), text: redact(narration) });
         }
-        const usage = event.message.usage;
-        emit({ type: "usage", mode, text: "", usage: {
-          input: usage.input + usage.cacheRead + usage.cacheWrite, output: usage.output, cost: usage.cost.total,
-        } });
+        emit({ type: "usage", mode, text: "", usage: modelUsage(event.message.usage) });
       }
       const outgoing = runtimeEvent(event, mode);
       if (outgoing?.type === "text") { finish(); sawText = true; emitText(outgoing.text); }
@@ -226,8 +224,8 @@ export class PiRunner implements AgentRunner {
       const readTool = createWorkspaceReadTool(request.workspace, request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,
         request.blackboardPath ? { dataDir: dirname(request.blackboardPath), snapshot: () => stage?.snapshot ?? request.snapshot,
           semantic: createRetrievalModel(selected, (...args) => mainStream(...args), consumed => {
-            const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
-            usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
+            const added = modelUsage(consumed);
+            addUsage(usage, added);
             emit({ type: "usage", mode: request.mode, text: "", usage: added });
           }, request.id, () => canRequest() && !finalRequest(), redact),
           materialBaseline: { ...request.materialBaseline, ...Object.fromEntries(request.materials?.items.map(item => [item.key, item.signature]) ?? []) },
@@ -266,8 +264,8 @@ export class PiRunner implements AgentRunner {
         return selected.streamFn(...args);
       };
       const summarizer = createContextSummarizer(mainStream, consumed => {
-        const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
-        usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
+        const added = modelUsage(consumed);
+        addUsage(usage, added);
         emit({ type: "usage", mode: request.mode, text: "", usage: added });
       }, request.id, () => canRequest() && !finalRequest());
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
@@ -307,9 +305,7 @@ export class PiRunner implements AgentRunner {
       unsubscribe = agent.subscribe(async (event) => {
         if (event.type === "message_end" && event.message.role === "assistant") {
           finalMessage = event.message;
-          usage.input += event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
-          usage.output += event.message.usage.output;
-          usage.cost += event.message.usage.cost.total;
+          addUsage(usage, modelUsage(event.message.usage));
         }
         // Keep UI/block state ordered at callback entry, before transcript I/O.
         forward!.handle(event);

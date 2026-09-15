@@ -107,7 +107,7 @@ function toolText(context: Context): string {
 
 function assertExactUsage(test: ReturnType<typeof setup>): void {
   const calls = test.seen.reduce((sum, run) => sum + run.contexts.length, 0);
-  expect(test.controller.snapshot().usage).toEqual({ input: calls * 15, output: calls * 5, cost: 0 });
+  expect(test.controller.snapshot().usage).toEqual({ input: calls * 15, output: calls * 5, cost: 0, cacheRead: calls * 2, cacheInput: calls * 15 });
 }
 
 const fixtureGoals: NonNullable<Decision["goals"]> = [
