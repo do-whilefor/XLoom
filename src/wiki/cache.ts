@@ -5,9 +5,29 @@ import { wikiDigest } from "./model.js";
 
 export interface IndexStats {
   storage: "persistent" | "memory"; added: number; updated: number; reused: number; removed: number;
-  indexedBytes: number; verifiedOriginals: number; fallbackReason?: string;
+  indexedBytes: number; verifiedOriginals: number; fallbackReason?: string; snapshotReused?: boolean;
 }
 export const indexStats = (): IndexStats => ({ storage: "persistent", added: 0, updated: 0, reused: 0, removed: 0, indexedBytes: 0, verifiedOriginals: 0 });
+
+/** Detect external replacement/corruption, including writes still in the WAL.
+ * This is a cache invalidator, never an evidence integrity verdict. */
+export function retrievalCacheStamp(dataDir: string, workspace: string): string | undefined {
+  try {
+    const root = join(dataDir, "cache"), file = join(root, "retrieval.sqlite");
+    for (const directory of [dataDir, root]) {
+      const stat = lstatSync(directory);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+    }
+    const parts = [realpathSync(dataDir), realpathSync(workspace)];
+    for (const path of [file, `${file}-wal`]) {
+      if (path !== file && !existsSync(path)) { parts.push("no-wal"); continue; }
+      const stat = lstatSync(path, { bigint: true });
+      if (stat.isSymbolicLink() || !stat.isFile()) return;
+      parts.push([stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":"));
+    }
+    return wikiDigest(parts);
+  } catch { return; }
+}
 
 /** Disposable term projections only. Never writes to the authoritative board.
  * Unknown, damaged or foreign caches are preserved and bypassed. */
@@ -16,7 +36,9 @@ export function withIndexCache<T>(dataDir: string, workspace: string, work: (db:
   const stats = indexStats();
   const schema = `CREATE TABLE owner(version INTEGER, scope TEXT);
     CREATE TABLE entries(namespace TEXT,key TEXT,signature TEXT,payload TEXT,PRIMARY KEY(namespace,key));
-    CREATE TABLE terms(namespace TEXT,term TEXT,key TEXT,unit INTEGER,PRIMARY KEY(namespace,term,key,unit));`;
+    CREATE TABLE terms(namespace TEXT,term TEXT,key TEXT,unit INTEGER,PRIMARY KEY(namespace,term,key,unit));
+    CREATE INDEX terms_by_key ON terms(namespace,key);`;
+  let version = 2;
   try {
     // A read of a nonexistent task must not create it (CLI/tests may use virtual boards).
     if (!existsSync(dataDir) || lstatSync(dataDir).isSymbolicLink()) throw new Error("Task directory is unavailable or linked");
@@ -31,14 +53,21 @@ export function withIndexCache<T>(dataDir: string, workspace: string, work: (db:
       const check = new DatabaseSync(path, { readOnly: true });
       try {
         const owner = check.prepare("SELECT version,scope FROM owner").all();
-        if (owner.length !== 1 || owner[0]!.version !== 1 || owner[0]!.scope !== scope) throw new Error("Foreign or unsupported retrieval cache");
+        if (owner.length !== 1 || ![1, 2].includes(Number(owner[0]!.version)) || owner[0]!.scope !== scope) throw new Error("Foreign or unsupported retrieval cache");
+        version = Number(owner[0]!.version);
         check.prepare("SELECT namespace,key,signature,payload FROM entries LIMIT 0").all();
         check.prepare("SELECT namespace,term,key,unit FROM terms LIMIT 0").all();
       } finally { check.close(); }
     }
     db = new DatabaseSync(path); db.exec("PRAGMA busy_timeout=1500");
-    if (fresh) { db.exec(schema); db.prepare("INSERT INTO owner VALUES(1,?)").run(scope); }
-    db.exec("BEGIN IMMEDIATE");
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL");
+    // Readers do not reserve the writer lock. Callers stage expensive work before
+    // their first write; cache publication and v1 upgrades are transactional.
+    db.exec("BEGIN");
+    if (fresh) { db.exec(schema); db.prepare("INSERT INTO owner VALUES(2,?)").run(scope); }
+    else if (version === 1) {
+      db.exec("CREATE INDEX IF NOT EXISTS terms_by_key ON terms(namespace,key); UPDATE owner SET version=2");
+    }
   } catch (error) {
     db?.close(); db = undefined;
     stats.storage = "memory"; stats.fallbackReason = (error as Error).message;

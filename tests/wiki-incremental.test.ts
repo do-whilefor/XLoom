@@ -9,7 +9,8 @@ import { BlackboardStore } from "../src/store.js";
 import type { BoardSnapshot, RunRequest } from "../src/types.js";
 import { buildRetrievalIndex, refKey } from "../src/wiki/catalog.js";
 import { materialDelivery, planningMaterials, recordReadPath } from "../src/wiki/materials.js";
-import { incrementalRetrievalIndex } from "../src/wiki/incremental.js";
+import { clearRetrievalSnapshots, incrementalRetrievalIndex } from "../src/wiki/incremental.js";
+import { putEntry, withIndexCache } from "../src/wiki/cache.js";
 import { searchOriginals } from "../src/wiki/originals.js";
 import { createTaskReader } from "../src/wiki/read.js";
 import { retrievalContext } from "../src/wiki/retrieval.js";
@@ -22,6 +23,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 const roots: string[] = [], stores: BlackboardStore[] = [];
 const zero = { input: 0, output: 0, cost: 0 };
 afterEach(() => {
+  clearRetrievalSnapshots();
   for (const store of stores.splice(0)) store.close();
   for (const root of roots.splice(0)) {
     if (dirname(resolve(root)) !== resolve(tmpdir()) || !basename(root).startsWith("xloom-index-")) throw new Error("Invalid fixture cleanup path");
@@ -141,6 +143,51 @@ describe("durable material announcements", () => {
 });
 
 describe("incremental source projections", () => {
+  it("reuses an immutable index while checking source contents and returning the current revision", () => {
+    const { board, root } = fixture();
+    const cold = incrementalRetrievalIndex(board, root, root);
+    board.revision++;
+    const warm = incrementalRetrievalIndex(board, root, root);
+    expect(warm.stats.snapshotReused).toBe(true);
+    expect(warm.index.documents).toBe(cold.index.documents);
+    expect(warm.index.boardRevision).toBe(board.revision);
+    expect(() => warm.index.documents[0]!.sources.push({ kind: "fact", id: "injected" })).toThrow();
+    board.steps[0]!.combination = { requires: [], missing: ["permission"], scope: "changed", stateVersion: "v2", expectedCapability: "read" };
+    const changed = incrementalRetrievalIndex(board, root, root);
+    expect(changed.stats.snapshotReused).not.toBe(true);
+    expect(changed.index).toEqual(buildRetrievalIndex(board));
+    expect(changed.index.documents.find(doc => doc.ref.id === "F-one")!.text).toContain("v2");
+    clearRetrievalSnapshots();
+    const restarted = incrementalRetrievalIndex(board, root, root);
+    expect(restarted.stats).toMatchObject({ storage: "persistent", reused: 4, indexedBytes: 0 });
+    expect(restarted.index).toEqual(changed.index);
+  });
+  it("invalidates process reuse for external writes still in the WAL", () => {
+    const { board, root } = fixture(); incrementalRetrievalIndex(board, root, root);
+    const db = new DatabaseSync(join(root, "cache/retrieval.sqlite"));
+    try {
+      db.exec("UPDATE entries SET payload='{' WHERE namespace='metadata'");
+      const result = incrementalRetrievalIndex(board, root, root);
+      expect(result.stats.storage).toBe("memory");
+      expect(result.index).toEqual(buildRetrievalIndex(board));
+    } finally { db.close(); }
+  });
+  it("upgrades owned v1 caches without discarding postings and rolls back failed publication", () => {
+    const { board, root } = fixture(); searchOriginals(board, root, root, "downloadGrant");
+    const db = new DatabaseSync(join(root, "cache/retrieval.sqlite"));
+    db.exec("UPDATE owner SET version=1; DROP INDEX terms_by_key"); db.close();
+    expect(searchOriginals(board, root, root, "downloadGrant").index).toMatchObject({ storage: "persistent", reused: 1 });
+    withIndexCache(root, root, (cache, stats) => {
+      putEntry(cache, "rollback", "new", "signature", [], []);
+      if (stats.storage === "persistent") throw new Error("Interrupted cache publication");
+    });
+    const check = new DatabaseSync(join(root, "cache/retrieval.sqlite"), { readOnly: true });
+    try {
+      expect(check.prepare("SELECT version FROM owner").get()!.version).toBe(2);
+      expect(check.prepare("SELECT name FROM sqlite_master WHERE name='terms_by_key'").get()).toBeTruthy();
+      expect(check.prepare("SELECT key FROM entries WHERE namespace='rollback'").all()).toEqual([]);
+    } finally { check.close(); }
+  });
   it("reuses metadata tokens while returning fresh authoritative source records", () => {
     const { board, root } = fixture();
     const cold = incrementalRetrievalIndex(board, root, root);
@@ -214,15 +261,17 @@ describe("incremental source projections", () => {
       expect(result.stats.storage).toBe("memory"); expect(result.index).toEqual(buildRetrievalIndex(board));
     }
   });
-  it("falls back on a locked cache and keeps later persistent reuse available", () => {
+  it("reads warm postings alongside a writer and falls back only when publication is blocked", () => {
     const { board, root } = fixture(); searchOriginals(board, root, root, "downloadGrant");
     const db = new DatabaseSync(join(root, "cache", "retrieval.sqlite"));
     try {
       db.exec("BEGIN IMMEDIATE");
-      expect(searchOriginals(board, root, root, "downloadGrant")).toMatchObject({ complete: true, index: { storage: "memory" }, hits: [expect.anything()] });
+      expect(searchOriginals(board, root, root, "downloadGrant")).toMatchObject({ complete: true, index: { storage: "persistent", reused: 1 }, hits: [expect.anything()] });
+      source(board, root, "E-two", "downloadGrant second fixture");
+      expect(searchOriginals(board, root, root, "downloadGrant")).toMatchObject({ complete: true, index: { storage: "memory" }, hits: [expect.anything(), expect.anything()] });
       db.exec("ROLLBACK");
     } finally { db.close(); }
-    expect(searchOriginals(board, root, root, "downloadGrant").index).toMatchObject({ storage: "persistent", reused: 1 });
+    expect(searchOriginals(board, root, root, "downloadGrant").index).toMatchObject({ storage: "persistent", reused: 1, added: 1 });
   });
   it("shows readable native feedback while retaining original tool JSON", async () => {
     const { board, root } = fixture(); const tool = createWorkspaceReadTool(root, undefined, { dataDir: root, snapshot: () => board });

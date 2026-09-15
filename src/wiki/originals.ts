@@ -85,7 +85,8 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
     const lanes: Hit[][] = groups.map(() => []), laneMatches = groups.map(() => 0);
     const issues: { evidenceId: string; reason: string }[] = [], inspected: { evidenceId: string; file: string; fingerprint: string }[] = [];
     const windows = new Map<string, Window[]>();
-    index.removed = pruneEntries(db, "original", new Set(board.evidence.map(item => item.id)));
+    const updates = new Map<string, { signature: string; windows: Window[]; units: string[][] }>();
+    const invalid = new Set<string>();
     for (const evidence of board.evidence) {
       let cacheOperation = false;
       try {
@@ -106,24 +107,29 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
           });
           index.indexedBytes += evidence.bytes;
           previous ? index.updated++ : index.added++;
-          cacheOperation = true;
-          putEntry(db, "original", evidence.id, signature, current, units);
-          cacheOperation = false;
+          updates.set(evidence.id, { signature, windows: current, units });
         }
         windows.set(evidence.id, current);
         inspected.push({ evidenceId: evidence.id, file, fingerprint: fingerprint(stat) });
       } catch (error) {
         if (cacheOperation) throw error;
-        removeEntry(db, "original", evidence.id);
+        invalid.add(evidence.id);
         issues.push({ evidenceId: evidence.id, reason: (error as Error).message });
       }
     }
     const selected = new Map<string, Set<number>>();
     const lookup = db.prepare("SELECT key,unit FROM terms WHERE namespace='original' AND term=?");
     for (const term of tokens) for (const row of lookup.all(term)) {
-      const key = String(row.key), set = selected.get(key) ?? new Set<number>();
+      const key = String(row.key);
+      if (updates.has(key) || invalid.has(key) || !windows.has(key)) continue;
+      const set = selected.get(key) ?? new Set<number>();
       set.add(Number(row.unit)); selected.set(key, set);
     }
+    const queryTerms = new Set(tokens);
+    for (const [key, update] of updates) update.units.forEach((unit, i) => {
+      if (!unit.some(term => queryTerms.has(term))) return;
+      const set = selected.get(key) ?? new Set<number>(); set.add(i); selected.set(key, set);
+    });
     let matchedWindows = 0;
     const order = (a: Hit, b: Hit) => b.score - a.score || a.locator.evidenceId.localeCompare(b.locator.evidenceId) || a.locator.byteOffset - b.locator.byteOffset;
     for (const evidence of board.evidence) {
@@ -183,6 +189,12 @@ export function searchOriginals(board: BoardSnapshot, dataDir: string, workspace
       }
     }
     const valid = interleaveCandidates(lanes.map(lane => lane.filter(hit => !unavailable.has(hit.locator.evidenceId)).map(hit => merged.get(hitKey(hit))!)), hitKey).slice(0, limit);
+    // Publish only after all archive scanning/verification. No writer lock is
+    // held while reading original bytes; a concurrent cache writer may cause a
+    // disposable-cache fallback, never a partially published index.
+    index.removed = pruneEntries(db, "original", new Set(board.evidence.map(item => item.id)));
+    for (const key of invalid) removeEntry(db, "original", key);
+    for (const [key, update] of updates) if (!unavailable.has(key)) putEntry(db, "original", key, update.signature, update.windows, update.units);
     return { generator: wikiGenerator, type: "original_search", evidence: false, boardRevision: board.revision, query,
       coverage: "All registered task evidence bodies, indexed in overlapping UTF-8 windows. Unchanged file fingerprints reuse term postings; candidate originals are fully hash/size/UTF-8 verified before delivery. No private transcripts or other tasks.",
       notice: "Lexical source windows are navigation, not independent evidence or an answer. Use contextReadPath for nearby qualifications and source packages for corrections; distant conditions may still be omitted. Warm no-match is not a fresh integrity audit and does not establish absence; use refresh=true to rebuild from bytes.",
