@@ -2,8 +2,38 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { submissionTool } from "../src/runtime/submission.js";
+import { decisionSchema } from "../src/schema.js";
 
 describe("private proposal repair", () => {
+  it.each(["decide", "metacog"] as const)("exposes the authoritative Step requirements without intercepting private %s repair", async mode => {
+    const submit = submissionTool(mode, value => decisionSchema.parse(value));
+    const wire = submit.tool.parameters as any;
+    const required = Object.entries(decisionSchema.shape.steps.unwrap().element.shape)
+      .filter(([, field]) => !field.isOptional()).map(([name]) => name);
+    const contract = wire.properties.output.properties.steps;
+    expect(Object.keys(contract.items.properties)).toEqual(required);
+    expect(contract.description).toContain(required.join(", "));
+    expect(contract.items.properties.from.description).toContain("Explicit [] only when");
+    const output = { summary: "Inspect fixture", steps: [{ goalId: "G0", description: "Read original", successSignal: "Bytes observed", evidencePlan: "Archive original", priority: 1 }] };
+    const args = validateToolArguments(submit.tool, { type: "toolCall", id: "first", name: "submit", arguments: { output } });
+    await expect(submit.tool.execute("first", args)).rejects.toThrow("Rejected proposal retained");
+    expect(submit.accepted).toBe(false); expect(submit.output).toBeUndefined();
+    await submit.tool.execute("repair", { repair: [{ path: "/steps/0/from", value: [] }] });
+    expect(submit.accepted).toBe(true);
+    expect(submit.output).toEqual({ ...output, steps: [{ ...output.steps[0], from: [] }] });
+    expect(output.steps[0]).not.toHaveProperty("from");
+    await expect(submit.tool.execute("duplicate", { output })).rejects.toThrow("already been accepted");
+  });
+
+  it("does not coerce or discard invalid nested Step values before private validation", async () => {
+    const submit = submissionTool("decide", value => decisionSchema.parse(value));
+    const output = { summary: "Keep original input", steps: [{ goalId: "G0", from: [42], priority: null }] };
+    const args = validateToolArguments(submit.tool, { type: "toolCall", id: "original", name: "submit", arguments: { output } });
+    expect(args).toEqual({ output });
+    await expect(submit.tool.execute("original", args)).rejects.toThrow("Rejected proposal retained");
+    expect(submit.accepted).toBe(false);
+  });
+
   it("accepts removal through Pi's tool argument validator and rejects ambiguous operations", () => {
     const { tool } = submissionTool("decide", value => value);
     const validate = (repair: unknown[]) => validateToolArguments(tool, { type: "toolCall", id: "repair", name: "submit", arguments: { repair } });

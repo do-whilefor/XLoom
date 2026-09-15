@@ -1,6 +1,21 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { z } from "zod";
 import type { Mode } from "../types.js";
+import { decisionSchema } from "../schema.js";
+
+const stepRequired = Object.entries(decisionSchema.shape.steps.unwrap().element.shape)
+  .filter(([, field]) => !field.isOptional()).map(([name]) => name);
+const stepContract = {
+  description: `Array of new Steps. Required in every Step: ${stepRequired.join(", ")}. Omit controller-assigned id. Full validation runs inside submit so rejected proposals remain repairable.`,
+  items: { properties: {
+    goalId: { description: "Required string: exact Goal ID." },
+    from: { description: "Required array of exact committed Fact IDs. Explicit [] only when there are no Fact inputs; never omit or invent dependencies." },
+    description: { description: "Required string: bounded action." },
+    successSignal: { description: "Required string: observable success condition." },
+    evidencePlan: { description: "Required string: original observations/artifacts to retain." },
+    priority: { description: "Required integer from 0 to 1000; higher first." },
+  } },
+};
 
 const repairsSchema = z.array(z.object({ path: z.string().startsWith("/"), value: z.unknown(), remove: z.literal(true).optional() }).strict()
   .refine(value => Object.hasOwn(value, "value") !== (value.remove === true), "Repair value is required unless remove:true; choose value or remove")).min(1).max(32);
@@ -41,10 +56,11 @@ export function submissionTool(mode: Mode, validate: (output: unknown) => unknow
   const tool: AgentTool = {
     name: "submit", label: "Submit result", executionMode: "sequential",
     description: "Submit output using the task contract after tools/evidence finish. Validation errors commit nothing and retain the rejected proposal privately in this run. Fix only erroneous fields with repair:[{path:'/reviews/0/pocEvidenceId',value:'exact attached ID'}], or resubmit output; choose one. Repairs use JSON Pointer: value sets object fields or existing array entries; remove:true deletes an existing field or array entry (later indices shift). Choose value or remove per repair. The whole proposal is revalidated. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.",
-    // Keep the common envelope small. Full evolving contracts and reference
-    // validation remain in the shared validator instead of duplicating schemas.
+    // Annotate the Step contract without moving its validation into Pi: an
+    // early rejection would bypass the private proposal retained for repair.
+    // Avoid nested type coercion; the shared validator owns the original values.
     parameters: { type: "object", properties: { output: { type: "object", properties: {
-      summary: { type: "string" }, ...(mode === "execute" ? { result: { type: "string", enum: ["done", "no_progress", "blocked"] } } : {}),
+      summary: { type: "string" }, ...(mode === "execute" ? { result: { type: "string", enum: ["done", "no_progress", "blocked"] } } : { steps: stepContract }),
     }, required: ["summary", ...(mode === "execute" ? ["result"] : [])], additionalProperties: true },
     repair: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { path: { type: "string" }, value: {}, remove: { type: "boolean", const: true } }, required: ["path"], oneOf: [{ required: ["value"] }, { required: ["remove"] }], additionalProperties: false } },
     }, additionalProperties: false } as AgentTool["parameters"],
