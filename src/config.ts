@@ -9,7 +9,7 @@ export const CHAT_GOAL = "普通聊天；使用 /run 目标启动独立红队任
 
 /** A model registry default, not a model availability check or a network call. */
 export function defaultConfig(goal: string, scope = goal): ProjectConfig {
-  const model = { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "medium" as const };
+  const model = { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "max" as const };
   return projectConfigSchema.parse({
     version: 1,
     title: "xloom",

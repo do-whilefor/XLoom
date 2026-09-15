@@ -6,9 +6,9 @@
   "context": "请补充业务对象、可用身份、已知入口等上下文。不会自动加载 AGENTS.md、MCP 或 Skills。",
   "chrome": { "enabled": true, "channel": "stable" },
   "models": {
-    "chat": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "medium" },
-    "decide": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "medium" },
-    "execute": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "medium" }
+    "chat": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "max" },
+    "decide": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "max" },
+    "execute": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "max" }
   },
   "limits": {
     "maxNoProgress": 3,

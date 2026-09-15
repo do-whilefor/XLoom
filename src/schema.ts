@@ -36,6 +36,7 @@ export const modelConfigSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/, "Use an environment variable name, not an API key").optional(),
   contextWindow: positiveInt(10_000_000).optional(),
   maxTokens: positiveInt(1_000_000).optional(),
+  reasoning: z.boolean().optional(),
   thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
 }).strict();
 

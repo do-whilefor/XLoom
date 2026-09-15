@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Agent, type AgentMessage, type AgentOptions, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ModelConfig, ProjectConfig, RuntimeEvent, Usage } from "../types.js";
-import { resolveModel, type ModelResolver } from "./models.js";
+import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.js";
 import { createRuntimeForwarder, executeTools, RuntimeRunError } from "./pi-runner.js";
 import { createRunBudget } from "./run-budget.js";
 import { redactCredentials } from "./redaction.js";
@@ -171,7 +171,7 @@ export class ChatSession {
         tools.push(chrome.tool);
       }
       agent = this.agent ?? (this.options.createAgent ?? (options => new Agent(options)))({
-        initialState: { systemPrompt, model: selected.model, thinkingLevel: request.model.thinking ?? "off", messages: restored?.messages ?? [], tools },
+        initialState: { systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, request.model.thinking), messages: restored?.messages ?? [], tools },
         streamFn: mainStream,
         toolExecution: "sequential",
         sessionId: checkpointIdentity.taskId,
@@ -181,7 +181,7 @@ export class ChatSession {
       this.identity = identity;
       agent.streamFunction = mainStream;
       agent.state.model = selected.model;
-      agent.state.thinkingLevel = request.model.thinking ?? "off";
+      agent.state.thinkingLevel = modelThinkingLevel(selected.model, request.model.thinking);
       agent.state.systemPrompt = systemPrompt;
       agent.state.tools = budget.toolsAllowed ? tools : [];
       agent.shouldStopAfterTurn = context => {

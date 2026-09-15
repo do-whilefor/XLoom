@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Model, Api, AuthResult } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { ModelRuntime, type ModelRuntimeAuthOverrides } from "@earendil-works/pi-coding-agent";
@@ -15,6 +16,12 @@ export interface ResolvedModel {
   costKnown?: boolean;
 }
 export type ModelResolver = (config: ModelConfig, signal: AbortSignal) => Promise<ResolvedModel>;
+
+/** `max` means the highest level advertised by Pi for this model, not a literal
+ * effort string to send to every provider. Capability is independent of off/on. */
+export function modelThinkingLevel(model: Model<Api>, requested: ModelConfig["thinking"] = "max") {
+  return clampThinkingLevel(model, requested);
+}
 
 function checkConfiguration(runtime: ModelRuntime): void {
   // Pi's detailed validation errors can contain configured header/key literals.
@@ -100,7 +107,9 @@ export const resolveModel: ModelResolver = async (config, signal) => {
       api, baseUrl,
       models: [{
         ...(registered ?? {}), id: config.model, name: registered?.name ?? config.model, api, baseUrl,
-        reasoning: registered?.reasoning ?? (config.thinking !== undefined && config.thinking !== "off"),
+        // Inline endpoints opt into reasoning by default. Known non-reasoning
+        // models retain their metadata; an explicit capability override wins.
+        reasoning: config.reasoning ?? registered?.reasoning ?? true,
         input: registered?.input ?? ["text"],
         contextWindow: config.contextWindow ?? registered?.contextWindow ?? 128_000,
         maxTokens: config.maxTokens ?? registered?.maxTokens ?? 16_384,
@@ -126,7 +135,8 @@ export const resolveModel: ModelResolver = async (config, signal) => {
 
   const secrets = explicitKey ? [explicitKey] : [];
   trackCredentials(runtime, secrets);
-  const model: Model<Api> = { ...registered, contextWindow: config.contextWindow ?? registered.contextWindow, maxTokens: config.maxTokens ?? registered.maxTokens };
+  const model: Model<Api> = { ...registered, reasoning: config.reasoning ?? registered.reasoning,
+    contextWindow: config.contextWindow ?? registered.contextWindow, maxTokens: config.maxTokens ?? registered.maxTokens };
   const auth = await runtime.getAuth(model, { apiKey: explicitKey, signal });
   signal.throwIfAborted();
   if (!auth) throw new Error(`No Pi credentials configured for ${config.provider}; use Pi login, its environment variables, or apiKeyEnv.`);
@@ -137,6 +147,11 @@ export const resolveModel: ModelResolver = async (config, signal) => {
     model, secrets, costKnown,
     streamFn: (selected, context, options) => runtime.streamSimple(selected, context, {
       ...options,
+      // Covers direct calls and context summaries as well as the Agent loop.
+      reasoning: (() => {
+        const level = modelThinkingLevel(selected, options?.reasoning ?? config.thinking);
+        return level === "off" ? undefined : level;
+      })(),
       // Go requires a session header that Pi 0.84.4 does not supply itself.
       // Agent session IDs stay stable across chat turns; direct calls get a local fallback.
       ...(requiresOpenCodeSession(selected) ? { headers: {

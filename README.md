@@ -168,13 +168,15 @@ projects/<工作区哈希>/
   "api": "openai-completions",
   "baseUrl": "https://your-endpoint.example/v1",
   "apiKeyEnv": "XLOOM_MODEL_KEY",
-  "thinking": "off"
+  "thinking": "max"
 }
 ```
 
 项目配置不接受明文 Key。Pi 的模型运行时与登录服务均显式使用 Xloom 用户目录中的 `auth.json`、`models.json` 和模型缓存，支持环境认证、API Key 与 OAuth 登录 / 刷新。默认用户目录首次使用时只导入一次已有 Pi 配置，不覆盖已有 Xloom 文件，不删除 Pi 原件，登出后也不会再次导入旧认证。设置 `XLOOM_HOME` 时默认隔离，不自动读取旧 Pi 认证；需要导入时执行 `xloom migrate --pi-dir "旧 Pi agent 目录的绝对路径"`。默认不设置运行时间、回合数或 token 硬上限，用户可随时 `/pause` 或 `/stop`。
 
 ## 明确的边界
+
+思考默认选择该模型在 Pi 目录中支持的最高档位（配置 `thinking: "max"`，或省略）；例如仅支持 `high` 时实际使用 `high`。显式 `off` 仍关闭思考。自定义内联端点默认启用推理能力；不支持推理的端点设置 `reasoning: false`，已知模型优先保留目录能力。`reasoning` 表示能力，`thinking` 表示本次设置，两者独立。该设置也用于 Chat 和上下文压缩。最高档位可能增加响应时间，不代表供应商支持无限推理预算。
 
 这是上下文隔离，不是操作系统沙箱。普通聊天和 Execute 的原生文件及 PowerShell 工具拥有当前用户权限，Decide / 元认知仅挂载 `read`。提示词禁止读取其他 run 的聊天 / 日志和凭据，但不声称能用提示词阻止越权读文件。
 

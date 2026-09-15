@@ -7,7 +7,7 @@ import { createWorkspaceEditTool } from "./edit.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentRunner, RunRequest, RunResult, RuntimeEvent, Usage } from "../types.js";
 import { buildRunPrompt } from "./prompts.js";
-import { resolveModel, type ModelResolver } from "./models.js";
+import { resolveModel, modelThinkingLevel, type ModelResolver } from "./models.js";
 import { createRunBudget } from "./run-budget.js";
 import { createCheckedPowerShellTool } from "./powershell.js";
 import { decisionSchema, executionSchema, formatValidationError } from "../schema.js";
@@ -232,7 +232,7 @@ export class PiRunner implements AgentRunner {
         emit({ type: "usage", mode: request.mode, text: "", usage: added });
       }, request.id);
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
-        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: config.thinking ?? "off", messages: [], tools: budget.toolsAllowed ? tools : [] },
+        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, config.thinking), messages: [], tools: budget.toolsAllowed ? tools : [] },
         streamFn: (...args) => {
           request.signal.throwIfAborted();
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");

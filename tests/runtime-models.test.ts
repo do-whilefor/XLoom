@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream, InMemoryModelsStore, type AssistantMessage, type Credential } from "@earendil-works/pi-ai";
 import { getApiProviders } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { listModels, resolveModel } from "../src/runtime/models.js";
+import { listModels, resolveModel, modelThinkingLevel } from "../src/runtime/models.js";
+import { defaultConfig } from "../src/config.js";
 
 const realCreate = ModelRuntime.create.bind(ModelRuntime);
 const selection = { provider: "anthropic", model: "claude-sonnet-4-6" };
@@ -38,6 +39,45 @@ afterEach(async () => {
 });
 
 describe("Pi model resolution", () => {
+  it("defaults new tasks and omitted settings to the highest supported thinking level", async () => {
+    expect(defaultConfig("fixture").models.decide.thinking).toBe("max");
+    vi.stubEnv("XLOOM_TEST_KEY", "synthetic-key");
+    const result = await resolveModel({ provider: "custom", model: "custom-model", api: "anthropic-messages",
+      baseUrl: "https://example.invalid/v1", apiKeyEnv: "XLOOM_TEST_KEY" }, signal());
+    expect(result.model.reasoning).toBe(true);
+    expect(modelThinkingLevel(result.model)).toBe("high");
+    expect(modelThinkingLevel({ ...result.model, thinkingLevelMap: { max: "max" } })).toBe("max");
+    expect(modelThinkingLevel({ ...result.model, reasoning: false })).toBe("off");
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    result.streamFn(result.model, { messages: [] });
+    expect(stream.mock.calls[0]?.[2]?.reasoning).toBe("high");
+  });
+
+  it.each([undefined, "max", "off"] as const)("serializes actual Anthropic thinking fields for an inline endpoint (%s)", async thinking => {
+    vi.stubEnv("XLOOM_TEST_KEY", "synthetic-key");
+    const result = await resolveModel({ provider: "opencode-go", model: "deepseek-flash", api: "anthropic-messages",
+      baseUrl: "https://opencode.ai/zen/go", apiKeyEnv: "XLOOM_TEST_KEY", thinking }, signal());
+    let payload: Record<string, unknown> | undefined;
+    const network = vi.fn(() => { throw new Error("Network must not run in serialization test"); });
+    const response = await (await result.streamFn(result.model, { messages: [{ role: "user", content: "fixture", timestamp: 0 }] }, {
+      fetch: network, onPayload: value => { payload = value as Record<string, unknown>; throw new Error("SERIALIZATION_CAPTURE_COMPLETE"); },
+    })).result();
+    expect(response.errorMessage).toContain("SERIALIZATION_CAPTURE_COMPLETE");
+    expect(network).not.toHaveBeenCalled();
+    expect(payload).toMatchObject({ model: "deepseek-flash", max_tokens: 16384,
+      thinking: thinking === "off" ? { type: "disabled" } : { type: "enabled", budget_tokens: 15360 } });
+  });
+
+  it("preserves explicit non-reasoning capabilities without sending unsupported thinking", async () => {
+    vi.stubEnv("XLOOM_TEST_KEY", "synthetic-key");
+    const result = await resolveModel({ provider: "custom", model: "plain", api: "anthropic-messages",
+      baseUrl: "https://example.invalid/v1", apiKeyEnv: "XLOOM_TEST_KEY", reasoning: false, thinking: "max" }, signal());
+    expect(result.model.reasoning).toBe(false);
+    const stream = vi.spyOn(runtime, "streamSimple").mockReturnValue(createAssistantMessageEventStream());
+    result.streamFn(result.model, { messages: [] });
+    expect(stream.mock.calls[0]?.[2]?.reasoning).toBeUndefined();
+  });
+
   it("uses Pi's static model and an explicit environment override", async () => {
     vi.stubEnv("XLOOM_TEST_KEY", "test-model-key");
     const requestSignal = signal();

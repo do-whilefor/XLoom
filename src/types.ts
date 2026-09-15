@@ -31,6 +31,7 @@ export interface ModelConfig {
   apiKeyEnv?: string;
   contextWindow?: number;
   maxTokens?: number;
+  reasoning?: boolean;
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 export interface ProjectConfig {
