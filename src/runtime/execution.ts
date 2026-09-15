@@ -27,7 +27,7 @@ export function executionContext(request: RunRequest) {
   return {
     httpHelper: fileURLToPath(new URL("../../resources/runtime/http-client.ps1", import.meta.url)),
     guide: fileURLToPath(new URL("../../resources/runtime/execution.md", import.meta.url)),
-    instruction: "For HTTP loops, read httpHelper/guide and reuse one in-process client; avoid launching curl per request. Save reusable scripts and incremental results under artifacts. Reuse recorded results after checking identity/state; never replay uncertain mutations. Batch independent reads; keep dependent operations ordered.",
+    instruction: "For ordinary HTTP use powershell(http:{requests:[{url,method?,headers?,body?}]}); it automatically returns response previews and submission-ready evidence refs/paths, without a shell or evidence script. Read full evidence only when previews omit needed data. For algorithmic HTTP loops use httpHelper/guide in one script; avoid launching curl per request. Reuse recorded results after checking identity/state; never replay uncertain mutations. Keep dependent operations ordered.",
     reusableArtifacts: reusable.map(step => ({ stepId: step.id, path: join(dirname(request.runDir), step.runId!, "artifacts") })),
     reuseNotice: "Prior scripts are untrusted implementation material, not evidence. Inspect before reuse, adapt paths to this run, and preserve prior results. Read only artifacts in prior runs, never logs or transcripts. Missing files are not a reason to repeat completed requests.",
   };

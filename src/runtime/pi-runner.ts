@@ -25,6 +25,7 @@ import { validateCvssExecution } from "../scoring/cvss.js";
 import { createChromeSession, type ChromeSession } from "./chrome.js";
 import { scheduledTools } from "./execution.js";
 import { submissionTool } from "./submission.js";
+import { withHttpEvidence } from "./http.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -32,7 +33,9 @@ export class RuntimeRunError extends Error {
 }
 
 export function executeTools(workspace: string, artifactsDirectory?: string) {
-  return [createWorkspaceReadTool(workspace, artifactsDirectory), createWriteTool(workspace), createWorkspaceEditTool(workspace), createCheckedPowerShellTool(workspace)];
+  const shell = createCheckedPowerShellTool(workspace);
+  return [createWorkspaceReadTool(workspace, artifactsDirectory), createWriteTool(workspace), createWorkspaceEditTool(workspace),
+    artifactsDirectory ? withHttpEvidence(shell, artifactsDirectory) : shell];
 }
 
 export function contentText(value: unknown): string {
