@@ -23,6 +23,7 @@ import { validateWikiReferences } from "../wiki/model.js";
 import { validateKnowledgeSubmission } from "../knowledge/model.js";
 import { validateCvssExecution } from "../scoring/cvss.js";
 import { createChromeSession, type ChromeSession } from "./chrome.js";
+import { scheduledTools } from "./execution.js";
 export { parseFinalJson } from "./protocol.js";
 
 export class RuntimeRunError extends Error {
@@ -232,14 +233,14 @@ export class PiRunner implements AgentRunner {
         emit({ type: "usage", mode: request.mode, text: "", usage: added });
       }, request.id);
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
-        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, config.thinking), messages: [], tools: budget.toolsAllowed ? tools : [] },
+        initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, config.thinking), messages: [], tools: budget.toolsAllowed ? scheduledTools(tools) : [] },
         streamFn: (...args) => {
           request.signal.throwIfAborted();
           if (!canRequest()) throw new Error("Explicit invocation budget exhausted before the next model request.");
           modelRequests++;
           return selected.streamFn(...args);
         },
-        toolExecution: "sequential",
+        toolExecution: "parallel",
         sessionId: request.id,
         beforeToolCall: async () => {
           if (checkpointError) return { block: true, reason: "Private checkpoint could not be saved; tool was not executed.", terminate: true };
