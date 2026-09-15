@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { createLocalPowerShellOperations, createPowerShellTool, type PowerShellOperations } from "@earendil-works/pi-coding-agent";
 
 export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Backslash does not escape PowerShell quotes. Use single-quoted literals: '"' for a double quote, 'it''s' for an apostrophe. Put complex scripts in files; pipe loops via & { ... }. Fix syntax errors before retrying; inspect runtime side effects before replaying. Discover executables; do not assume python3 exists on Windows.`;
@@ -13,6 +14,7 @@ function checkedScript(path: string): string {
   // Keep parser variables/preferences out of the user's scope. Execute in-memory
   // source so $PSScriptRoot/$PSCommandPath do not become the temporary directory.
   // Capture $? INSIDE that script block: invoking a block resets its status.
+  const state = `$xloomExecution${randomUUID().replaceAll("-", "")}`;
   return `& {
 $ErrorActionPreference = 'Stop'
 try {
@@ -32,7 +34,19 @@ try {
   exit 1
 }
 }
-. ([scriptblock]::Create([System.IO.File]::ReadAllText(${quoteLiteral(path)}) + "\`n" + 'exit ([int](-not $?))'))`;
+& {
+  ${state} = @{ succeeded = $true; errors = 0 }
+  . ([scriptblock]::Create([System.IO.File]::ReadAllText(${quoteLiteral(path)}) + "\`n" + '${state}.succeeded = $?')) 2>&1 | ForEach-Object {
+    # Native stderr alone is not failure (successful programs also write it).
+    # Caught/suppressed PowerShell errors never reach this stream.
+    if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -notmatch '^NativeCommandError(?:Message)?$') { ${state}.errors++ }
+    $_
+  }
+  if (${state}.errors -gt 0 -or ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) -or -not ${state}.succeeded) {
+    Write-Output ('PowerShell execution diagnostics: unhandled errors={0}; final command succeeded={1}; last native exit code={2}. Inspect partial side effects before retrying; nothing was replayed.' -f ${state}.errors, ${state}.succeeded, $LASTEXITCODE)
+    exit 1
+  }
+}`;
 }
 
 /** Parse only the supplied command, then run it unchanged once. Invoked scripts
@@ -74,6 +88,6 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
 
 export function createCheckedPowerShellTool(workspace: string) {
   const tool = createPowerShellTool(workspace, { operations: createCheckedPowerShellOperations() });
-  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. A valid command runs unchanged once. " + powerShellPrompt;
+  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. A valid command runs unchanged once. Unhandled PowerShell errors or a nonzero last native exit fail the tool even if later output succeeds. Handle expected native exit codes explicitly (check the code, then exit 0); check each native result in multi-command scripts. " + powerShellPrompt;
   return tool;
 }

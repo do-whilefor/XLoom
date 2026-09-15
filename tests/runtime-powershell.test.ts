@@ -128,17 +128,46 @@ $items | ConvertTo-Json -Compress`;
 describe.runIf(process.platform === "win32")("PowerShell syntax regressions on Windows", () => {
   it.each([
     ["Write-Error 'runtime failure'", 1],
-    ["Write-Error 'recoverable'; Write-Output 'continued'", 0],
+    ["Write-Error 'recoverable'; Write-Output 'continued'", 1],
     ["& cmd.exe /c exit 37", 1],
-    ["& cmd.exe /c exit 37; Write-Output 'continued'", 0],
+    ["& cmd.exe /c exit 37; Write-Output 'continued'", 1],
     ["throw 'terminating failure'", 1],
     ["exit 65", 65],
     ["exit 17", 17],
-  ])("preserves command-mode exit status: %s", async (command, exitCode) => {
+  ])("reports execution failure while preserving explicit exits: %s", async (command, exitCode) => {
     const output: Buffer[] = [];
     const result = await createCheckedPowerShellOperations().exec(command, await workspace(), { onData: chunk => output.push(chunk), timeout: 10 });
     expect(result.exitCode).toBe(exitCode);
     expect(Buffer.concat(output).toString()).not.toContain("syntax preflight");
+  });
+
+  it.each([
+    ["Get-Content -LiteralPath './absent.txt'", "unhandled errors=1"],
+    ["node -e 'process.exit(7)'", "last native exit code=7"],
+  ])("does not hide an earlier failure or replay its side effect: %s", async (failing, diagnostic) => {
+    const directory = await workspace();
+    const tool = createCheckedPowerShellTool(directory);
+    const command = `Add-Content -LiteralPath 'once.txt' -Value 'once'; ${failing}; Write-Output 'NEXT_OK'`;
+    const failure = await tool.execute("hidden-failure", { command, timeout: 10 }).catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toContain(diagnostic);
+    expect(failure.message).toContain("NEXT_OK");
+    expect(failure.message).toContain("Command exited with code 1");
+    expect((await readFile(join(directory, "once.txt"), "utf8")).trim()).toBe("once");
+  });
+
+  it.each([
+    "try { throw 'expected' } catch { Write-Output 'HANDLED' }",
+    "Get-Content -LiteralPath './absent.txt' -ErrorAction SilentlyContinue; Write-Output 'HANDLED'",
+    "node -e 'process.exit(7)'; if ($LASTEXITCODE -eq 7) { Write-Output 'HANDLED'; exit 0 }; exit 1",
+    `node -e 'process.stderr.write("HANDLED")'`,
+    "Write-Output 'HANDLED'; return",
+  ])("preserves handled errors, successful stderr and explicit return: %s", async command => {
+    const tool = createCheckedPowerShellTool(await workspace());
+    const result = await tool.execute("handled", { command, timeout: 10 });
+    const output = result.content.filter(part => part.type === "text").map(part => part.text).join("");
+    expect(output).toContain("HANDLED");
+    expect(output).not.toContain("execution diagnostics");
   });
 
   it("keeps the caller's environment, working directory and default preference scope", async () => {
