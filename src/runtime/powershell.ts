@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createLocalPowerShellOperations, createPowerShellTool, type PowerShellOperations } from "@earendil-works/pi-coding-agent";
 
-export const powerShellPrompt = `Write raw PowerShell; no Markdown escapes. Backslash does not escape PowerShell quotes. Use single-quoted literals: '"' for a double quote, 'it''s' for an apostrophe. Put complex scripts in files; pipe loops via & { ... }. Fix syntax errors before retrying; inspect runtime side effects before replaying. Discover executables; do not assume python3 exists on Windows.`;
+export const powerShellPrompt = `Raw PowerShell, no Markdown escapes. Backslash does not escape PowerShell quotes. Literals: '"' (quote), 'it''s' (apostrophe). Use script files; pipe loops via & { ... }. Fix syntax first; inspect side effects before retries. Discover executables; do not assume python3 exists on Windows.`;
 
 const quoteLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const syntaxExitCode = 65;
@@ -88,6 +88,6 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
 
 export function createCheckedPowerShellTool(workspace: string) {
   const tool = createPowerShellTool(workspace, { operations: createCheckedPowerShellOperations() });
-  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. A valid command runs unchanged once. Unhandled PowerShell errors or a nonzero last native exit fail the tool even if later output succeeds. Handle expected native exit codes explicitly (check the code, then exit 0); check each native result in multi-command scripts. " + powerShellPrompt;
+  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. Unhandled errors or a nonzero last native exit fail the tool. Check every native result; for expected nonzero codes, explicitly exit 0 after checking. " + powerShellPrompt;
   return tool;
 }
