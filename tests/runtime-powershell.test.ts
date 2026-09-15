@@ -128,6 +128,23 @@ $items | ConvertTo-Json -Compress`;
 });
 
 describe.runIf(process.platform === "win32")("PowerShell syntax regressions on Windows", () => {
+  it("retains an unhandled native failure after another native command succeeds", async () => {
+    const directory = await workspace(), tool = createCheckedPowerShellTool(directory);
+    const command = "Add-Content -LiteralPath 'once.txt' -Value 'once'; node -e 'process.exit(7)'; node -e 'process.exit(0)'; Write-Output 'NEXT_OK'";
+    await expect(tool.execute("earlier-native-failure", { command, timeout: 10 }))
+      .rejects.toThrow(/NEXT_OK[\s\S]*unhandled errors=1[\s\S]*last native exit code=0/);
+    expect((await readFile(join(directory, "once.txt"), "utf8")).trim()).toBe("once");
+  });
+
+  it("allows explicit expected native exits without leaking the preference into later calls", async () => {
+    const tool = createCheckedPowerShellTool(await workspace());
+    const result = await tool.execute("expected-exit", { command: "$PSNativeCommandUseErrorActionPreference = $false; node -e 'process.exit(7)'; $observedExit = $LASTEXITCODE; if ($observedExit -ne 7) { exit 1 }; node -e 'process.exit(0)'; Write-Output 'HANDLED'", timeout: 10 });
+    expect(result.content.filter(part => part.type === "text").map(part => part.text).join("")).toContain("HANDLED");
+    await expect(tool.execute("next-call", { command: "node -e 'process.exit(7)'; node -e 'process.exit(0)'", timeout: 10 })).rejects.toThrow("unhandled errors=1");
+    const caught = await tool.execute("caught-exit", { command: "$ErrorActionPreference = 'Stop'; try { node -e 'process.exit(7)' } catch { Write-Output 'CAUGHT' }; node -e 'process.exit(0)'", timeout: 10 });
+    expect(caught.content.filter(part => part.type === "text").map(part => part.text).join("")).toContain("CAUGHT");
+  });
+
   it.each([
     ["Write-Error 'runtime failure'", 1],
     ["Write-Error 'recoverable'; Write-Output 'continued'", 1],

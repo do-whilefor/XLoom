@@ -36,6 +36,9 @@ try {
 }
 }
 & {
+  # Scoped to this invocation. Native nonzero exits become error records even
+  # when a later program overwrites LASTEXITCODE (PowerShell 7.4+).
+  $PSNativeCommandUseErrorActionPreference = $true
   ${state} = @{ succeeded = $true; errors = 0; formatError = $false }
   . ([scriptblock]::Create([System.IO.File]::ReadAllText(${quoteLiteral(path)}) + "\`n" + '${state}.succeeded = $?')) 2>&1 | ForEach-Object {
     # Native stderr alone is not failure (successful programs also write it).
@@ -91,6 +94,6 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
 
 export function createCheckedPowerShellTool(workspace: string) {
   const tool = createPowerShellTool(workspace, { operations: createCheckedPowerShellOperations() });
-  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. Unhandled errors or a nonzero last native exit fail the tool. Check every native result; for expected nonzero codes, explicitly exit 0 after checking. " + powerShellPrompt;
+  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. Unhandled errors or a nonzero last native exit fail the tool; PowerShell 7.4+ also records earlier unhandled native exits. Check every native result; for expected nonzero codes, explicitly exit 0 after checking, or set $PSNativeCommandUseErrorActionPreference=$false and check each exit yourself. " + powerShellPrompt;
   return tool;
 }

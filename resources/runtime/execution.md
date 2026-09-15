@@ -18,6 +18,15 @@ PowerShell process. Invalid source has no command side effects. Valid source run
 once, with its original command-mode exit status, environment and working directory;
 parsing and execution share one timeout. Invoked scripts still have their own errors.
 
+On PowerShell 7.4+, native nonzero exits produce error records within this tool
+invocation, so a later successful program cannot hide an earlier unhandled failure.
+Successful stderr and caught/suppressed errors are not failures. Expected nonzero
+codes (for example a search with no matches) must be checked explicitly: exit 0
+after verifying the result, or set `$PSNativeCommandUseErrorActionPreference=$false`
+in that script and check each `$LASTEXITCODE` immediately. The preference is reset
+for each tool call and does not change the user's interactive shell. Older shells
+retain the last-native-exit check; use PowerShell 7.4+ for earlier-exit diagnostics.
+
 ## Automatic HTTP evidence
 
 Execute can call the existing `powershell` tool with `http` instead of `command`:
