@@ -263,7 +263,7 @@ export class PiRunner implements AgentRunner {
         const added = { input: consumed.input + consumed.cacheRead + consumed.cacheWrite, output: consumed.output, cost: consumed.cost.total };
         usage.input += added.input; usage.output += added.output; usage.cost += added.cost;
         emit({ type: "usage", mode: request.mode, text: "", usage: added });
-      }, request.id);
+      }, request.id, () => canRequest() && !finalRequest());
       agent = (this.options.createAgent ?? ((options) => new Agent(options)))({
         initialState: { systemPrompt: prompt.systemPrompt, model: selected.model, thinkingLevel: modelThinkingLevel(selected.model, config.thinking), messages: [], tools: budget.toolsAllowed ? scheduledTools(tools) : [] },
         streamFn: mainStream,

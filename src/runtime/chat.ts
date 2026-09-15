@@ -133,7 +133,7 @@ export class ChatSession {
         usage.output += summaryUsage.output;
         usage.cost += summaryUsage.cost;
         emit({ type: "usage", mode: "chat", text: "", usage: summaryUsage });
-      });
+      }, undefined, () => canRequest() && !finalRequest());
       const compactMessages = async (messages: AgentMessage[]) => {
         requireRequest();
         // Summary calls share the request counter, but cannot consume the one

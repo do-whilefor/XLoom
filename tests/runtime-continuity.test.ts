@@ -212,6 +212,33 @@ describe("summary provider calls", () => {
     await expect(summarize(history(), model)).rejects.toThrow("empty");
     expect(counted).toHaveBeenCalledExactlyOnceWith(usage);
   });
+
+  it("retries a temporary summary failure once using the same transcript and counts both attempts", async () => {
+    let calls = 0; const contexts: unknown[] = [], counted = vi.fn();
+    const transient = { ...assistant([], "error"), errorMessage: "503 temporarily unavailable" };
+    const summarize = createContextSummarizer((model, context, options) => {
+      contexts.push(context);
+      return stream(++calls === 1 ? transient : assistant([{ type: "text", text: "Retained original observations" }]))(model, context, options);
+    }, counted);
+    const result = await summarize(history(), model);
+    expect(result).toMatchObject({ text: "Retained original observations", usage: { input: 60, output: 20, cost: { total: 0.04 } } });
+    expect(contexts[0]).toEqual(contexts[1]); expect(counted).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["401 Unauthorized", "context window exceeded", "Unknown provider failure"])("retains deterministic summary diagnostics without retry: %s", async errorMessage => {
+    const counted = vi.fn();
+    const summarize = createContextSummarizer(stream({ ...assistant([], "error"), errorMessage }), counted);
+    await expect(summarize(history(), model)).rejects.toThrow(errorMessage);
+    expect(counted).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["reserved-request", "cancelled", "repeat-failure"])("stops summary retry at %s without losing usage", async reason => {
+    const abort = new AbortController(), counted = vi.fn(() => { if (reason === "cancelled") abort.abort(new Error("Cancelled summary")); });
+    const summarize = createContextSummarizer(stream({ ...assistant([], "error"), errorMessage: "503 temporary" }), counted,
+      undefined, () => reason !== "reserved-request");
+    await expect(summarize(history(), model, abort.signal)).rejects.toThrow(reason === "cancelled" ? "Cancelled summary" : "503 temporary");
+    expect(counted).toHaveBeenCalledTimes(reason === "repeat-failure" ? 2 : 1);
+  });
 });
 
 describe("private checkpoint continuity", () => {
