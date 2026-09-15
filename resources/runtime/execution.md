@@ -32,7 +32,10 @@ timing and completion state. Returned `evidence` objects are ready for an Execut
 submission; use their `ref` in facts. They are observations, not automatically
 committed facts or verified findings. Original binary bodies are stored as base64.
 The tool returns a 2000-byte body preview, SHA-256 and artifact path; request
-`previewBytes` from 0 to 8000, or read the full artifact when needed.
+`previewBytes` from 0 to 8000, or read the full artifact when needed. Text previews
+end at a complete UTF-8 character and have `bodyEncoding: "utf8"`. Binary previews
+use `bodyEncoding: "base64"`; the byte budget applies before base64 encoding.
+`bodyBytes` and `truncated` describe the original body, whose archive is unchanged.
 
 There is no redirect following, cookie jar or retry. Supply identities explicitly.
 HTTP errors such as 403 are complete responses. Transport errors, timeouts and

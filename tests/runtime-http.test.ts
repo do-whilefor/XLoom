@@ -40,7 +40,7 @@ async function fixture() {
     if (request.url === "/large") { response.end(Buffer.alloc(16 * 1024 * 1024 + 1, 65)); return; }
     response.writeHead(request.url === "/redirect" ? 302 : request.url === "/denied" ? 403 : 200,
       { "Set-Cookie": "identity=other", ...(request.url === "/redirect" ? { Location: "/must-not-follow" } : {}) });
-    response.end(request.url === "/text" ? "fixture-你好" : Buffer.from([0, 255, 65]));
+    response.end(request.url === "/text" ? "fixture-你好" : request.url === "/unicode" ? "é中文😀" : Buffer.from([0, 255, 65]));
     completed.push(request.url!);
   });
   servers.push(server); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -53,6 +53,34 @@ async function fixture() {
 }
 
 describe("automatic HTTP evidence", () => {
+  it.each(Array.from({ length: 13 }, (_, size) => size))("preserves UTF-8 preview characters within a %i-byte budget", async previewBytes => {
+    const f = await fixture(), source = "é中文😀";
+    const { results: [result] } = await f.call({ http: { requests: [{ url: `${f.url}/unicode` }], previewBytes } });
+    let expected = "";
+    for (const character of source) {
+      if (Buffer.byteLength(expected + character) > previewBytes) break;
+      expected += character;
+    }
+    expect(result).toMatchObject({ body: expected, bodyEncoding: "utf8", bodyBytes: Buffer.byteLength(source), truncated: previewBytes < Buffer.byteLength(source) });
+    const observation = JSON.parse(await readFile(result.evidence.path, "utf8"));
+    expect(observation.response.body).toBe(source);
+    expect(Buffer.from(observation.response.bodyBase64, "base64")).toEqual(Buffer.from(source));
+  });
+
+  it("labels binary previews as base64 without changing their bytes or archives", async () => {
+    const f = await fixture(), source = Buffer.from([0, 255, 65]);
+    for (const previewBytes of [0, 1, 2, 3]) {
+      const { results: [result] } = await f.call({ http: { requests: [{ url: f.url }], previewBytes } });
+      expect(result.bodyEncoding).toBe("base64");
+      expect(Buffer.from(result.body, result.bodyEncoding)).toEqual(source.subarray(0, previewBytes));
+      expect(result.bodyBytes).toBe(source.length);
+      expect(result.truncated).toBe(previewBytes < source.length);
+      const observation = JSON.parse(await readFile(result.evidence.path, "utf8"));
+      expect(observation.response.body).toBeUndefined();
+      expect(Buffer.from(observation.response.bodyBase64, "base64")).toEqual(source);
+    }
+  });
+
   it.each([
     ["HTTPS", "https", "HtTpS"],
     ["HtTpS", "HTTPS", "https"],

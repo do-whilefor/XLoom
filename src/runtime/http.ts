@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isUtf8 } from "node:buffer";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { z } from "zod";
 
@@ -68,6 +69,14 @@ class HttpConnections {
 
 export function disposeHttpTool(tool: AgentTool): void {
   (tool as AgentTool & { [closeHttp]?: () => void })[closeHttp]?.();
+}
+
+function bodyPreview(body: Buffer, limit: number) {
+  const prefix = body.subarray(0, limit);
+  // Do not flush an incomplete trailing code point into a replacement character.
+  return isUtf8(body)
+    ? { body: new StringDecoder("utf8").write(prefix), bodyEncoding: "utf8" }
+    : { body: prefix.toString("base64"), bodyEncoding: "base64" };
 }
 
 interface Observation {
@@ -135,7 +144,7 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
   const connections = new HttpConnections();
   const enhanced: AgentTool = {
     ...tool,
-    description: `${tool.description} For HTTP use http:{requests:[{url,method?,headers?,body?,bodyBase64?,timeoutSeconds?}],previewBytes?,independent?,concurrency?} instead of command. Batch known requests in one call; default sequential, independent=true allows up to 4 concurrent body-free GET/HEAD requests. Exact requests/responses are saved automatically; submit returned evidence refs/paths unchanged. No redirects, cookie sharing or retries. Body previews default to 2000 bytes; read evidence for full data.`,
+    description: `${tool.description} For HTTP use http:{requests:[{url,method?,headers?,body?,bodyBase64?,timeoutSeconds?}],previewBytes?,independent?,concurrency?} instead of command. Batch known requests in one call; default sequential, independent=true allows up to 4 concurrent body-free GET/HEAD requests. Exact requests/responses are saved automatically; submit returned evidence refs/paths unchanged. No redirects, cookie sharing or retries. Body previews default to 2000 bytes; bodyEncoding is utf8 or base64 for binary data. Read evidence for full data.`,
     parameters: { type: "object", properties: {
       ...(tool.parameters as unknown as { properties: Record<string, unknown> }).properties,
       http: { type: "object", properties: {
@@ -173,7 +182,7 @@ export function withHttpEvidence(tool: AgentTool, artifactsDirectory: string): A
         catch { throw new Error(`HTTP observation could not be saved after request ${index + 1}; side effects may have occurred. No retry was made.`); }
         const body = Buffer.from(observation.response?.bodyBase64 ?? "", "base64");
         const result = { index, complete: observation.complete, status: observation.response?.status, headers: observation.response?.headers,
-          durationMs: observation.durationMs, body: body.subarray(0, input.http.previewBytes).toString("utf8"), bodyBytes: body.length,
+          durationMs: observation.durationMs, ...bodyPreview(body, input.http.previewBytes), bodyBytes: body.length,
           truncated: body.length > input.http.previewBytes, error: observation.error,
           evidence: { ref, path, description: `${request.method.toUpperCase()} ${request.url}: ${observation.complete ? observation.response?.status : "incomplete transport observation"}` },
           sha256: createHash("sha256").update(data).digest("hex"), bytes: data.length };
