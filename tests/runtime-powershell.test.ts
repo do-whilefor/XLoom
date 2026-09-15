@@ -114,6 +114,7 @@ $items | ConvertTo-Json -Compress`;
     expect(tool.description).toContain("pipe loops via & { ... }");
     expect(tool.description).toContain("only supplied command text, not -File or dot-sourced scripts");
     expect(tool.description).toContain("Check every native result");
+    expect(tool.description).toContain("earlier exits on PowerShell 7.4+");
     expect(tool.description).toContain("explicitly exit 0 after checking");
     for (const prompt of [decidePrompt, executePrompt, metacogPrompt]) expect(prompt).not.toContain(powerShellPrompt);
   });

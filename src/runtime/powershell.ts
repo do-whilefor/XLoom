@@ -94,6 +94,6 @@ export function createCheckedPowerShellOperations(operations: PowerShellOperatio
 
 export function createCheckedPowerShellTool(workspace: string) {
   const tool = createPowerShellTool(workspace, { operations: createCheckedPowerShellOperations() });
-  tool.description += " Syntax preflight covers only supplied command text, not -File or dot-sourced scripts. Unhandled errors or a nonzero last native exit fail the tool; PowerShell 7.4+ also records earlier unhandled native exits. Check every native result; for expected nonzero codes, explicitly exit 0 after checking, or set $PSNativeCommandUseErrorActionPreference=$false and check each exit yourself. " + powerShellPrompt;
+  tool.description += " Preflight checks only supplied command text, not -File or dot-sourced scripts. Unhandled errors/native exits fail (earlier exits on PowerShell 7.4+). Check every native result; for expected nonzero codes, explicitly exit 0 after checking. " + powerShellPrompt;
   return tool;
 }
