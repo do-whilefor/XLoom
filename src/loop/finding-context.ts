@@ -14,6 +14,7 @@ interface Relation {
 }
 interface FindingView {
   findingId: string;
+  reviewEvidence?: { attachedIds: string[]; recordedPocId?: string };
   cvssIssues?: string[];
   related: Relation[];
   revisions: { previous: string; replacement: string }[];
@@ -76,6 +77,10 @@ export function projectFindingContext(board: BoardSnapshot, context: BlackboardC
 
   const items = context.findings.map(finding => {
     const view: FindingView = { findingId: finding.id, related: [], revisions: [], conditions: [], attempts: [], issues: [], unrecorded: [] };
+    if (context.projection.mode !== "execute") view.reviewEvidence = {
+      attachedIds: unique(finding.evidenceIds).filter(id => evidence.has(id)),
+      ...(finding.pocEvidenceId && finding.evidenceIds.includes(finding.pocEvidenceId) && evidence.has(finding.pocEvidenceId) ? { recordedPocId: finding.pocEvidenceId } : {}),
+    };
     if (finding.cvss) view.cvssIssues = cvssIssues(board, finding);
     const issue = (kind: FindingView["issues"][number]["kind"], id: string) => {
       if (!view.issues.some(item => item.kind === kind && item.id === id)) view.issues.push({ kind, id });

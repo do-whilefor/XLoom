@@ -106,6 +106,19 @@ afterEach(async () => {
 });
 
 describe("LoopController synthetic protocol flow", () => {
+  it("hands the next planner only changed committed IDs and does not carry that delta into later runs", async () => {
+    const test = setup(request => request.mode === "execute" ? result(fixtureExecution(request))
+      : result(request.snapshot.completedSteps ? closure(request) : plan()));
+    await test.controller.start();
+    const [planning, execution, review, completion] = test.requests;
+    expect(planning.handoff).toBeUndefined(); expect(execution.handoff).toBeUndefined();
+    expect(review.handoff).toEqual({ sourceStepId: execution.step!.id,
+      factIds: review.snapshot.facts.map(item => item.id), evidenceIds: review.snapshot.evidence.map(item => item.id),
+      findingIds: review.snapshot.findings.map(item => item.id) });
+    expect(completion.handoff).toBeUndefined();
+    expect(JSON.stringify(review.handoff)).not.toMatch(/description|summary|messages|runDir|models/);
+  });
+
   it("emits summaries only after commit and does not label a deferred completion proposal as a final outcome", async () => {
     const test = setup(request => request.mode === "execute" ? result(fixtureExecution(request))
       : result(request.snapshot.completedSteps ? closure(request) : plan()));

@@ -112,6 +112,8 @@ export interface Execution {
 }
 export interface ExecutionRefs { facts: Record<string, string>; evidence: Record<string, string> }
 export interface RunRequest {
+  /** Changed committed records from the immediately preceding Execute invocation. */
+  handoff?: { sourceStepId: string; factIds: string[]; evidenceIds: string[]; findingIds: string[] };
   id: string; mode: Mode; snapshot: BoardSnapshot; workspace: string; runDir: string; step?: Step;
   /** Public, task-local view assembled by the outer loop; never another Agent's chat. */
   context?: BlackboardContext;

@@ -50,6 +50,9 @@ export function buildRunPrompt(request: RunRequest): { systemPrompt: string; use
       blackboard: context,
       blackboardFile: request.blackboardPath,
       trigger: request.trigger,
+      handoff: request.mode === "execute" ? undefined : request.handoff,
+      reviewFocus: request.mode !== "execute" && (request.handoff || context.findings.length)
+        ? "Start with handoff's changed committed records, then check the whole Goal and unresolved branches. reviewEvidence.attachedIds belong to that Finding only; related candidates are not attached. A recordedPocId still needs independent inspection. Submit concise changes and one outcome summary; do not repeat full artifacts or unchanged history. After rejected submit, repair erroneous fields instead of rewriting the proposal." : undefined,
       assignedStep: request.mode === "execute" && request.step ? projectStep(request.step) : undefined,
       workspace: request.workspace,
       artifacts: request.mode === "execute" ? join(request.runDir, "artifacts") : undefined,

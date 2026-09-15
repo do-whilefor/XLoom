@@ -53,6 +53,19 @@ function promptFixture(mode: RunRequest["mode"], checkpoints = false): RunReques
 }
 
 describe("compact built-in prompts", () => {
+  it("focuses planning on committed deltas without sharing them with Execute or bypassing review", () => {
+    const handoff = { sourceStepId: "S1", factIds: ["F1"], evidenceIds: ["E1"], findingIds: ["V1"] };
+    for (const mode of ["decide", "metacog", "execute"] as const) {
+      const prompt = buildRunPrompt({ ...promptFixture(mode), handoff });
+      const payload = JSON.parse(prompt.userPrompt.split("\n").at(-1)!);
+      expect(payload.handoff).toEqual(mode === "execute" ? undefined : handoff);
+      if (mode !== "execute") {
+        expect(prompt.userPrompt).toContain("then check the whole Goal and unresolved branches");
+        expect(prompt.userPrompt).toContain("recordedPocId still needs independent inspection");
+      }
+    }
+  });
+
   it("adds observation comparison through the existing read tool without growing role instructions", () => {
     const workspace = process.cwd(), dataDir = join(workspace, "synthetic-prompt-task");
     for (const mode of ["decide", "execute", "metacog"] as const) {

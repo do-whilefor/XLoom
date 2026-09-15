@@ -36,6 +36,17 @@ function request(mode: RunRequest["mode"] = "execute"): RunRequest {
 const view = (input: RunRequest) => projectContext(input).findingContext!;
 
 describe("Finding evidence navigation", () => {
+  it("gives reviewers exact attached PoC choices, keeping related and missing evidence out", () => {
+    const input = request("metacog");
+    input.snapshot.findings[0].pocEvidenceId = "E0";
+    const original = structuredClone(input.snapshot);
+    expect(view(input).items.find(item => item.findingId === "V0")!.reviewEvidence).toEqual({ attachedIds: ["E0", "E1"], recordedPocId: "E0" });
+    expect(input.snapshot).toEqual(original);
+    input.snapshot.evidence = input.snapshot.evidence.filter(item => item.id !== "E0");
+    expect(view(input).items.find(item => item.findingId === "V0")!.reviewEvidence).toEqual({ attachedIds: ["E1"] });
+    expect(view({ ...input, mode: "execute" }).items[0].reviewEvidence).toBeUndefined();
+  });
+
   it("separates linked support from one-hop candidates and supplies original artifact locators", () => {
     const input = request();
     const original = structuredClone(input.snapshot);

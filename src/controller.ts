@@ -6,6 +6,7 @@ import { decisionSchema, usageSchema } from "./schema.js";
 import { pendingStepReviews, projectContext, type ContextProjector } from "./loop/context.js";
 import { defaultLoopPolicy, type LoopPolicy } from "./loop/policy.js";
 import { normalizeDecisionInput } from "./loop/decision-input.js";
+import { executionHandoff } from "./loop/handoff.js";
 import { planningMaterials } from "./wiki/materials.js";
 import { observationReviewTrigger } from "./observations/changes.js";
 import type { AgentRunner, BoardSnapshot, LoopEvent, Mode, OuterLoopTrigger, RunRequest, RunResult, Step, Usage } from "./types.js";
@@ -73,6 +74,7 @@ export class LoopController {
   }
 
   private async loop(): Promise<void> {
+    let handoff: RunRequest["handoff"];
     let mode: Mode = this.manualMeta ? "metacog" : "decide";
     let trigger: OuterLoopTrigger = this.manualMeta ? { kind: "manual", reason: "User requested a fresh metacognitive review." }
       : this.snapshot().steps.length ? { kind: "resume", reason: "Resume from saved facts and inspect interrupted work; do not replay Steps blindly." }
@@ -112,6 +114,7 @@ export class LoopController {
       let lastCheckpointSummary: string | undefined;
       try {
         const request: RunRequest = { id: runId, mode, snapshot, workspace: this.store.workspace, runDir, step: claimedStep, trigger, blackboardPath: this.store.projectionPath,
+          ...(mode !== "execute" && handoff ? { handoff } : {}),
           wikiProjectionError: this.store.wikiProjectionError ?? undefined,
           signal: cancellation.signal, onEvent: runtime => this.emit({ type: "runtime", runtime }) };
         if (mode === "execute") request.onCheckpoint = (checkpointId, output, cumulativeUsage, refs) => {
@@ -197,6 +200,7 @@ export class LoopController {
       } finally { if (timeout !== undefined) clearTimeout(timeout); this.cancellation = undefined; }
 
       const current = this.snapshot();
+      handoff = mode === "execute" ? executionHandoff(snapshot, current, step!.id) : undefined;
       if (current.status !== "running" || current.outcome) return;
       if (hintsChanged) { mode = "metacog"; trigger = { kind: "hint", reason: "A new Hint arrived; reassess the plan and Goal against the latest blackboard." }; continue; }
       if (needsCompletionReview) { mode = "metacog"; trigger = { kind: "completion", reason: "Independently check the whole Goal, evidence, pending work and blind spots before accepting completion." }; continue; }

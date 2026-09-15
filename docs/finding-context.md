@@ -13,6 +13,7 @@ Agent、工具或 hook。普通聊天不加载该视图。
 | 字段 | 来源及含义 |
 | --- | --- |
 | items[].findingId | 当前视图对应的 Finding |
+| reviewEvidence | Decide / 元认知专用：当前 Finding 已关联且存在的证据 ID，以及合法的已记录 PoC ID；候选证据不在此列表，仍须独立检查其支持关系 |
 | related | 共享已关联 Fact / Evidence 的其他 Finding、来源 Step 的其他产物，以及明确引用已关联 Fact 的 Step 产物 |
 | related[].via | 建立候选关系的一条明确引用；不是语义匹配或证明 |
 | candidateFactIds / candidateEvidenceIds | 尚未关联到当前 Finding 的候选材料 |
@@ -59,3 +60,16 @@ Finding 状态、PoC、事实、用量进度或 Goal 完成状态。
 测试覆盖引用关系、角色隔离、替代环、不同条件下的尝试、省略提示、原件定位、
 SQLite 重开，以及真实 Pi read 工具读取候选的流程。它们不证明真实模型的引用
 错误率、检索质量或 token 消耗一定下降。
+
+## 聚焦交接与局部修复
+
+Execute 提交后，下一个规划调用收到 `handoff`：来源 Step，以及这次执行新增或
+改变的 Fact、Evidence、Finding ID。它只导航到已提交状态，不携带执行历史、
+聊天或模型生成的二次摘要；后续调用与重启不继承过期差量。复核先查看这些变化，
+仍必须覆盖整个目标、未解决分支及原始证据。
+
+`submit` 校验失败后，在当前 run 内保留被拒绝的提案。可调用
+`submit(repair:[{path:"/reviews/0/pocEvidenceId",value:"正确且支持该结论的已关联ID"}])`
+仅修正错误字段，也可重新提交完整 `output`。两者不能同时使用。路径遵循 JSON
+Pointer，可设置对象字段或已有数组项，不能改原型或越界扩展数组。修复后仍重新
+校验整个提案；失败不提交，不自动猜测 ID，不跨 run 保留提案。
