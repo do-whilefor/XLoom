@@ -106,6 +106,32 @@ afterEach(async () => {
 });
 
 describe("LoopController synthetic protocol flow", () => {
+  it("finishes through fresh review after abandoning an unnecessary child and its ready Step", async () => {
+    const test = setup(request => {
+      if (request.mode === "execute") return result(fixtureExecution(request));
+      if (!request.snapshot.completedSteps) return result({ ...plan(),
+        goals: [{ id: "G-extra", parentId: "G0", description: "Optional second route to the same fixture result" }],
+        steps: [...plan().steps!, { ...plan().steps![0], goalId: "G-extra", priority: 1 }],
+      });
+      const extra = request.snapshot.steps.find(step => step.goalId === "G-extra")!;
+      const complete = closure(request);
+      return result({ ...complete,
+        updateSteps: extra.status === "ready" ? [{ id: extra.id, action: "abandon", reason: "Existing original evidence already meets the user's whole goal" }] : [],
+        updateGoals: [...(request.snapshot.goals.find(goal => goal.id === "G-extra")!.status === "active"
+          ? [{ id: "G-extra", status: "abandoned" as const, factIds: [], reason: "An optional plan adds no user requirement" }] : []), ...complete.updateGoals!],
+      });
+    });
+    await test.controller.start();
+    const board = test.controller.snapshot();
+    expect(board.status).toBe("completed");
+    expect(board.goals.find(goal => goal.id === "G0")!.status).toBe("satisfied");
+    expect(board.goals.find(goal => goal.id === "G-extra")!.status).toBe("abandoned");
+    expect(board.steps.find(step => step.goalId === "G-extra")!.status).toBe("abandoned");
+    expect(test.requests.filter(request => request.mode === "execute")).toHaveLength(1);
+    expect(test.requests.at(-1)!.mode).toBe("metacog");
+    expect(board.facts).toHaveLength(1); expect(board.evidence).toHaveLength(1);
+  });
+
   it("hands the next planner only changed committed IDs and does not carry that delta into later runs", async () => {
     const test = setup(request => request.mode === "execute" ? result(fixtureExecution(request))
       : result(request.snapshot.completedSteps ? closure(request) : plan()));

@@ -302,7 +302,7 @@ describe("Pi runtime isolation", () => {
     expect(prompt.userPrompt).not.toContain("SECRET_PRIOR_CHAT");
     expect(prompt.userPrompt).not.toContain("DO_NOT_EXPOSE_ENV_NAME");
     expect(prompt.userPrompt).toContain("original result");
-    expect(prompt.userPrompt).toContain("Resolve pending Steps");
+    expect(prompt.userPrompt).toContain("Abandon redundant Steps/children");
     expect(prompt.userPrompt).toContain("Narratives, files or hashes alone prove nothing");
     expect(prompt.userPrompt).toContain("Priority is an integer 0–1000");
     expect(prompt.userPrompt).toContain("Never abandon the root Goal");
