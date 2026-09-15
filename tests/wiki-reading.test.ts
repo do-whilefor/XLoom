@@ -28,6 +28,26 @@ const search = "xloom://search?mode=wiki&query=BridgeAlias&budgetChars=64000";
 const flow = recordReadPath({ kind: "block", pageId: "WK-flow", id: "B-judgment" }) + "&budgetChars=64000";
 
 describe("verified original reading and same-role overlap", () => {
+  it("diagnoses unsupported page records and directs callers to a valid block's page metadata", () => {
+    const f = setup();
+    expect(() => f.read("xloom://record?kind=page&id=WK-flow")).toThrow("kind=block&page=<page ID>&id=<block ID>");
+    expect(() => f.read("xloom://record?kind=block&id=B-judgment")).toThrow("requires page=");
+    expect(f.read(flow).records.find((record: any) => record.ref.kind === "block" && record.ref.id === "B-judgment").retrievalMetadata.page.aliases).toContain("BridgeAlias");
+  });
+
+  it("reports valid paging recovery and does not count a last window as full delivery", () => {
+    const f = setup(), original = f.board.evidence[0]!;
+    const body = "a".repeat(10000);
+    writeFileSync(join(f.store.dataDir, original.path), body);
+    original.bytes = body.length; original.sha256 = createHash("sha256").update(body).digest("hex");
+    const path = originalReadPath({ evidenceId: original.id, sha256: original.sha256, byteOffset: 0 });
+    expect(() => f.read(path + "&byteLength=40960")).toThrow("File has 10000 bytes");
+    expect(() => f.read(path + "&byteLength=40960")).toThrow("Omit byteLength");
+    const tail = f.read(originalReadPath({ evidenceId: original.id, sha256: original.sha256, byteOffset: 9000 }));
+    expect(tail.nextReadPath).toBeUndefined();
+    expect(tail.notice).toContain("Reaching the last window alone leaves earlier gaps unread");
+    expect(tail.reading).toMatchObject({ fullyDeliveredOriginals: 0, originalsWithUnreadBytes: 1, nextOriginalReadPath: path });
+  });
   it("links Wiki source metadata directly to complete short originals without guessed lengths", () => {
     const f = setup(), result = f.read(search), before = structuredClone(f.board);
     const evidence = result.wiki.records.filter((doc: any) => doc.ref.kind === "evidence");

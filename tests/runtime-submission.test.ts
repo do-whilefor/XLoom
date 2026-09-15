@@ -5,6 +5,18 @@ import { submissionTool } from "../src/runtime/submission.js";
 import { decisionSchema } from "../src/schema.js";
 
 describe("private proposal repair", () => {
+  it("describes the envelope while keeping null optional fields strictly repairable", async () => {
+    const submit = submissionTool("decide", value => decisionSchema.parse(value));
+    expect(submit.tool.description).toContain('{"output":{...task result...}}');
+    expect(submit.tool.description).toContain("do not send null");
+    expect(() => validateToolArguments(submit.tool, { type: "toolCall", id: "bad-envelope", name: "submit", arguments: { summary: "Wrong envelope" } })).toThrow();
+    const original = { output: { summary: "Valid summary", conclusion: null } };
+    const args = validateToolArguments(submit.tool, { type: "toolCall", id: "null", name: "submit", arguments: original });
+    expect(args).toEqual(original);
+    await expect(submit.tool.execute("null", args)).rejects.toThrow("Rejected proposal retained");
+    await submit.tool.execute("repair", { repair: [{ path: "/conclusion", remove: true }] });
+    expect(submit.output).toEqual({ summary: "Valid summary" });
+  });
   it.each(["decide", "metacog"] as const)("exposes the authoritative Step requirements without intercepting private %s repair", async mode => {
     const submit = submissionTool(mode, value => decisionSchema.parse(value));
     const wire = submit.tool.parameters as any;

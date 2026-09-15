@@ -55,11 +55,11 @@ export function submissionTool(mode: Mode, validate: (output: unknown) => unknow
   let rejected: Record<string, unknown> | undefined;
   const tool: AgentTool = {
     name: "submit", label: "Submit result", executionMode: "sequential",
-    description: "Submit output using the task contract after tools/evidence finish. Validation errors commit nothing and retain the rejected proposal privately in this run. Fix only erroneous fields with repair:[{path:'/reviews/0/pocEvidenceId',value:'exact attached ID'}], or resubmit output; choose one. Repairs use JSON Pointer: value sets object fields or existing array entries; remove:true deletes an existing field or array entry (later indices shift). Choose value or remove per repair. The whole proposal is revalidated. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.",
+    description: 'Submit {"output":{...task result...}} after tools finish; summary/result belong inside output. Omit unused optional fields (including conclusion); do not send null. Errors commit nothing and retain the rejected proposal privately. Resubmit output or use {"repair":[{"path":"/field","value":"corrected"}]}; choose one. JSON Pointer repairs: value sets fields/existing array entries; remove:true deletes an existing field/entry (later indices shift). Choose value or remove per repair. The whole proposal is revalidated. Acceptance ends this run; controller commit/review follows. Do not repeat checkpoint records.',
     // Annotate the Step contract without moving its validation into Pi: an
     // early rejection would bypass the private proposal retained for repair.
     // Avoid nested type coercion; the shared validator owns the original values.
-    parameters: { type: "object", properties: { output: { type: "object", properties: {
+    parameters: { type: "object", properties: { output: { type: "object", description: "Required result envelope for a new proposal; omit only when sending repair. Omit unused optional fields, never null.", properties: {
       summary: { type: "string" }, ...(mode === "execute" ? { result: { type: "string", enum: ["done", "no_progress", "blocked"] } } : { steps: stepContract }),
     }, required: ["summary", ...(mode === "execute" ? ["result"] : [])], additionalProperties: true },
     repair: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: { path: { type: "string" }, value: {}, remove: { type: "boolean", const: true } }, required: ["path"], oneOf: [{ required: ["value"] }, { required: ["remove"] }], additionalProperties: false } },

@@ -40,6 +40,12 @@ afterEach(() => {
 });
 
 describe("local organization, integrity audit and script entry", () => {
+  it.each([["--help"], ["-h"], ["search", "--help"]])("shows help without task/workspace or opening a database (%j)", (...argv) => {
+    const database = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const help = runLocal(argv);
+    expect(help).toMatchObject({ exitCode: 0, output: { type: "help", actions: { search: expect.any(String), "read-original": expect.stringContaining("automatic paging") } } });
+    expect(database).not.toHaveBeenCalled();
+  });
   it("publishes hash-listed organization and retrieval projections on ordinary commits", () => {
     const { store } = open(); const manifest = JSON.parse(readFileSync(join(store.dataDir, "wiki/manifest.json"), "utf8"));
     for (const name of ["search-index.json", "organization.json"]) {

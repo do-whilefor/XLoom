@@ -220,7 +220,7 @@ export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: s
   const { byteOffset } = request;
   const byteLength = request.byteLength ?? Math.min(4096, evidence.bytes - byteOffset);
   if (!Number.isSafeInteger(byteOffset) || byteOffset < 0 || !Number.isSafeInteger(byteLength) || byteLength < 1 || byteLength > 8192 || byteOffset + byteLength > evidence.bytes)
-    throw new Error("Original locator must be within the registered file, with byteLength 1–8192");
+    throw new Error(`Original locator must be within the registered file, with byteLength 1–8192. File has ${evidence.bytes} bytes; byteOffset is zero-based and offset + length must not exceed file size. Omit byteLength for automatic UTF-8 paging and copy returned nextReadPath. Restart path: ${originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: 0 })}`);
   const contextBytes = request.contextBytes ?? 0;
   if (!Number.isSafeInteger(contextBytes) || contextBytes < 0 || contextBytes > 2048)
     throw new Error("contextBytes must be an integer from 0 to 2048 per side");
@@ -267,5 +267,5 @@ export function readOriginal(board: BoardSnapshot, dataDir: string, workspace: s
     ...(end < evidence.bytes ? { nextReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: end }) } : {}),
     ...(deliveredOffset ? { startReadPath: originalReadPath({ evidenceId: evidence.id, sha256: evidence.sha256, byteOffset: 0 }) } : {}),
     sourceContextReadPath: `xloom://record?${new URLSearchParams({ kind: "evidence", id: evidence.id })}`,
-    notice: "Verified archive bytes, not a Wiki page or a new observation. Context expansion is bounded and may omit distant conditions. Follow nextReadPath/startReadPath for omitted context; preserve source conditions and corrections from the delivered source package. Delivery does not mean reviewed or true." };
+    notice: "Verified archive bytes, not a new observation. Follow nextReadPath for sequential pages; for full native delivery follow reading.nextOriginalReadPath until reading.originalsWithUnreadBytes is 0. Reaching the last window alone leaves earlier gaps unread; hashes and shell summaries do not fill native delivery receipts. Preserve source conditions/corrections. Delivery does not mean reviewed or true." };
 }

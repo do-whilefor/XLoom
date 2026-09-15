@@ -14,11 +14,26 @@ import { readOriginal, searchOriginals } from "./originals.js";
 /** The existing powershell tool can launch this local module. No Agent or tool registration. */
 export function runLocal(argv: string[]): { output: object; exitCode: number } {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
+    help: { type: "boolean", short: "h" },
     task: { type: "string" }, workspace: { type: "string" }, query: { type: "string" },
     limit: { type: "string" }, "budget-chars": { type: "string" }, kind: { type: "string" }, id: { type: "string" }, page: { type: "string" },
     step: { type: "string" }, gap: { type: "string" }, evidence: { type: "string" }, sha256: { type: "string" },
     "byte-offset": { type: "string" }, "byte-length": { type: "string" }, "context-bytes": { type: "string" }, refresh: { type: "boolean" },
   } });
+  if (values.help) return { exitCode: 0, output: {
+    type: "help", usage: "node dist/wiki/local.js <action> --task <absolute task directory> --workspace <absolute workspace> [options]",
+    actions: {
+      search: "Wiki retrieval: --query <text> --limit <positive integer> --budget-chars <positive integer>; exact anchor: --kind <goal|step|fact|finding|evidence|attempt|capability|chain|block> --id <ID> [--page <page ID> for block]. Optional --refresh.",
+      organize: "List Wiki organization and source relationships.",
+      audit: "Check generated Wiki and original archive integrity.",
+      discover: "List knowledge consumers and candidate prerequisites.",
+      gaps: "List unresolved knowledge gaps.",
+      question: "--step <Step ID> --gap <gap ID> [--query <text>] [--limit <integer>] [--budget-chars <integer>] [--refresh].",
+      "search-originals": "--query <text> [--limit <integer>] [--refresh]. Returns original-byte locators.",
+      "read-original": "--evidence <Evidence ID> --sha256 <registered hash> [--byte-offset <zero-based offset>] [--byte-length <1–8192>] [--context-bytes <0–2048>]. Omit byte-length for automatic paging.",
+    },
+    notice: "Read-only task operations. --help/-h requires no task, workspace or database. Prefer returned read paths over guessed IDs/ranges. Output is JSON; exit 0=success, 1=invalid invocation/failure, 2=unavailable/integrity issue.",
+  } };
   const action = positionals[0];
   if (positionals.length !== 1 || !["search", "organize", "audit", "discover", "gaps", "question", "search-originals", "read-original"].includes(action ?? "")) throw new Error("Use search|organize|audit|discover|gaps|question|search-originals|read-original --task <absolute task directory> --workspace <absolute workspace>.");
   if (!values.task || !values.workspace || !isAbsolute(values.task) || !isAbsolute(values.workspace)) throw new Error("task and workspace must be absolute directories.");

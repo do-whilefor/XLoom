@@ -60,7 +60,10 @@ export function createTaskReader(workspace: string, context: TaskReadContext) {
     }
     if (url.hostname === "record") {
       const kind = required("kind"), id = required("id"), pageId = p.get("page") ?? undefined;
-      if (!["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain", "block"].includes(kind) || (kind === "block") !== Boolean(pageId)) throw new Error("Invalid exact record reference");
+      if (!["goal", "step", "fact", "finding", "evidence", "attempt", "capability", "chain", "block"].includes(kind)) {
+        throw new Error("Invalid exact record kind. Supported: goal, step, fact, finding, evidence, attempt, capability, chain, block. For Wiki page metadata/aliases use kind=block&page=<page ID>&id=<block ID>; discover block IDs with xloom://search?mode=wiki&query=<title-or-alias>.");
+      }
+      if ((kind === "block") !== Boolean(pageId)) throw new Error("Invalid exact record reference: kind=block requires page=<Wiki page ID> and id=<block ID>; other kinds must omit page.");
       const ref = { kind: kind as RetrievalRef["kind"], id, ...(pageId ? { pageId } : {}) };
       const anchors: RetrievalRef[] = [ref, ...(kind === "evidence" ? board.facts.filter(fact => fact.evidenceIds.includes(id)).map(fact => ({ kind: "fact" as const, id: fact.id })) : [])];
       const budgetChars = number("budgetChars") ?? 16000;
